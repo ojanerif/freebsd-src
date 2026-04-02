@@ -164,6 +164,8 @@
 #define IBS_MAXCNT_MASK			0x000000000000FFFFULL
 #define IBS_FETCH_ENABLE_BIT		(1ULL << 2)	/* IBS_FETCH_EN */
 #define IBS_OP_ENABLE_BIT		(1ULL << 17)	/* IBS_OP_EN */
+#define IBS_FETCH_CTL_ENABLE		(1ULL << 48)	/* IBS_FETCH_EN */
+#define IBS_OP_CTL_ENABLE		(1ULL << 17)	/* IBS_OP_EN */
 #define IBS_FETCH_CNT			0x00000000ffff0000ULL	/* Current count field */
 #define IBS_OP_MAXCNT			0x000000000000ffffULL	/* Op max count field */
 
@@ -214,37 +216,7 @@
 /* PMC ID definitions */
 #define PMC_ID_INVALID			(~(uint32_t)0)
 
-/* PMC ioctl structures for tests */
-struct pmc_syscall_args {
-	int pmop_code;
-	void *pmop_data;
-};
-
-struct pmc_op_getcpuinfo {
-	uint32_t pm_nclass;
-	struct {
-		uint32_t pm_class;
-		uint32_t pm_caps;
-		uint32_t pm_width;
-		uint32_t pm_num;
-	} pm_classes[8];
-};
-
-struct pmc_op_simple {
-	uint32_t pm_pmcid;
-};
-
-struct pmc_op_pmcallocate {
-	uint32_t pm_class;
-	uint32_t pm_caps;
-	int32_t pm_cpu;
-	uint32_t pm_mode;
-	uint32_t pm_ev;
-	uint32_t pm_flags;
-	uint32_t pm_md[4];
-	uint64_t pm_count;
-};
-
+/* IBS ioctl structures for tests */
 struct pmc_op_ibsgetcaps {
 	uint32_t pm_ibs_features;
 	uint32_t pm_ibs_fetch_cap;

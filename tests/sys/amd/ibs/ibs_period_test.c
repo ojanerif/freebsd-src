@@ -83,11 +83,7 @@
 /*
  * Helper: Set the maxcnt (period) field in an IBS control value.
  */
-static inline uint64_t
-ibs_set_maxcnt(uint64_t ctl_val, uint64_t maxcnt)
-{
-	return ((ctl_val & ~IBS_MAXCNT_MASK) | (maxcnt & IBS_MAXCNT_MASK));
-}
+
 
 /*
  * Helper: Calculate actual period from maxcnt value.
