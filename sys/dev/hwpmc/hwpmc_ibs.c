@@ -38,11 +38,14 @@
 #include <sys/pmclog.h>
 #include <sys/smp.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 
 #include <machine/cpu.h>
 #include <machine/cpufunc.h>
 #include <machine/md_var.h>
 #include <machine/specialreg.h>
+
+#include "hwpmc_ibs.h"
 
 #define	IBS_STOP_ITER		50 /* Stopping iterations */
 
@@ -55,6 +58,28 @@ struct ibs_descr {
  * Globals
  */
 static uint64_t ibs_features;
+
+/*
+ * IBS sysctl context and state.
+ * This structure holds configuration values accessible via sysctl.
+ */
+static struct ibs_sysctl {
+	struct sysctl_ctx_list	isc_ctx;
+	struct sysctl_oid	*isc_tree;
+
+	/* Capability flags (read-only, derived from ibs_features) */
+	int			isc_fetch_cap;
+	int			isc_op_cap;
+	int			isc_zen4_extensions;
+	int			isc_l3miss_filter;
+	int			isc_load_latency_filter;
+
+	/* Configuration (read/write) */
+	int			isc_fetch_enable;
+	int			isc_op_enable;
+	uint64_t		isc_fetch_period;
+	uint64_t		isc_op_period;
+} ibs_sysctl_ctx;
 
 /*
  * Per-processor information
@@ -593,6 +618,149 @@ ibs_pcpu_fini(struct pmc_mdep *md, int cpu)
 }
 
 /*
+ * Sysctl handlers for IBS configuration.
+ */
+
+/* Handler for fetch_enable and op_enable sysctls */
+static int
+sysctl_ibs_enable(SYSCTL_HANDLER_ARGS)
+{
+	int error, val;
+
+	val = *(int *)arg1;
+	error = sysctl_handle_int(oidp, &val, 0, req);
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+	if (val != 0 && val != 1)
+		return (EINVAL);
+	*(int *)arg1 = val;
+	return (0);
+}
+
+/* Handler for fetch_period and op_period sysctls */
+static int
+sysctl_ibs_period(SYSCTL_HANDLER_ARGS)
+{
+	int error;
+	uint64_t val;
+
+	val = *(uint64_t *)arg1;
+	error = sysctl_handle_64(oidp, &val, 0, req);
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+	/*
+	 * IBS period must be non-zero. The hardware interprets the period
+	 * as a maximum count; zero would disable sampling.
+	 */
+	if (val == 0)
+		return (EINVAL);
+	*(uint64_t *)arg1 = val;
+	return (0);
+}
+
+/*
+ * Initialize the IBS sysctl tree.
+ * This is called after ibs_features has been populated.
+ */
+static void
+ibs_sysctl_init(void)
+{
+	struct ibs_sysctl *isc;
+
+	isc = &ibs_sysctl_ctx;
+
+	/* Initialize capability flags from detected features */
+	isc->isc_fetch_cap =
+	    (ibs_features & CPUID_IBSID_FETCHSAM) != 0 ? 1 : 0;
+	isc->isc_op_cap =
+	    (ibs_features & CPUID_IBSID_OPSAM) != 0 ? 1 : 0;
+	isc->isc_zen4_extensions =
+	    (ibs_features & CPUID_IBSID_ZEN4IBSEXTENSIONS) != 0 ? 1 : 0;
+	isc->isc_l3miss_filter =
+	    (ibs_features & CPUID_IBSID_ZEN4IBSEXTENSIONS) != 0 ? 1 : 0;
+	isc->isc_load_latency_filter =
+	    (ibs_features & CPUID_IBSID_IBSLOADLATENCYFILT) != 0 ? 1 : 0;
+
+	/* Default configuration values */
+	isc->isc_fetch_enable = 0;
+	isc->isc_op_enable = 0;
+	isc->isc_fetch_period = 0;
+	isc->isc_op_period = 0;
+
+	/* Create sysctl context */
+	sysctl_ctx_init(&isc->isc_ctx);
+
+	/* Create the sysctl tree under hw.amd_ibs */
+	isc->isc_tree = SYSCTL_ADD_NODE(&isc->isc_ctx,
+	    SYSCTL_STATIC_CHILDREN(_hw), OID_AUTO, "amd_ibs",
+	    CTLFLAG_RW | CTLFLAG_MPSAFE, 0, "AMD IBS configuration");
+
+	if (isc->isc_tree == NULL) {
+		printf("hwpmc: failed to create amd_ibs sysctl node\n");
+		return;
+	}
+
+	/* Read-only capability nodes */
+	SYSCTL_ADD_INT(&isc->isc_ctx,
+	    SYSCTL_CHILDREN(isc->isc_tree), OID_AUTO, "fetch_cap",
+	    CTLFLAG_RD, &isc->isc_fetch_cap, 0,
+	    "IBS Fetch sampling capability");
+	SYSCTL_ADD_INT(&isc->isc_ctx,
+	    SYSCTL_CHILDREN(isc->isc_tree), OID_AUTO, "op_cap",
+	    CTLFLAG_RD, &isc->isc_op_cap, 0,
+	    "IBS Op sampling capability");
+	SYSCTL_ADD_INT(&isc->isc_ctx,
+	    SYSCTL_CHILDREN(isc->isc_tree), OID_AUTO, "zen4_extensions",
+	    CTLFLAG_RD, &isc->isc_zen4_extensions, 0,
+	    "IBS Zen 4+ extensions support");
+	SYSCTL_ADD_INT(&isc->isc_ctx,
+	    SYSCTL_CHILDREN(isc->isc_tree), OID_AUTO, "l3miss_filter",
+	    CTLFLAG_RD, &isc->isc_l3miss_filter, 0,
+	    "IBS L3MissOnly filter support");
+	SYSCTL_ADD_INT(&isc->isc_ctx,
+	    SYSCTL_CHILDREN(isc->isc_tree), OID_AUTO, "load_latency_filter",
+	    CTLFLAG_RD, &isc->isc_load_latency_filter, 0,
+	    "IBS Load Latency Filtering support");
+
+	/* Read/write configuration nodes */
+	SYSCTL_ADD_PROC(&isc->isc_ctx,
+	    SYSCTL_CHILDREN(isc->isc_tree), OID_AUTO, "fetch_enable",
+	    CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
+	    &isc->isc_fetch_enable, 0, sysctl_ibs_enable, "I",
+	    "Enable/disable IBS Fetch sampling");
+	SYSCTL_ADD_PROC(&isc->isc_ctx,
+	    SYSCTL_CHILDREN(isc->isc_tree), OID_AUTO, "op_enable",
+	    CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
+	    &isc->isc_op_enable, 0, sysctl_ibs_enable, "I",
+	    "Enable/disable IBS Op sampling");
+	SYSCTL_ADD_PROC(&isc->isc_ctx,
+	    SYSCTL_CHILDREN(isc->isc_tree), OID_AUTO, "fetch_period",
+	    CTLTYPE_U64 | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
+	    &isc->isc_fetch_period, 0, sysctl_ibs_period, "QU",
+	    "IBS Fetch sampling period");
+	SYSCTL_ADD_PROC(&isc->isc_ctx,
+	    SYSCTL_CHILDREN(isc->isc_tree), OID_AUTO, "op_period",
+	    CTLTYPE_U64 | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
+	    &isc->isc_op_period, 0, sysctl_ibs_period, "QU",
+	    "IBS Op sampling period");
+}
+
+/*
+ * Destroy the IBS sysctl tree.
+ */
+static void
+ibs_sysctl_fini(void)
+{
+	struct ibs_sysctl *isc;
+
+	isc = &ibs_sysctl_ctx;
+	if (isc->isc_tree != NULL) {
+		sysctl_ctx_free(&isc->isc_ctx);
+		isc->isc_tree = NULL;
+	}
+}
+
+/*
  * Initialize ourselves.
  */
 int
@@ -648,6 +816,9 @@ pmc_ibs_initialize(struct pmc_mdep *pmc_mdep, int ncpus)
 	if ((ibs_features & CPUID_IBSID_IBSLOADLATENCYFILT) != 0)
 		printf("hwpmc: IBS Load Latency Filtering supported\n");
 
+	/* Initialize sysctl MIB for IBS */
+	ibs_sysctl_init();
+
 	PMCDBG0(MDP, INI, 0, "ibs-initialize");
 
 	return (0);
@@ -660,6 +831,9 @@ void
 pmc_ibs_finalize(struct pmc_mdep *md)
 {
 	PMCDBG0(MDP, INI, 1, "ibs-finalize");
+
+	/* Destroy sysctl MIB for IBS */
+	ibs_sysctl_fini();
 
 	for (int i = 0; i < pmc_cpu_max(); i++)
 		KASSERT(ibs_pcpu[i] == NULL,
