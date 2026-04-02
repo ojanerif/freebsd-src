@@ -170,7 +170,7 @@ static int
 ibs_allocate_pmc(int cpu __unused, int ri, struct pmc *pm,
     const struct pmc_op_pmcallocate *a)
 {
-	uint64_t caps, config;
+	uint64_t caps, config, config2;
 
 	KASSERT(ri >= 0 && ri < IBS_NPMCS,
 	    ("[ibs,%d] illegal row index %d", __LINE__, ri));
@@ -189,9 +189,25 @@ ibs_allocate_pmc(int cpu __unused, int ri, struct pmc *pm,
 		return (EINVAL);
 
 	config = a->pm_md.pm_ibs.ibs_ctl;
-	pm->pm_md.pm_ibs.ibs_ctl = config;
+	config2 = a->pm_md.pm_ibs.ibs_ctl2;
 
-	PMCDBG2(MDP, ALL, 2, "ibs-allocate ri=%d -> config=0x%x", ri, config);
+	/*
+	 * Validate Zen 4+ extended features.
+	 * L3MissOnly filter is available on Zen 4+ for both fetch and op.
+	 * ITLB refill latency configuration requires IBSFETCHCTLEXTD.
+	 */
+	if ((config2 & IBS_FETCH_CTL_L3MISSONLY) != 0 &&
+	    (ibs_features & CPUID_IBSID_ZEN4IBSEXTENSIONS) == 0) {
+		PMCDBG0(MDP, ALL, 2,
+		    "ibs-allocate L3MissOnly not supported");
+		return (EINVAL);
+	}
+
+	pm->pm_md.pm_ibs.ibs_ctl = config;
+	pm->pm_md.pm_ibs.ibs_ctl2 = config2;
+
+	PMCDBG3(MDP, ALL, 2, "ibs-allocate ri=%d -> config=0x%x config2=0x%x",
+	    ri, config, config2);
 
 	return (0);
 }
@@ -244,16 +260,29 @@ ibs_start_pmc(int cpu __diagused, int ri, struct pmc *pm)
 	/*
 	 * Turn on the ENABLE bit.  Zeroing out the control register eliminates
 	 * stale valid bits from spurious NMIs and it resets the counter.
+	 * For Zen 4+, also configure extended MSRs if available.
 	 */
 	switch (ri) {
 	case IBS_PMC_FETCH:
 		wrmsr(IBS_FETCH_CTL, 0);
 		config = pm->pm_md.pm_ibs.ibs_ctl | IBS_FETCH_CTL_ENABLE;
 		wrmsr(IBS_FETCH_CTL, config);
+
+		/* Configure Zen 4+ extended fetch control */
+		if ((ibs_features & CPUID_IBSID_IBSFETCHCTLEXTD) != 0 &&
+		    pm->pm_md.pm_ibs.ibs_ctl2 != 0) {
+			wrmsr(IBS_FETCH_EXTCTL, pm->pm_md.pm_ibs.ibs_ctl2);
+		}
 		break;
 	case IBS_PMC_OP:
 		wrmsr(IBS_OP_CTL, 0);
 		config = pm->pm_md.pm_ibs.ibs_ctl | IBS_OP_CTL_ENABLE;
+
+		/* Add L3MissOnly filter for Zen 4+ */
+		if ((ibs_features & CPUID_IBSID_ZEN4IBSEXTENSIONS) != 0 &&
+		    (pm->pm_md.pm_ibs.ibs_ctl2 & IBS_OP_CTL_L3MISSONLY) != 0) {
+			config |= IBS_OP_CTL_L3MISSONLY;
+		}
 		wrmsr(IBS_OP_CTL, config);
 		break;
 	}
@@ -342,10 +371,11 @@ pmc_ibs_process_fetch(struct pmc *pm, struct trapframe *tf, uint64_t config)
 	mpd.pl_type = PMC_CC_MULTIPART_IBS_FETCH;
 	mpd.pl_length = 4;
 	mpd.pl_mpdata[PMC_MPIDX_FETCH_CTL] = config;
-	if (ibs_features) {
-		mpd.pl_mpdata[PMC_MPIDX_FETCH_EXTCTL] = rdmsr(IBS_FETCH_EXTCTL);
+	if ((ibs_features & CPUID_IBSID_IBSFETCHCTLEXTD) != 0) {
+		mpd.pl_mpdata[PMC_MPIDX_FETCH_EXTCTL] =
+		    rdmsr(IBS_FETCH_EXTCTL);
+		mpd.pl_length = 5;
 	}
-	mpd.pl_mpdata[PMC_MPIDX_FETCH_CTL] = config;
 	mpd.pl_mpdata[PMC_MPIDX_FETCH_LINADDR] = rdmsr(IBS_FETCH_LINADDR);
 	if ((config & IBS_FETCH_CTL_PHYSADDRVALID) != 0) {
 		mpd.pl_mpdata[PMC_MPIDX_FETCH_PHYSADDR] =
@@ -369,7 +399,7 @@ pmc_ibs_process_op(struct pmc *pm, struct trapframe *tf, uint64_t config)
 	memset(&mpd, 0, sizeof(mpd));
 
 	mpd.pl_type = PMC_CC_MULTIPART_IBS_OP;
-	mpd.pl_length = 8;
+	mpd.pl_length = 7;
 	mpd.pl_mpdata[PMC_MPIDX_OP_CTL] = config;
 	mpd.pl_mpdata[PMC_MPIDX_OP_RIP] = rdmsr(IBS_OP_RIP);
 	mpd.pl_mpdata[PMC_MPIDX_OP_DATA] = rdmsr(IBS_OP_DATA);
@@ -377,6 +407,12 @@ pmc_ibs_process_op(struct pmc *pm, struct trapframe *tf, uint64_t config)
 	mpd.pl_mpdata[PMC_MPIDX_OP_DATA3] = rdmsr(IBS_OP_DATA3);
 	mpd.pl_mpdata[PMC_MPIDX_OP_DC_LINADDR] = rdmsr(IBS_OP_DC_LINADDR);
 	mpd.pl_mpdata[PMC_MPIDX_OP_DC_PHYSADDR] = rdmsr(IBS_OP_DC_PHYSADDR);
+
+	/* Zen 4+ extended MSR: IBS Op Data 4 */
+	if ((ibs_features & CPUID_IBSID_IBSOPDATA4) != 0) {
+		mpd.pl_mpdata[PMC_MPIDX_OP_DATA4] = rdmsr(IBS_OP_DATA4);
+		mpd.pl_length = 8;
+	}
 
 	pmc_process_interrupt_mp(PMC_HR, pm, tf, &mpd);
 
@@ -601,6 +637,16 @@ pmc_ibs_initialize(struct pmc_mdep *pmc_mdep, int ncpus)
 	} else {
 		ibs_features = 0;
 	}
+
+	/* Log detected IBS features */
+	if ((ibs_features & CPUID_IBSID_IBSFETCHCTLEXTD) != 0)
+		printf("hwpmc: IBS Fetch Control Extended supported\n");
+	if ((ibs_features & CPUID_IBSID_IBSOPDATA4) != 0)
+		printf("hwpmc: IBS Op Data 4 supported\n");
+	if ((ibs_features & CPUID_IBSID_ZEN4IBSEXTENSIONS) != 0)
+		printf("hwpmc: IBS Zen 4 Extensions supported\n");
+	if ((ibs_features & CPUID_IBSID_IBSLOADLATENCYFILT) != 0)
+		printf("hwpmc: IBS Load Latency Filtering supported\n");
 
 	PMCDBG0(MDP, INI, 0, "ibs-initialize");
 

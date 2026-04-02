@@ -101,6 +101,10 @@
 #define IBS_FETCH_PHYSADDR		0xC0011032 /* Fetch Physical Address */
 #define IBS_FETCH_EXTCTL		0xC001103C /* Fetch Control Extended */
 
+/* IBS Fetch Control Extended (Zen 4+) bit fields */
+#define IBS_FETCH_EXTCTL_ITLB_REFILL_LAT	0x000000000000FFFFULL /* Bits 0-15 */
+#define IBS_FETCH_EXTCTL_TO_ITLBLAT(_c)		((_c) & 0x0000FFFF)
+
 #define PMC_MPIDX_FETCH_CTL		0
 #define PMC_MPIDX_FETCH_EXTCTL		1
 #define PMC_MPIDX_FETCH_LINADDR		2
@@ -146,7 +150,18 @@
 #define IBS_OP_DC_PHYSADDR		0xC0011039 /* IBS DC Physical Address */
 #define IBS_TGT_RIP			0xC001103B /* IBS Branch Target */
 #define IBS_OP_DATA4			0xC001103D /* IBS Op Data 4 */
-#define IBS_OP_DATA4_LDRESYNC		(1ULL << 0)  /* Load Resync */
+
+/* IBS Op Data 4 (Zen 4+) bit fields */
+#define IBS_OP_DATA4_VALID		(1ULL << 0)  /* Data Valid */
+#define IBS_OP_DATA4_REMOTE_LAT		0x000000000000FFFEULL /* Bits 1-16 */
+#define IBS_OP_DATA4_REMOTE_LAT_SHIFT	1
+#define IBS_OP_DATA4_REMOTE_LAT_MASK	0x0000FFFF
+#define IBS_OP_DATA4_REMOTE_LAT_EXTRACT(_c) \
+    (((_c) >> IBS_OP_DATA4_REMOTE_LAT_SHIFT) & IBS_OP_DATA4_REMOTE_LAT_MASK)
+#define IBS_OP_DATA4_LDRESYNC		(1ULL << 17) /* Load Resync */
+#define IBS_OP_DATA4_L3MISS		(1ULL << 18) /* L3 Cache Miss */
+#define IBS_OP_DATA4_REM_NODE		(1ULL << 19) /* Remote Node Access */
+#define IBS_OP_DATA4_REM_CACHE		(1ULL << 20) /* Remote Cache Access */
 
 #define PMC_MPIDX_OP_CTL		0
 #define PMC_MPIDX_OP_RIP		1
