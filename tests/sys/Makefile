@@ -3,6 +3,7 @@
 TESTSDIR=		${TESTSBASE}/sys
 
 TESTS_SUBDIRS+=		acl
+TESTS_SUBDIRS+=		amd
 TESTS_SUBDIRS+=		aio
 TESTS_SUBDIRS+=		${_audit}
 TESTS_SUBDIRS+=		auditpipe
