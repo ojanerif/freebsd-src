@@ -52,7 +52,7 @@ extern struct pmc_mdep *md;
 extern int pmc_find_pmc(pmc_id_t pmcid, struct pmc **pm);
 extern struct pmc_classdep *pmc_ri_to_classdep(struct pmc_mdep *md,
     int ri, int *adj_ri);
-extern int pmc_cpu_max(void);
+extern unsigned int pmc_cpu_max(void);
 extern int pmc_cpu_is_active(int cpu);
 
 #define	IBS_STOP_ITER		50 /* Stopping iterations */
@@ -637,7 +637,6 @@ int
 pmc_ibs_set_period(pmc_id_t pmcid, uint64_t period)
 {
 	struct pmc *pm;
-	struct pmc_hw *phw;
 	int adjri, cpu, error, ri;
 	uint64_t config;
 	struct pmc_classdep *pcd;
@@ -667,8 +666,6 @@ pmc_ibs_set_period(pmc_id_t pmcid, uint64_t period)
 
 	if (!pmc_cpu_is_active(cpu))
 		return (ENXIO);
-
-	phw = &ibs_pcpu[cpu]->pc_ibspmcs[adjri];
 
 	/*
 	 * Update the period in the PMC's control value.
