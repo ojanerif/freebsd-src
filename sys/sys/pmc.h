@@ -39,10 +39,6 @@
 #include <machine/profile.h>
 #include <machine/pmc_mdep.h>
 
-/* IBS function declarations (defined in dev/hwpmc/hwpmc_ibs.c) */
-int	pmc_ibs_set_period(pmc_id_t pmcid, uint64_t period);
-int	pmc_ibs_get_caps(struct pmc_op_ibsgetcaps *caps);
-
 #ifdef _KERNEL
 #include <sys/epoch.h>
 #include <ck_queue.h>
@@ -687,6 +683,10 @@ struct pmc_op_ibsgetcaps {
 
 
 #ifdef _KERNEL
+
+/* IBS function declarations (defined in dev/hwpmc/hwpmc_ibs.c) */
+int	pmc_ibs_set_period(pmc_id_t pmcid, uint64_t period);
+int	pmc_ibs_get_caps(struct pmc_op_ibsgetcaps *caps);
 
 #include <sys/malloc.h>
 #include <sys/sysctl.h>
