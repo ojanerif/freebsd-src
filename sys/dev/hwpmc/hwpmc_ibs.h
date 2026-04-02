@@ -29,6 +29,9 @@
 #ifndef	_DEV_HWPMC_IBS_H_
 #define	_DEV_HWPMC_IBS_H_ 1
 
+#include <sys/param.h>
+#include <sys/pmc.h>
+
 #define	IBS_NPMCS			2
 #define	IBS_PMC_FETCH			0
 #define	IBS_PMC_OP			1
@@ -152,12 +155,7 @@
 #define IBS_OP_DATA4			0xC001103D /* IBS Op Data 4 */
 
 /* IBS Op Data 4 (Zen 4+) bit fields */
-#define IBS_OP_DATA4_VALID		(1ULL << 0)  /* Data Valid */
-#define IBS_OP_DATA4_REMOTE_LAT		0x000000000000FFFEULL /* Bits 1-16 */
-#define IBS_OP_DATA4_REMOTE_LAT_SHIFT	1
-#define IBS_OP_DATA4_REMOTE_LAT_MASK	0x0000FFFF
-#define IBS_OP_DATA4_REMOTE_LAT_EXTRACT(_c) \
-    (((_c) >> IBS_OP_DATA4_REMOTE_LAT_SHIFT) & IBS_OP_DATA4_REMOTE_LAT_MASK)
+/* IBS_OP_DATA4_VALID and IBS_OP_DATA4_REMOTE_LAT are defined in sys/x86/specialreg.h */
 #define IBS_OP_DATA4_LDRESYNC		(1ULL << 17) /* Load Resync */
 #define IBS_OP_DATA4_L3MISS		(1ULL << 18) /* L3 Cache Miss */
 #define IBS_OP_DATA4_REM_NODE		(1ULL << 19) /* Remote Node Access */
