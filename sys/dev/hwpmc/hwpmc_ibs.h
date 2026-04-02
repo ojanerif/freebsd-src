@@ -186,8 +186,6 @@ struct pmc_md_ibs_op_pmcallocate {
 
 #ifdef _KERNEL
 
-#include <sys/pmc.h>
-
 /* MD extension for 'struct pmc' */
 struct pmc_md_ibs_pmc {
 	uint32_t	ibs_flag;
@@ -202,8 +200,6 @@ struct pmc_md_ibs_pmc {
 int	pmc_ibs_initialize(struct pmc_mdep *md, int ncpu);
 void	pmc_ibs_finalize(struct pmc_mdep *md);
 int	pmc_ibs_intr(struct trapframe *tf);
-int	pmc_ibs_set_period(pmc_id_t pmcid, uint64_t period);
-int	pmc_ibs_get_caps(struct pmc_op_ibsgetcaps *caps);
 
 #endif /* _KERNEL */
 #endif /* _DEV_HWPMC_IBS_H_ */
