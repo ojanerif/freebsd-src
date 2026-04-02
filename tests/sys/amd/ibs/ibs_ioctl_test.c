@@ -46,7 +46,6 @@
 #include <unistd.h>
 
 #include "ibs_utils.h"
-#include <dev/hwpmc/hwpmc_ibs.h>
 
 /*
  * Helper: invoke the hwpmc syscall with the given operation and data.

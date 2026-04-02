@@ -107,11 +107,7 @@ ibs_maxcnt_to_period(uint64_t maxcnt)
  * Helper: Calculate maxcnt from desired period.
  * Returns the maxcnt value that would produce the given period.
  */
-static inline uint64_t
-ibs_period_to_maxcnt(uint64_t period)
-{
-	return (period >> IBS_PERIOD_SHIFT);
-}
+
 
 /*
  * Test: ibs_fetch_period_basic

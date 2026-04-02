@@ -68,38 +68,6 @@
  * Per AMD documentation, writing 1 to the COMPLETE bit
  * or writing 0 to the VALID bit clears it.
  */
-static int
-ibs_fetch_clear_valid(int cpu)
-{
-	uint64_t ctl;
-	int error;
-
-	error = read_msr(cpu, MSR_IBS_FETCH_CTL, &ctl);
-	if (error != 0)
-		return (error);
-
-	/* Clear VALID bit by writing 0 to it */
-	ctl &= ~IBS_FETCH_CTL_VALID;
-	return (write_msr(cpu, MSR_IBS_FETCH_CTL, ctl));
-}
-
-/*
- * Helper: Clear the VALID bit in IBS Op Control.
- */
-static int
-ibs_op_clear_valid(int cpu)
-{
-	uint64_t ctl;
-	int error;
-
-	error = read_msr(cpu, MSR_IBS_OP_CTL, &ctl);
-	if (error != 0)
-		return (error);
-
-	/* Clear VALID bit by writing 0 to it */
-	ctl &= ~IBS_OP_CTL_VALID;
-	return (write_msr(cpu, MSR_IBS_OP_CTL, ctl));
-}
 
 /*
  * Helper: Poll for VALID bit to be set in IBS Fetch Control.
