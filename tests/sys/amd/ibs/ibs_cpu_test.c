@@ -65,7 +65,7 @@ ATF_TC_BODY(ibs_cpu_detect_family, tc)
 		printf("Family 1Ah (Zen5) detected\n");
 		break;
 	default:
-		ATF_FAIL("Unknown AMD CPU family: 0x%x", family);
+		atf_tc_fail("Unknown AMD CPU family: 0x%x", family);
 		break;
 	}
 }
