@@ -30,15 +30,7 @@
 #define	_DEV_HWPMC_IBS_H_ 1
 
 #include <sys/param.h>
-
-/*
- * Forward declaration to avoid circular include dependency:
- *   sys/pmc.h → machine/pmc_mdep.h → dev/hwpmc/hwpmc_ibs.h → sys/pmc.h
- *
- * The full definition of struct pmc_op_ibsgetcaps is in sys/pmc.h.
- * We only need a pointer here, so a forward declaration suffices.
- */
-struct pmc_op_ibsgetcaps;
+#include <sys/pmc.h>
 
 #define	IBS_NPMCS			2
 #define	IBS_PMC_FETCH			0
