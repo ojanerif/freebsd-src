@@ -76,26 +76,6 @@ ibs_op_clear_enable(uint64_t val)
 }
 
 /*
- * Helper: Set the period (max count) field in IBS Fetch control.
- */
-static inline uint64_t
-ibs_fetch_set_period(uint64_t ctl, uint64_t period)
-{
-
-	return ((ctl & ~IBS_FETCH_MAXCNT) | (period & IBS_FETCH_MAXCNT));
-}
-
-/*
- * Helper: Set the period (max count) field in IBS Op control.
- */
-static inline uint64_t
-ibs_op_set_period(uint64_t ctl, uint64_t period)
-{
-
-	return ((ctl & ~IBS_OP_MAXCNT) | (period & IBS_OP_MAXCNT));
-}
-
-/*
  * Test: ibs_fetch_enable_disable
  *
  * Verify that we can enable and disable IBS Fetch sampling by
