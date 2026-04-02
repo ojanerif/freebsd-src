@@ -112,6 +112,16 @@ ibs_write_pmc(int cpu, int ri, struct pmc *pm, pmc_value_t v)
 
 	PMCDBG3(MDP, WRI, 1, "ibs-write cpu=%d ri=%d v=%jx", cpu, ri, v);
 
+	/* write the IBS ctl */
+	switch (ri) {
+	case IBS_PMC_FETCH:
+		wrmsr(IBS_FETCH_CTL, v);
+		break;
+	case IBS_PMC_OP:
+		wrmsr(IBS_OP_CTL, v);
+		break;
+	}
+
 	return (0);
 }
 
