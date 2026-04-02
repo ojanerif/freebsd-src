@@ -37,6 +37,7 @@
 #include <sys/proc.h>
 #include <sys/counter.h>
 #include <machine/profile.h>
+#include <machine/pmc_mdep.h>
 #ifdef _KERNEL
 #include <sys/epoch.h>
 #include <ck_queue.h>
@@ -679,16 +680,6 @@ struct pmc_op_ibsgetcaps {
 	uint32_t	pm_ibs_load_lat_filt;	/* Load latency filtering */
 };
 
-/*
- * Machine-dependent PMC interface.
- *
- * This include must come after the type definitions (pmc_id_t,
- * pmc_value_t, struct pmc_op_ibsgetcaps) to avoid circular include
- * dependencies. The chain is:
- *   sys/pmc.h → machine/pmc_mdep.h → dev/hwpmc/hwpmc_ibs.h → sys/pmc.h
- * If included earlier, hwpmc_ibs.h would see incomplete type definitions.
- */
-#include <machine/pmc_mdep.h>
 
 #ifdef _KERNEL
 
