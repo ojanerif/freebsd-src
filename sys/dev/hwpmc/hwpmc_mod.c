@@ -74,6 +74,7 @@
 #include <vm/vm_object.h>
 
 #include "hwpmc_soft.h"
+#include "hwpmc_ibs.h"
 
 #define PMC_EPOCH_ENTER()						\
     struct epoch_tracker pmc_et;					\
@@ -4578,6 +4579,47 @@ pmc_syscall_handler(struct thread *td, void *syscall_args)
 		}
 
 		if ((error = copyout(&c, arg, sizeof(c))) < 0)
+			break;
+	}
+	break;
+
+	/*
+	 * Set IBS sampling period dynamically.
+	 */
+
+	case PMC_OP_IBSSETPERIOD:
+	{
+		struct pmc_op_ibssetperiod sp;
+
+		PMC_DOWNGRADE_SX();
+
+		if ((error = copyin(arg, &sp, sizeof(sp))) != 0)
+			break;
+
+		error = priv_check(td, PRIV_PMC_MANAGE);
+		if (error)
+			break;
+
+		error = pmc_ibs_set_period(sp.pm_pmcid, sp.pm_period);
+	}
+	break;
+
+	/*
+	 * Get IBS-specific capabilities.
+	 */
+
+	case PMC_OP_IBSGETCAPS:
+	{
+		struct pmc_op_ibsgetcaps caps;
+
+		PMC_DOWNGRADE_SX();
+
+		memset(&caps, 0, sizeof(caps));
+		error = pmc_ibs_get_caps(&caps);
+		if (error != 0)
+			break;
+
+		if ((error = copyout(&caps, arg, sizeof(caps))) < 0)
 			break;
 	}
 	break;

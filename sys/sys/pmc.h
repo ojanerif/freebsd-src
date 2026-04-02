@@ -348,7 +348,9 @@ enum pmc_event {
 	__PMC_OP(WRITELOG, "Write a cookie to the log file")		\
 	__PMC_OP(CLOSELOG, "Close log file")				\
 	__PMC_OP(GETDYNEVENTINFO, "Get dynamic events list")		\
-	__PMC_OP(GETCAPS, "Get capabilities")
+	__PMC_OP(GETCAPS, "Get capabilities")				\
+	__PMC_OP(IBSSETPERIOD, "Set IBS sampling period")		\
+	__PMC_OP(IBSGETCAPS, "Get IBS capabilities")
 
 enum pmc_ops {
 #undef	__PMC_OP
@@ -649,6 +651,33 @@ struct pmc_op_getdyneventinfo {
 struct pmc_op_caps {
 	pmc_id_t	pm_pmcid;	/* allocated pmc id */
 	uint32_t	pm_caps;	/* capabilities */
+};
+
+/*
+ * OP IBSSETPERIOD
+ *
+ * Set the IBS sampling period dynamically for a running PMC.
+ * The period is the maximum count before a sample is taken.
+ */
+
+struct pmc_op_ibssetperiod {
+	pmc_id_t	pm_pmcid;	/* allocated IBS pmc id */
+	uint64_t	pm_period;	/* new sampling period */
+};
+
+/*
+ * OP IBSGETCAPS
+ *
+ * Retrieve IBS-specific capabilities and feature flags.
+ * This returns CPUID 0x8000001B feature information.
+ */
+
+struct pmc_op_ibsgetcaps {
+	uint32_t	pm_ibs_features;	/* CPUID IBS feature flags */
+	uint32_t	pm_ibs_fetch_cap;	/* Fetch sampling available */
+	uint32_t	pm_ibs_op_cap;		/* Op sampling available */
+	uint32_t	pm_ibs_zen4_ext;	/* Zen 4+ extensions */
+	uint32_t	pm_ibs_load_lat_filt;	/* Load latency filtering */
 };
 
 #ifdef _KERNEL

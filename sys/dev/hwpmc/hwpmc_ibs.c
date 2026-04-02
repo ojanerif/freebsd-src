@@ -47,6 +47,14 @@
 
 #include "hwpmc_ibs.h"
 
+/* External declarations from hwpmc_mod.c */
+extern struct pmc_mdep *md;
+extern int pmc_find_pmc(pmc_id_t pmcid, struct pmc **pm);
+extern struct pmc_classdep *pmc_ri_to_classdep(struct pmc_mdep *md,
+    int ri, int *adj_ri);
+extern int pmc_cpu_max(void);
+extern int pmc_cpu_is_active(int cpu);
+
 #define	IBS_STOP_ITER		50 /* Stopping iterations */
 
 /* AMD IBS PMCs */
@@ -613,6 +621,104 @@ ibs_pcpu_fini(struct pmc_mdep *md, int cpu)
 		pc->pc_hwpmcs[i + first_ri] = NULL;
 
 	free(pac, M_PMC);
+
+	return (0);
+}
+
+/*
+ * IBS-specific syscall handlers.
+ */
+
+/*
+ * Set the IBS sampling period dynamically for a running PMC.
+ * This allows changing the period without stopping and restarting.
+ */
+int
+pmc_ibs_set_period(pmc_id_t pmcid, uint64_t period)
+{
+	struct pmc *pm;
+	struct pmc_hw *phw;
+	int adjri, cpu, error, ri;
+	uint64_t config;
+	struct pmc_classdep *pcd;
+
+	PMCDBG2(MDP, IOC, 1, "ibs-set-period pmcid=%x period=%ju",
+	    pmcid, (uintmax_t)period);
+
+	/* Validate period is non-zero */
+	if (period == 0)
+		return (EINVAL);
+
+	/* Find the PMC by pmcid */
+	error = pmc_find_pmc(pmcid, &pm);
+	if (error != 0)
+		return (error);
+
+	/* Verify this is an IBS PMC */
+	ri = PMC_TO_ROWINDEX(pm);
+	pcd = pmc_ri_to_classdep(md, ri, &adjri);
+	if (pcd == NULL || pcd->pcd_class != PMC_CLASS_IBS)
+		return (EINVAL);
+
+	/* Get the CPU this PMC is on */
+	cpu = PMC_ID_TO_CPU(pmcid);
+	if (cpu < 0 || cpu >= pmc_cpu_max())
+		return (EINVAL);
+
+	if (!pmc_cpu_is_active(cpu))
+		return (ENXIO);
+
+	phw = &ibs_pcpu[cpu]->pc_ibspmcs[adjri];
+
+	/*
+	 * Update the period in the PMC's control value.
+	 * The period is stored in the lower 16 bits of the control MSR.
+	 */
+	config = pm->pm_md.pm_ibs.ibs_ctl;
+	config &= ~IBS_FETCH_CTL_MAXCNTMASK;
+	config |= (period & IBS_FETCH_CTL_MAXCNTMASK);
+	pm->pm_md.pm_ibs.ibs_ctl = config;
+
+	/*
+	 * If the PMC is running, update the hardware immediately.
+	 * Otherwise, the new period will be applied when the PMC is started.
+	 */
+	if (pm->pm_state == PMC_STATE_RUNNING) {
+		switch (adjri) {
+		case IBS_PMC_FETCH:
+			wrmsr(IBS_FETCH_CTL, config);
+			break;
+		case IBS_PMC_OP:
+			wrmsr(IBS_OP_CTL, config);
+			break;
+		}
+	}
+
+	PMCDBG3(MDP, IOC, 2, "ibs-set-period ri=%d cpu=%d config=0x%jx",
+	    adjri, cpu, config);
+
+	return (0);
+}
+
+/*
+ * Get IBS-specific capabilities and feature flags.
+ * Returns information from CPUID 0x8000001B.
+ */
+int
+pmc_ibs_get_caps(struct pmc_op_ibsgetcaps *caps)
+{
+
+	PMCDBG0(MDP, IOC, 1, "ibs-get-caps");
+
+	caps->pm_ibs_features = (uint32_t)ibs_features;
+	caps->pm_ibs_fetch_cap =
+	    (ibs_features & CPUID_IBSID_FETCHSAM) != 0 ? 1 : 0;
+	caps->pm_ibs_op_cap =
+	    (ibs_features & CPUID_IBSID_OPSAM) != 0 ? 1 : 0;
+	caps->pm_ibs_zen4_ext =
+	    (ibs_features & CPUID_IBSID_ZEN4IBSEXTENSIONS) != 0 ? 1 : 0;
+	caps->pm_ibs_load_lat_filt =
+	    (ibs_features & CPUID_IBSID_IBSLOADLATENCYFILT) != 0 ? 1 : 0;
 
 	return (0);
 }

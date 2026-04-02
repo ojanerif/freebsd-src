@@ -16,7 +16,8 @@ ATF_TESTS_C=	ibs_cpu_test \
 		ibs_stress_test \
 		ibs_period_test \
 		ibs_routing_test \
-		ibs_l3miss_test
+		ibs_l3miss_test \
+		ibs_ioctl_test
 
 ATF_TESTS_SH=	ibs_swfilt_test
 
