@@ -46,6 +46,7 @@
 #include <sys/smp.h>
 #include <sys/pmckern.h>
 #include <sys/cpuctl.h>
+#include <sys/pmc.h>
 
 #include <vm/vm.h>
 #include <vm/vm_param.h>
@@ -78,6 +79,8 @@ static int cpuctl_do_cpuid_count(int cpu, cpuctl_cpuid_count_args_t *data,
 static int cpuctl_do_eval_cpu_features(int cpu, struct thread *td);
 static int cpuctl_do_update(int cpu, cpuctl_update_args_t *data,
     struct thread *td);
+static int cpuctl_do_ibs_get_caps(cpuctl_ibs_caps_args_t *data);
+static int cpuctl_do_ibs_set_period(cpuctl_ibs_period_args_t *data);
 static int update_intel(int cpu, cpuctl_update_args_t *args,
     struct thread *td);
 static int update_amd(int cpu, cpuctl_update_args_t *args, struct thread *td);
@@ -193,6 +196,12 @@ cpuctl_ioctl(struct cdev *dev, u_long cmd, caddr_t data,
 		break;
 	case CPUCTL_EVAL_CPU_FEATURES:
 		ret = cpuctl_do_eval_cpu_features(cpu, td);
+		break;
+	case CPUCTL_IBS_GET_CAPS:
+		ret = cpuctl_do_ibs_get_caps((cpuctl_ibs_caps_args_t *)data);
+		break;
+	case CPUCTL_IBS_SET_PERIOD:
+		ret = cpuctl_do_ibs_set_period((cpuctl_ibs_period_args_t *)data);
 		break;
 	default:
 		ret = EINVAL;
@@ -548,6 +557,30 @@ cpuctl_do_eval_cpu_features(int cpu, struct thread *td)
 	zenbleed_check_and_apply(true);
 	printcpuinfo();
 	return (0);
+}
+
+static int
+cpuctl_do_ibs_get_caps(cpuctl_ibs_caps_args_t *data)
+{
+	struct pmc_op_ibsgetcaps caps;
+
+	int error = pmc_ibs_get_caps(&caps);
+	if (error != 0)
+		return (error);
+
+	data->pm_ibs_features = caps.pm_ibs_features;
+	data->pm_ibs_fetch_cap = caps.pm_ibs_fetch_cap;
+	data->pm_ibs_op_cap = caps.pm_ibs_op_cap;
+	data->pm_ibs_zen4_ext = caps.pm_ibs_zen4_ext;
+	data->pm_ibs_load_lat_filt = caps.pm_ibs_load_lat_filt;
+
+	return (0);
+}
+
+static int
+cpuctl_do_ibs_set_period(cpuctl_ibs_period_args_t *data)
+{
+	return (pmc_ibs_set_period(data->pmcid, data->period));
 }
 
 int

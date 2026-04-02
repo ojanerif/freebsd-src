@@ -50,6 +50,19 @@ typedef struct {
 	size_t	size;
 } cpuctl_update_args_t;
 
+typedef struct {
+	uint32_t pm_ibs_features;
+	uint32_t pm_ibs_fetch_cap;
+	uint32_t pm_ibs_op_cap;
+	uint32_t pm_ibs_zen4_ext;
+	uint32_t pm_ibs_load_lat_filt;
+} cpuctl_ibs_caps_args_t;
+
+typedef struct {
+	uint32_t pmcid;
+	uint64_t period;
+} cpuctl_ibs_period_args_t;
+
 #define	CPUCTL_RDMSR	_IOWR('c', 1, cpuctl_msr_args_t)
 #define	CPUCTL_WRMSR	_IOWR('c', 2, cpuctl_msr_args_t)
 #define	CPUCTL_CPUID	_IOWR('c', 3, cpuctl_cpuid_args_t)
@@ -58,5 +71,7 @@ typedef struct {
 #define	CPUCTL_MSRCBIT	_IOWR('c', 6, cpuctl_msr_args_t)
 #define	CPUCTL_CPUID_COUNT _IOWR('c', 7, cpuctl_cpuid_count_args_t)
 #define	CPUCTL_EVAL_CPU_FEATURES	_IO('c', 8)
+#define	CPUCTL_IBS_GET_CAPS	_IOWR('c', 9, cpuctl_ibs_caps_args_t)
+#define	CPUCTL_IBS_SET_PERIOD	_IOWR('c', 10, cpuctl_ibs_period_args_t)
 
 #endif /* _CPUCTL_H_ */
