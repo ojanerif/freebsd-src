@@ -183,7 +183,7 @@ ATF_TC_BODY(ibs_ioctl_set_period, tc)
 		alloc.pm_caps = PMC_CAP_SYSTEM | PMC_CAP_INTERRUPT;
 		alloc.pm_cpu = PMC_CPU_ANY;
 		alloc.pm_mode = PMC_MODE_SS;
-		alloc.pm_ev = PMC_EV_IBS_FETCH_SAMPLE;
+		alloc.pm_ev = PMC_EV_IBS_FETCH;
 		alloc.pm_md.pm_ibs.ibs_type = IBS_PMC_FETCH;
 		alloc.pm_md.pm_ibs.ibs_ctl = IBS_FETCH_MIN_RATE;
 		alloc.pm_count = IBS_FETCH_MIN_RATE;
