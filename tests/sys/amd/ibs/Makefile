@@ -21,8 +21,6 @@ ATF_TESTS_C=	ibs_cpu_test \
 
 ATF_TESTS_SH=	ibs_swfilt_test
 
-ATF_TESTS_SH=	ibs_swfilt_test
-
 LIBADD+=pthread
 
 .include <bsd.test.mk>
