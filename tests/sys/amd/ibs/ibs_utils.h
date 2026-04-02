@@ -167,6 +167,98 @@
 #define IBS_FETCH_CNT			0x00000000ffff0000ULL	/* Current count field */
 #define IBS_OP_MAXCNT			0x000000000000ffffULL	/* Op max count field */
 
+/* PMC ioctl syscall definitions for tests */
+#define SYS_hwpmc			548		/* hwpmc syscall number */
+
+/* PMC class definitions */
+#define PMC_CLASS_IBS			10		/* IBS PMC class */
+
+/* PMC event definitions */
+#define PMC_EV_IBS_FETCH		(PMC_EV_IBS_FIRST + 0)
+#define PMC_EV_IBS_OP			(PMC_EV_IBS_FIRST + 1)
+#define PMC_EV_IBS_FIRST		700		/* IBS event base */
+
+/* IBS-specific PMC constants */
+#define IBS_PMC_FETCH			0
+#define IBS_PMC_OP			1
+#define IBS_FETCH_MIN_RATE		1000
+#define IBS_OP_MIN_RATE			1000
+
+/* PMC capability flags */
+#define PMC_CAP_SYSTEM			0x01
+#define PMC_CAP_USER			0x02
+#define PMC_CAP_EDGE			0x04
+#define PMC_CAP_QUALIFIER		0x08
+#define PMC_CAP_PRECISE			0x10
+#define PMC_CAP_INTERRUPT		0x20
+
+/* PMC mode definitions */
+#define PMC_MODE_SS			1		/* Sampling mode */
+
+/* PMC operation definitions */
+#define PMC_OP_PMCALLOCATE		1
+#define PMC_OP_PMCSTART			2
+#define PMC_OP_PMCSTOP			3
+#define PMC_OP_PMCRELEASE		4
+#define PMC_OP_IBSGETCAPS		(350)		/* IBS operations */
+#define PMC_OP_IBSSETPERIOD		(351)
+
+/* CPUID function definitions */
+#define CPUID_IBSID_FETCHSAM		0x00000002
+#define CPUID_IBSID_OPSAM		0x00000004
+#define CPUID_IBSID_ZEN4IBSEXTENSIONS	0x00000080
+
+/* PMC CPU definitions */
+#define PMC_CPU_ANY			-1
+
+/* PMC ID definitions */
+#define PMC_ID_INVALID			(~(uint32_t)0)
+
+/* PMC ioctl structures for tests */
+struct pmc_syscall_args {
+	int pmop_code;
+	void *pmop_data;
+};
+
+struct pmc_op_getcpuinfo {
+	uint32_t pm_nclass;
+	struct {
+		uint32_t pm_class;
+		uint32_t pm_caps;
+		uint32_t pm_width;
+		uint32_t pm_num;
+	} pm_classes[8];
+};
+
+struct pmc_op_simple {
+	uint32_t pm_pmcid;
+};
+
+struct pmc_op_pmcallocate {
+	uint32_t pm_class;
+	uint32_t pm_caps;
+	int32_t pm_cpu;
+	uint32_t pm_mode;
+	uint32_t pm_ev;
+	uint32_t pm_flags;
+	uint32_t pm_md[4];
+	uint64_t pm_count;
+};
+
+struct pmc_op_ibsgetcaps {
+	uint32_t pm_ibs_features;
+	uint32_t pm_ibs_fetch_cap;
+	uint32_t pm_ibs_op_cap;
+	uint32_t pm_ibs_zen4_ext;
+	uint32_t pm_ibs_load_lat_filt;
+	uint32_t pm_ibs_reserved[4];
+};
+
+struct pmc_op_ibssetperiod {
+	uint32_t pm_pmcid;
+	uint64_t pm_period;
+};
+
 /* Helper functions */
 static inline int
 do_cpuid_ioctl(uint32_t level, uint32_t *regs)

@@ -49,15 +49,6 @@
 #define IBS_FETCH_CTL_ENABLE		(1ULL << 48)	/* IBS_FETCH_EN */
 #define IBS_FETCH_CTL_VALID		(1ULL << 49)	/* IBS_FETCH_VAL */
 #define IBS_FETCH_CTL_COMPLETE		(1ULL << 50)	/* IBS_FETCH_COMP */
-#define IBS_RAND_EN			(1ULL << 57)	/* Random enable (Zen 4+) */
-
-/*
- * IBS Op Control bit definitions
- */
-#define IBS_OP_CTL_ENABLE		(1ULL << 17)	/* IBS_OP_EN */
-#define IBS_OP_CTL_VALID		(1ULL << 18)	/* IBS_OP_VAL */
-#define IBS_CNT_CTL			(1ULL << 19)	/* Counter control */
-#define IBS_OP_MAXCNT_EXT		(0x7FULL << 20)	/* Extended max count (Zen 4+) */
 
 /*
  * IBS Global Control (MSR 0xc001103a) bit definitions

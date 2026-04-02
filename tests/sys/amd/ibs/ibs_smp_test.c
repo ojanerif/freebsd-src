@@ -233,7 +233,6 @@ static void *
 smp_concurrent_disable_thread(void *arg)
 {
 	struct smp_concurrent_arg *ca = arg;
-	uint64_t val;
 	int error;
 
 	if (!ca->has_original)

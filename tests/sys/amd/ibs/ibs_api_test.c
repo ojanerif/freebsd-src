@@ -10,7 +10,6 @@
 #include <atf-c.h>
 
 #include "ibs_utils.h"
-#include <dev/hwpmc/hwpmc_ibs.h>
 
 /*
  * Test MSR read/write round-trip for IBS Fetch Control register.

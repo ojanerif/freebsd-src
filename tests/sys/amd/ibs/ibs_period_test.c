@@ -78,11 +78,7 @@
 /*
  * Helper: Extract the maxcnt (period) field from an IBS control value.
  */
-static inline uint64_t
-ibs_get_maxcnt(uint64_t ctl_val)
-{
-	return (ctl_val & IBS_MAXCNT_MASK);
-}
+
 
 /*
  * Helper: Set the maxcnt (period) field in an IBS control value.
