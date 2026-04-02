@@ -1,12 +1,13 @@
 #-
-# Copyright (c) 2023 Advanced Micro Devices, Inc.
+# Copyright (c) 2023, 2026 Advanced Micro Devices, Inc.
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
 
 TESTSDIR=	${TESTSBASE}/sys/amd/ibs
 
-ATF_TESTS_C=	ibs_detect_test \
+ATF_TESTS_C=	ibs_cpu_test \
+		ibs_detect_test \
 		ibs_msr_test \
 		ibs_interrupt_test \
 		ibs_data_accuracy_test \

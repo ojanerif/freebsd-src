@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2023 Advanced Micro Devices, Inc.
+ * Copyright (c) 2023, 2026 Advanced Micro Devices, Inc.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -105,6 +105,52 @@ cpu_is_zen4(void)
 		return (false);
 	family = ((regs[0] >> 8) & 0xf) + ((regs[0] >> 20) & 0xff);
 	return (family == 0x19);
+}
+
+static inline bool
+cpu_is_zen5(void)
+{
+	uint32_t regs[4];
+	uint32_t family;
+
+	if (do_cpuid_ioctl(0x1, regs) != 0)
+		return (false);
+	family = ((regs[0] >> 8) & 0xf) + ((regs[0] >> 20) & 0xff);
+	return (family == 0x1a);
+}
+
+static inline uint32_t
+cpu_get_family(void)
+{
+	uint32_t regs[4];
+	uint32_t family;
+
+	if (do_cpuid_ioctl(0x1, regs) != 0)
+		return (0);
+	family = ((regs[0] >> 8) & 0xf) + ((regs[0] >> 20) & 0xff);
+	return (family);
+}
+
+static inline uint32_t
+cpu_get_model(void)
+{
+	uint32_t regs[4];
+	uint32_t model;
+
+	if (do_cpuid_ioctl(0x1, regs) != 0)
+		return (0);
+	model = ((regs[0] >> 4) & 0xf) + ((regs[0] >> 12) & 0xf0);
+	return (model);
+}
+
+static inline uint32_t
+cpu_get_stepping(void)
+{
+	uint32_t regs[4];
+
+	if (do_cpuid_ioctl(0x1, regs) != 0)
+		return (0);
+	return (regs[0] & 0xf);
 }
 
 static inline int
