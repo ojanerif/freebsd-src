@@ -30,7 +30,6 @@
 #define	_DEV_HWPMC_IBS_H_ 1
 
 #include <sys/param.h>
-#include <sys/pmc.h>
 
 #define	IBS_NPMCS			2
 #define	IBS_PMC_FETCH			0
@@ -186,6 +185,8 @@ struct pmc_md_ibs_op_pmcallocate {
 };
 
 #ifdef _KERNEL
+
+#include <sys/pmc.h>
 
 /* MD extension for 'struct pmc' */
 struct pmc_md_ibs_pmc {
