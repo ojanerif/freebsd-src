@@ -1,0 +1,7 @@
+include GENERIC
+ident experimental-port
+
+# Explicitly disable Linux compatibility
+nooptions    COMPAT_LINUX
+nooptions    COMPAT_LINUX32
+nodevice     linux
