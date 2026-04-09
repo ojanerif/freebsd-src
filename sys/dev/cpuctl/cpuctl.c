@@ -48,6 +48,13 @@
 #include <sys/cpuctl.h>
 #include <sys/pmc.h>
 
+/*
+ * IBS PMC functions are optional — provided by hwpmc when loaded.
+ * Declare them as weak so cpuctl.ko loads even without hwpmc present.
+ */
+#pragma weak pmc_ibs_set_period
+#pragma weak pmc_ibs_get_caps
+
 #include <vm/vm.h>
 #include <vm/vm_param.h>
 #include <vm/pmap.h>
@@ -563,8 +570,11 @@ static int
 cpuctl_do_ibs_get_caps(cpuctl_ibs_caps_args_t *data)
 {
 	struct pmc_op_ibsgetcaps caps;
+	int error;
 
-	int error = pmc_ibs_get_caps(&caps);
+	if (pmc_ibs_get_caps == NULL)
+		return (ENXIO);
+	error = pmc_ibs_get_caps(&caps);
 	if (error != 0)
 		return (error);
 
@@ -580,6 +590,8 @@ cpuctl_do_ibs_get_caps(cpuctl_ibs_caps_args_t *data)
 static int
 cpuctl_do_ibs_set_period(cpuctl_ibs_period_args_t *data)
 {
+	if (pmc_ibs_set_period == NULL)
+		return (ENXIO);
 	return (pmc_ibs_set_period(data->pmcid, data->period));
 }
 
