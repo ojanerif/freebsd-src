@@ -1,0 +1,24 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# ibs-tests.yml — Trigger AMD IBS CI pipeline on push or manual dispatch.
+# Calls the reusable workflow in ojanerif/freebsd-ci-actions.
+
+name: IBS Tests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'tests/sys/amd/ibs/**'
+      - 'sys/dev/hwpmc/**'
+      - 'sys/amd64/amd64/ibs*'
+      - 'sys/modules/hwpmc/**'
+  workflow_dispatch:
+
+jobs:
+  ibs:
+    uses: ojanerif/freebsd-ci-actions/.github/workflows/ibs-full-test.yml@main
+    with:
+      kernconf: AMD_IBS
