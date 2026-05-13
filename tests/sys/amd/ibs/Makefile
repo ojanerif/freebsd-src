@@ -31,6 +31,7 @@ ATF_TESTS_C=	ibs_cpu_test \
 		ibs_invalid_input_test \
 		ibs_robustness_test \
 		ibs_concurrency_test \
+		ibs_swfilt_test \
 		ibs_hwpmc_info_test \
 		ibs_hwpmc_alloc_test \
 		ibs_hwpmc_caps_test \
@@ -41,8 +42,6 @@ ATF_TESTS_C=	ibs_cpu_test \
 		ibs_unit_fetch_ctl_fields_test \
 		ibs_unit_op_data_fields_test \
 		ibs_unit_msr_range_test
-
-ATF_TESTS_SH=	ibs_swfilt_test
 
 LIBADD+=pthread pmc
 

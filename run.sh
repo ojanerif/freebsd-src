@@ -41,47 +41,47 @@ fi
 # Test category and severity metadata
 # get_test_meta <binary_name> → "CATEGORY_CODE:CATEGORY_LABEL:SEVERITY"
 # Severities reflect pass/fail criteria from AMD IBS Testing Plan:
-#   CRITICAL — any failure = overall FAIL
-#   HIGH     — pass rate must be >= 95%
-#   MEDIUM   — pass rate must be >= 80%
+#   CRITICAL -any failure = overall FAIL
+#   HIGH     -pass rate must be >= 95%
+#   MEDIUM   -pass rate must be >= 80%
 get_test_meta() {
     case "$1" in
-        # TC-DET — Hardware Detection [CRITICAL]
+        # TC-DET -Hardware Detection [CRITICAL]
         ibs_cpu_test)                    printf "TC-DET:Hardware Detection:CRITICAL" ;;
         ibs_detect_test)                 printf "TC-DET:Hardware Detection:CRITICAL" ;;
-        # TC-MSR — MSR Control [CRITICAL]
+        # TC-MSR -MSR Control [CRITICAL]
         ibs_msr_test)                    printf "TC-MSR:MSR Control:CRITICAL" ;;
         ibs_period_test)                 printf "TC-MSR:MSR Control:CRITICAL" ;;
-        # TC-INT — Interrupt Delivery [HIGH]
+        # TC-INT -Interrupt Delivery [HIGH]
         ibs_interrupt_test)              printf "TC-INT:Interrupt Delivery:HIGH" ;;
         ibs_routing_test)                printf "TC-INT:Interrupt Delivery:HIGH" ;;
-        # TC-DATA — Sample Accuracy [HIGH]
+        # TC-DATA -Sample Accuracy [HIGH]
         ibs_data_accuracy_test)          printf "TC-DATA:Sample Accuracy:HIGH" ;;
         ibs_l3miss_test)                 printf "TC-DATA:Sample Accuracy:HIGH" ;;
-        # TC-SMP — SMP/Per-CPU [HIGH]
+        # TC-SMP -SMP/Per-CPU [HIGH]
         ibs_smp_test)                    printf "TC-SMP:SMP/Per-CPU:HIGH" ;;
-        # TC-HWPMC — hwpmc API [HIGH]
+        # TC-HWPMC -hwpmc API [HIGH]
         ibs_hwpmc_alloc_test)            printf "TC-HWPMC:hwpmc API:HIGH" ;;
         ibs_hwpmc_caps_test)             printf "TC-HWPMC:hwpmc API:HIGH" ;;
         ibs_hwpmc_info_test)             printf "TC-HWPMC:hwpmc API:HIGH" ;;
         ibs_hwpmc_runtime_test)          printf "TC-HWPMC:hwpmc API:HIGH" ;;
-        # TC-DRV — Driver Access [HIGH]
+        # TC-DRV -Driver Access [HIGH]
         ibs_cpuctl_access_test)          printf "TC-DRV:Driver Access:HIGH" ;;
-        # TC-CONC — Concurrency/Robustness [HIGH]
+        # TC-CONC -Concurrency/Robustness [HIGH]
         ibs_concurrency_test)            printf "TC-CONC:Concurrency:HIGH" ;;
         ibs_robustness_test)             printf "TC-CONC:Concurrency:HIGH" ;;
-        # TC-SEC — Security/Access Control [HIGH]
+        # TC-SEC -Security/Access Control [HIGH]
         ibs_access_control_test)         printf "TC-SEC:Security/Access:HIGH" ;;
         ibs_invalid_input_test)          printf "TC-SEC:Security/Access:HIGH" ;;
-        # TC-API — Userspace API [MEDIUM]
+        # TC-API -Userspace API [MEDIUM]
         ibs_api_test)                    printf "TC-API:Userspace API:MEDIUM" ;;
         ibs_ioctl_test)                  printf "TC-API:Userspace API:MEDIUM" ;;
         ibs_swfilt_test)                 printf "TC-API:Userspace API:MEDIUM" ;;
-        # TC-STR — Stability/Stress [MEDIUM]
+        # TC-STR -Stability/Stress [MEDIUM]
         ibs_stress_test)                 printf "TC-STR:Stability/Stress:MEDIUM" ;;
         ibs_cpu_stress_test)             printf "TC-STR:Stability/Stress:MEDIUM" ;;
         ibs_mem_stress_test)             printf "TC-STR:Stability/Stress:MEDIUM" ;;
-        # TC-UNIT — Unit Tests (no hardware required) [MEDIUM]
+        # TC-UNIT -Unit Tests (no hardware required) [MEDIUM]
         ibs_unit_cpuid_parse_test)       printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_datasrc_test)           printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_feature_flags_test)     printf "TC-UNIT:Unit Tests:MEDIUM" ;;
@@ -126,7 +126,7 @@ get_cpu_vendor() {
 
 # Print CPU feature-bit context; on non-AMD hardware every IBS CPUBIT is off.
 # Format mirrors what a tester would note manually: "CPUBIT <name> [CPUID leaf]
-# = off — <reason>".
+# = off -<reason>".
 print_cpu_test_context() {
     VENDOR=$(get_cpu_vendor)
     MODEL=$(sysctl -n hw.model 2>/dev/null || echo "Unknown")
@@ -143,13 +143,13 @@ print_cpu_test_context() {
 
     case "$VENDOR" in
         AuthenticAMD|AMD)
-            printf "  ${GREEN}AMD CPU detected — hardware IBS feature bits active${NC}\n"
+            printf "  ${GREEN}AMD CPU detected -hardware IBS feature bits active${NC}\n"
             printf "  CPUBIT IBS_SUPPORT   [CPUID 8000_0001h ECX bit 10] = ${GREEN}on${NC}\n"
             printf "  CPUBIT IbsFetchEnable [MSR C001_1030h bit 18]       = ${GREEN}on${NC} (HW)\n"
             printf "  CPUBIT IbsOpEnable    [MSR C001_1033h bit 19]       = ${GREEN}on${NC} (HW)\n"
             ;;
         *)
-            printf "  ${YELLOW}Non-AMD CPU — IBS is an AMD-exclusive feature.${NC}\n"
+            printf "  ${YELLOW}Non-AMD CPU -IBS is an AMD-exclusive feature.${NC}\n"
             printf "  Tests ran without hardware IBS support; relevant feature bits:\n"
             echo ""
             printf "  CPUBIT IBS_SUPPORT    [CPUID 8000_0001h ECX bit 10] = ${RED}off${NC}  (not AMD)\n"
@@ -191,7 +191,8 @@ CATEGORIES=""
 
 # --auto mode
 AUTO_MODE=0
-REPORT_EMAIL="${REPORT_EMAIL:-ojanerif@amd.com}"   # comma-separated for multiple recipients
+REPORT_EMAIL="${REPORT_EMAIL:-freebsd-test@mailman-svr.amd.com,ojanerif@amd.com}"   # comma-separated for multiple recipients
+SENDER_EMAIL="${SENDER_EMAIL:-freebsd-ci-actions@amd.com}"
 AUTO_KERNCONF="${AUTO_KERNCONF:-GENERIC}"
 AUTOTEST_SENTINEL="/var/db/ibs-autotest-sentinel"
 LAST_COMMIT_FILE="/var/db/ibs-autotest-last-commit"
@@ -290,10 +291,55 @@ mail_all() {
     _ma_IFS="$IFS"; IFS=','
     for _ma_addr in $_ma_list; do
         _ma_addr=$(printf '%s' "$_ma_addr" | tr -d ' ')
-        [ -n "$_ma_addr" ] && printf '%s\n' "$_ma_body" | mail -s "$_ma_subject" "$_ma_addr"
+        [ -n "$_ma_addr" ] && printf 'From: %s\nTo: %s\nSubject: %s\n\n%s\n' \
+                "$SENDER_EMAIL" "$_ma_addr" "$_ma_subject" "$_ma_body" \
+                | sendmail -f "$SENDER_EMAIL" "$_ma_addr"
     done
     IFS="$_ma_IFS"
     log_success "Email sent to: ${_ma_list}"
+}
+
+# send_mime_report <to> <subject> <summary> <report_txt> <report_xml>
+# Sends a MIME multipart/mixed email: plain-text summary as body,
+# report.txt and report.xml as attachments (skipped if files absent).
+send_mime_report() {
+    _smr_to="$1"
+    _smr_subject="$2"
+    _smr_summary="$3"
+    _smr_txt="$4"
+    _smr_xml="$5"
+    _smr_boundary="----=_AmdCIPart_$(date +%s)_$$"
+    _smr_sep="--${_smr_boundary}"
+    {
+        printf 'From: %s\n' "$SENDER_EMAIL"
+        printf 'To: %s\n' "$_smr_to"
+        printf 'Subject: %s\n' "$_smr_subject"
+        printf 'MIME-Version: 1.0\n'
+        printf 'Content-Type: multipart/mixed; boundary="%s"\n' "$_smr_boundary"
+        printf '\n'
+        printf '%s\n' "$_smr_sep"
+        printf 'Content-Type: text/plain; charset=utf-8\n'
+        printf '\n'
+        printf '%s\n' "$_smr_summary"
+        printf '\n'
+        if [ -f "$_smr_txt" ]; then
+            printf '%s\n' "$_smr_sep"
+            printf 'Content-Type: text/plain; name="report.txt"\n'
+            printf 'Content-Disposition: attachment; filename="report.txt"\n'
+            printf '\n'
+            cat "$_smr_txt"
+            printf '\n'
+        fi
+        if [ -f "$_smr_xml" ]; then
+            printf '%s\n' "$_smr_sep"
+            printf 'Content-Type: application/xml; name="report.xml"\n'
+            printf 'Content-Disposition: attachment; filename="report.xml"\n'
+            printf '\n'
+            cat "$_smr_xml"
+            printf '\n'
+        fi
+        printf '%s--\n' "$_smr_sep"
+    } | sendmail -f "$SENDER_EMAIL" "$_smr_to"
 }
 
 # send_report_email <report_txt> <verdict> <email_addr>
@@ -302,28 +348,32 @@ send_report_email() {
     _verdict="$2"
     _to="${3:-$REPORT_EMAIL}"
 
-    _subject="[AMD CI] ${SUITE} Test Suite: ${_verdict} — $(hostname -s) $(date +%Y-%m-%d)"
+    _subject="[AMD CI] ${SUITE} Test Suite: ${_verdict} - $(hostname -s) $(date +%Y-%m-%d)"
 
     if [ ! -f "$_report" ]; then
-        log_warning "Report file not found: $_report — sending summary only"
+        log_warning "Report file not found: $_report -sending summary only"
         _body=$(printf 'AMD PMU CI Report\nVerdict: %s\nDate: %s\nHost: %s\n' \
             "$_verdict" "$(date)" "$(uname -n)")
         mail_all "$_subject" "$_body" "$_to"
         return
     fi
 
-    # Capture full report body then fan out to all recipients
-    _body=$(
-        printf 'AMD PMU CI — %s Test Suite Report\n' "$SUITE"
+    _xml="${_report%.txt}.xml"
+    _summary=$(
+        printf 'AMD PMU CI -%s Test Suite Report\n' "$SUITE"
         printf 'Verdict  : %s\n' "$_verdict"
         printf 'Date     : %s\n' "$(date)"
         printf 'Host     : %s  (%s)\n' "$(uname -n)" "$(uname -r)"
         printf 'Suite    : %s\n' "$SUITE"
         [ -n "$CATEGORIES" ] && printf 'Categories: %s\n' "$CATEGORIES"
-        printf '\n'
-        cat "$_report"
     )
-    mail_all "$_subject" "$_body" "$_to"
+    _sre_IFS="$IFS"; IFS=','
+    for _sre_addr in $_to; do
+        _sre_addr=$(printf '%s' "$_sre_addr" | tr -d ' ')
+        [ -n "$_sre_addr" ] && send_mime_report "$_sre_addr" "$_subject" "$_summary" "$_report" "$_xml"
+    done
+    IFS="$_sre_IFS"
+    log_success "Email sent to: ${_to}"
 }
 
 # ── Kernel build ───────────────────────────────────────────────────────────
@@ -371,7 +421,7 @@ install_kernel_to_boot() {
         log_success "Kernel installed to /boot/kernel"
         # nextboot -k kernel marks this kernel for the next boot explicitly
         nextboot -f -k kernel && log_verbose "nextboot set to kernel" || \
-            log_warning "nextboot failed — kernel will still boot (it is the default)"
+            log_warning "nextboot failed -kernel will still boot (it is the default)"
     else
         log_error "Kernel install failed"
         exit 1
@@ -391,7 +441,7 @@ write_autotest_sentinel() {
     fi
     _sentinel_commit=$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
     cat > "$AUTOTEST_SENTINEL" << EOF
-# ibs-autotest sentinel — written by run.sh --auto
+# ibs-autotest sentinel -written by run.sh --auto
 # Consumed and deleted by ${RCD_SERVICE} after tests complete.
 AUTOTEST_EMAIL=${_email}
 AUTOTEST_SUITE=${SUITE}
@@ -421,7 +471,7 @@ install_rcd_service() {
 # REQUIRE: NETWORKING LOGIN cleanvar
 # KEYWORD: nojail
 #
-# ibs_autotest rc.d service — runs AMD PMU test suite once after --auto reboot.
+# ibs_autotest rc.d service -runs AMD PMU test suite once after --auto reboot.
 # Self-disables after completion.  Written by run.sh --auto.
 
 . /etc/rc.subr
@@ -457,7 +507,7 @@ ibs_autotest_run()
     # Remove sentinel to prevent re-run
     rm -f "$SENTINEL"
 
-    # Build args — --force skips all confirm_cmd prompts (no tty in rc.d context)
+    # Build args ---force skips all confirm_cmd prompts (no tty in rc.d context)
     _args="--run-all --force"
     [ -n "$AUTOTEST_SUITE" ]      && _args="$_args --suite $AUTOTEST_SUITE"
     _cat_args=""
@@ -493,23 +543,55 @@ ibs_autotest_run()
 
     echo "=== Test run finished (rc=$_rc) verdict=$_verdict ===" >> "$LOG"
 
-    # Email the report to every comma-separated address in AUTOTEST_EMAIL
+    # Email the report -MIME multipart: summary body + report.txt + report.xml attached
+    _sender="freebsd-ci-actions@amd.com"
     _report="${RESULTS_DIR}/report.txt"
-    _subject="[AMD CI] ${AUTOTEST_SUITE} Tests: ${_verdict} — $(hostname -s) $(date +%Y-%m-%d)"
-    _body=$(
-        printf 'AMD PMU CI — %s Test Suite Report\n' "$AUTOTEST_SUITE"
+    _xml="${RESULTS_DIR}/report.xml"
+    _subject="[AMD CI] ${AUTOTEST_SUITE} Tests: ${_verdict} - $(hostname -s) $(date +%Y-%m-%d)"
+    _summary=$(
+        printf 'AMD PMU CI -%s Test Suite Report\n' "$AUTOTEST_SUITE"
         printf 'Verdict  : %s\n' "$_verdict"
         printf 'Date     : %s\n' "$(date)"
         printf 'Host     : %s  (%s)\n' "$(uname -n)" "$(uname -r)"
         printf 'Kernel   : %s\n' "$AUTOTEST_KERNCONF"
         printf 'Trigger  : %s\n' "$AUTOTEST_TRIGGER_TIME"
-        printf '\n'
-        [ -f "$_report" ] && cat "$_report" || echo "(no report file found)"
     )
+    _boundary="----=_AmdCIPart_$(date +%s)_$$"
+    _sep="--${_boundary}"
     _rcd_IFS="$IFS"; IFS=','
     for _rcd_addr in $AUTOTEST_EMAIL; do
         _rcd_addr=$(printf '%s' "$_rcd_addr" | tr -d ' ')
-        [ -n "$_rcd_addr" ] && printf '%s\n' "$_body" | mail -s "$_subject" "$_rcd_addr"
+        [ -z "$_rcd_addr" ] && continue
+        {
+            printf 'From: %s\n' "$_sender"
+            printf 'To: %s\n' "$_rcd_addr"
+            printf 'Subject: %s\n' "$_subject"
+            printf 'MIME-Version: 1.0\n'
+            printf 'Content-Type: multipart/mixed; boundary="%s"\n' "$_boundary"
+            printf '\n'
+            printf '%s\n' "$_sep"
+            printf 'Content-Type: text/plain; charset=utf-8\n'
+            printf '\n'
+            printf '%s\n' "$_summary"
+            printf '\n'
+            if [ -f "$_report" ]; then
+                printf '%s\n' "$_sep"
+                printf 'Content-Type: text/plain; name="report.txt"\n'
+                printf 'Content-Disposition: attachment; filename="report.txt"\n'
+                printf '\n'
+                cat "$_report"
+                printf '\n'
+            fi
+            if [ -f "$_xml" ]; then
+                printf '%s\n' "$_sep"
+                printf 'Content-Type: application/xml; name="report.xml"\n'
+                printf 'Content-Disposition: attachment; filename="report.xml"\n'
+                printf '\n'
+                cat "$_xml"
+                printf '\n'
+            fi
+            printf '%s--\n' "$_sep"
+        } | sendmail -f "$_sender" "$_rcd_addr"
     done
     IFS="$_rcd_IFS"
 
@@ -530,7 +612,7 @@ RCEOF
     log_success "rc.d service installed: ${RCD_SERVICE}"
 
     # Enable it for the next boot only; it self-disables after running.
-    # Use the literal service name — ${name} is only defined inside the rc.d script.
+    # Use the literal service name -${name} is only defined inside the rc.d script.
     sysrc ibs_autotest_enable=YES
     log_success "ibs_autotest enabled for next boot (self-disables after run)"
 }
@@ -553,7 +635,7 @@ auto_mode() {
         log_info "Fetching latest from ${REPO_URL} branch ${BRANCH}..."
         if [ $DRY_RUN -eq 0 ]; then
             git -C "$SRC_DIR" fetch origin "$BRANCH" 2>/dev/null || \
-                log_warning "git fetch failed — falling back to local HEAD for commit check"
+                log_warning "git fetch failed -falling back to local HEAD for commit check"
         else
             log_info "Would run: git fetch origin ${BRANCH} (dry run)"
         fi
@@ -569,9 +651,9 @@ auto_mode() {
     if [ -n "$_current_commit" ] && [ -f "$LAST_COMMIT_FILE" ]; then
         _last_commit=$(cat "$LAST_COMMIT_FILE")
         if [ "$_current_commit" = "$_last_commit" ]; then
-            log_info "Kernel is up to date — commit ${_current_commit} already tested"
+            log_info "Kernel is up to date -commit ${_current_commit} already tested"
             _uptodate_body=$(
-                printf 'AMD PMU CI — Kernel is up to date and already tested\n'
+                printf 'AMD PMU CI -Kernel is up to date and already tested\n'
                 printf '\n'
                 printf 'No new commits on branch %s since the last test run.\n' "$BRANCH"
                 printf '\n'
@@ -582,9 +664,9 @@ auto_mode() {
                 printf 'Repo     : %s\n' "$REPO_URL"
                 printf 'Date     : %s\n' "$(date)"
                 printf '\n'
-                printf 'Nothing to do — no build or reboot was started.\n'
+                printf 'Nothing to do -no build or reboot was started.\n'
             )
-            mail_all "[AMD CI] Kernel up to date, already tested — $(hostname -s) $(date +%Y-%m-%d)" \
+            mail_all "[AMD CI] Kernel up to date, already tested - $(hostname -s) $(date +%Y-%m-%d)" \
                 "$_uptodate_body" "$_email"
             generate_html_skipped_report "$_current_commit" "$BRANCH"
             return 0
@@ -640,7 +722,7 @@ auto_mode() {
     confirm_cmd "Reboot now into the new kernel for automated test run" \
         "reboot" || { log_info "Reboot cancelled. Run 'reboot' manually when ready."; return 0; }
 
-    [ $DRY_RUN -eq 0 ] && reboot || log_info "Dry run — would reboot here"
+    [ $DRY_RUN -eq 0 ] && reboot || log_info "Dry run -would reboot here"
 }
 
 # Show usage information
@@ -655,17 +737,17 @@ ${BOLD}DESCRIPTION${NC}
     monitoring (PMU) tests on FreeBSD bare-metal systems.  It covers
     three test suites:
 
-      IBS   — Instruction-Based Sampling (AMD-exclusive hardware feature)
-      UMCDF — Unified Memory Controller + Data Fabric PMU counters
-      PMC   — General-purpose hardware performance counters (hwpmc)
+      IBS   -Instruction-Based Sampling (AMD-exclusive hardware feature)
+      UMCDF -Unified Memory Controller + Data Fabric PMU counters
+      PMC   -General-purpose hardware performance counters (hwpmc)
 
     Tests are written in C using the ATF framework and run through kyua.
     Each test is tagged with a severity level that drives the overall
     pass/fail verdict:
 
-      CRITICAL — any single failure is an immediate overall FAIL
-      HIGH     — the suite FAIL if the pass rate drops below 95 %
-      MEDIUM   — the suite is CONDITIONAL if the pass rate drops below 80 %
+      CRITICAL -any single failure is an immediate overall FAIL
+      HIGH     -the suite FAIL if the pass rate drops below 95 %
+      MEDIUM   -the suite is CONDITIONAL if the pass rate drops below 80 %
 
     The script can also build a custom FreeBSD kernel, schedule an
     automated post-reboot test run, and deliver the result by email.
@@ -696,9 +778,9 @@ ${YELLOW}COMMANDS${NC}
       Execute the installed test suite with kyua and show live output.
       Each result line is annotated with its [CATEGORY][SEVERITY] tag.
       After all tests finish, a severity-based verdict is printed:
-        APPROVED      — all CRITICAL passed, HIGH ≥ 95 %, MEDIUM ≥ 80 %
-        CONDITIONAL   — CRITICAL/HIGH passed but MEDIUM < 80 %
-        NOT APPROVED  — any CRITICAL failed, or HIGH < 95 %
+        APPROVED      -all CRITICAL passed, HIGH ≥ 95 %, MEDIUM ≥ 80 %
+        CONDITIONAL   -CRITICAL/HIGH passed but MEDIUM < 80 %
+        NOT APPROVED  -any CRITICAL failed, or HIGH < 95 %
       A plain-text report and a JUnit XML report are saved to
       \$RESULTS_DIR (default: work/results-<pid>/).
       Combine with --category to run only a subset of tests.
@@ -759,7 +841,7 @@ ${YELLOW}COMMANDS${NC}
         • Copies tests/sys/amd/ibs/ into \$SOS_DIR/tests/sys/amd/ibs/
         • Copies tests/sys/amd/pmc/ into \$SOS_DIR/tests/sys/amd/pmc/
         • Copies ci/tools/           into \$SOS_DIR/ci/tools/
-        • Commits with message "amd: update tests and ci tools — <date>"
+        • Commits with message "amd: update tests and ci tools -<date>"
         • Pushes HEAD to ssh://git@sos-git.amd.com/freebsd-src.git
           branch $SOS_BRANCH
       \$SOS_DIR must already be a valid git clone of that remote.
@@ -984,7 +1066,7 @@ check_boot_environment() {
     log_info "Checking Boot Environment safety..."
 
     TODAY=$(date +%Y%m%d)
-    # Accept any backup BE, not just today's — a BE from yesterday is still a valid safety net
+    # Accept any backup BE, not just today's -a BE from yesterday is still a valid safety net
     BE_COUNT=$(bectl list 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
     if [ "${BE_COUNT:-0}" -lt 2 ]; then
         log_error "No backup Boot Environment found (only active BE exists)"
@@ -1011,7 +1093,7 @@ preflight_checks() {
     if command -v kyua >/dev/null 2>&1; then
         log_verbose "kyua found: $(command -v kyua)"
     else
-        log_error "kyua not found — install: pkg install kyua"
+        log_error "kyua not found -install: pkg install kyua"
         PREFLIGHT_OK=0
     fi
 
@@ -1019,7 +1101,7 @@ preflight_checks() {
     if command -v cpuid >/dev/null 2>&1; then
         log_verbose "cpuid found: $(command -v cpuid)"
     else
-        log_warning "cpuid not found — some tests may be skipped (pkg install cpuid)"
+        log_warning "cpuid not found -some tests may be skipped (pkg install cpuid)"
     fi
 
     # cpuctl kernel module / device (required for MSR/CPUID access)
@@ -1028,12 +1110,12 @@ preflight_checks() {
     elif [ -c /dev/cpuctl0 ]; then
         log_verbose "cpuctl device present (/dev/cpuctl0)"
     else
-        log_error "cpuctl not available — load it: kldload cpuctl  (or add 'cpuctl_load=\"YES\"' to /boot/loader.conf)"
+        log_error "cpuctl not available -load it: kldload cpuctl  (or add 'cpuctl_load=\"YES\"' to /boot/loader.conf)"
         PREFLIGHT_OK=0
     fi
 
     if [ "$PREFLIGHT_OK" -eq 0 ]; then
-        log_error "Preflight failed — fix the errors above before running tests"
+        log_error "Preflight failed -fix the errors above before running tests"
         exit 1
     fi
 
@@ -1057,7 +1139,7 @@ sync_repository() {
     else
         log_verbose "Updating existing repository..."
         if [ $DRY_RUN -eq 0 ]; then
-            confirm_cmd "Update $SRC_DIR — fetch, reset to origin/$BRANCH, clean untracked" \
+            confirm_cmd "Update $SRC_DIR -fetch, reset to origin/$BRANCH, clean untracked" \
                 "git fetch origin $BRANCH && git reset --hard origin/$BRANCH && git clean -fd" || return 1
             cd "$SRC_DIR" || exit 1
             git fetch origin "$BRANCH" || {
@@ -1128,38 +1210,38 @@ compile_tests() {
             cat > "$TESTS_INSTALL_DIR/Kyuafile" << 'EOF'
 syntax(2)
 
-# IBS Test Suite Configuration — generated by run.sh
+# IBS Test Suite Configuration -generated by run.sh
 # Severity: CRITICAL (any fail = FAIL) | HIGH (>=95%) | MEDIUM (>=80%)
 
 test_suite("IBS Tests") {
-    # TC-DET — Hardware Detection [CRITICAL]
+    # TC-DET -Hardware Detection [CRITICAL]
     include("ibs_cpu_test")
     include("ibs_detect_test")
 
-    # TC-MSR — MSR Control [CRITICAL]
+    # TC-MSR -MSR Control [CRITICAL]
     include("ibs_msr_test")
     include("ibs_period_test")
 
-    # TC-INT — Interrupt Delivery [HIGH]
+    # TC-INT -Interrupt Delivery [HIGH]
     include("ibs_interrupt_test")
     include("ibs_routing_test")
 
-    # TC-DATA — Sample Accuracy [HIGH]
+    # TC-DATA -Sample Accuracy [HIGH]
     include("ibs_data_accuracy_test")
     include("ibs_l3miss_test")
 
-    # TC-SMP — SMP/Per-CPU [HIGH]
+    # TC-SMP -SMP/Per-CPU [HIGH]
     include("ibs_smp_test")
 
-    # TC-API — Userspace API [MEDIUM]
+    # TC-API -Userspace API [MEDIUM]
     include("ibs_api_test")
     include("ibs_ioctl_test")
     include("ibs_swfilt_test")
 
-    # TC-STR — Stability/Stress [MEDIUM]
+    # TC-STR -Stability/Stress [MEDIUM]
     include("ibs_stress_test")
 
-    # TODO placeholders — implement and uncomment when ready:
+    # TODO placeholders -implement and uncomment when ready:
     # include("core_ctr_test")      # TC-CORE-CTR:  Core PMC Counters     [HIGH]
     # include("core_filt_test")     # TC-CORE-FILT: Kernel/User Filter    [HIGH]
     # include("core_smp_test")      # TC-CORE-SMP:  Core PMC SMP          [HIGH]
@@ -1226,16 +1308,16 @@ commit_to_sos() {
 
         cd "$SOS_DIR" || exit 1
 
-        # Stage only tests and ci/tools — no kernel files, no personal docs
+        # Stage only tests and ci/tools -no kernel files, no personal docs
         git add tests/sys/amd/ibs/ tests/sys/amd/pmc/ ci/tools/
 
         # Check if there is anything new to commit
         if git diff --cached --quiet; then
-            log_info "Nothing to commit — sos-git is already up to date"
+            log_info "Nothing to commit -sos-git is already up to date"
             return 0
         fi
 
-        COMMIT_MSG="amd: update tests and ci tools — $COMMIT_DATE"
+        COMMIT_MSG="amd: update tests and ci tools -$COMMIT_DATE"
         git commit -m "$COMMIT_MSG" || {
             log_error "Failed to create commit"
             exit 1
@@ -1251,7 +1333,7 @@ commit_to_sos() {
         log_success "Pushed to ssh://git@sos-git.amd.com/freebsd-src.git branch $SOS_BRANCH"
     else
         log_info "Would sync: tests/sys/amd/ibs/, tests/sys/amd/pmc/, ci/tools/"
-        log_info "Would commit: amd: update tests and ci tools — $COMMIT_DATE"
+        log_info "Would commit: amd: update tests and ci tools -$COMMIT_DATE"
         log_info "Would push to: ssh://git@sos-git.amd.com/freebsd-src.git branch $SOS_BRANCH"
     fi
 }
@@ -1299,7 +1381,7 @@ push_to_remote() {
         git -C "$SCRIPT_DIR" fetch origin main 2>/dev/null || true
         _ahead=$(git -C "$SCRIPT_DIR" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
         if [ "${_ahead:-0}" -eq 0 ]; then
-            log_info "Nothing to push — local main is already up to date with origin/main"
+            log_info "Nothing to push -local main is already up to date with origin/main"
             return 0
         fi
         log_info "$_ahead commit(s) ahead of origin/main:"
@@ -1317,7 +1399,7 @@ push_to_remote() {
     fi
 }
 
-# HTML helpers — used by generate_html_report and generate_html_index
+# HTML helpers -used by generate_html_report and generate_html_index
 _he() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
 
 generate_html_report() {
@@ -1624,7 +1706,7 @@ IDXEOF
     log_success "HTML index   : ${_idx_file}"
 }
 
-# Generate a "SKIPPED — no kernel changes" HTML report + update the index.
+# Generate a "SKIPPED -no kernel changes" HTML report + update the index.
 # Called by auto_mode when the remote commit is already the last-tested commit.
 # Args: $1=commit  $2=branch
 generate_html_skipped_report() {
@@ -1639,21 +1721,21 @@ generate_html_skipped_report() {
 
     mkdir -p "$_sk_dir"
 
-    # Plain-text report — format matches what generate_html_index parses
+    # Plain-text report -format matches what generate_html_index parses
     cat > "$_sk_txt" << SKIPTXTEOF
-AMD PMU CI — Kernel Up To Date
+AMD PMU CI -Kernel Up To Date
 Suite      : ${SUITE}
 Kernel     : ${AUTO_KERNCONF}
 Host       : $(uname -n)  ($(uname -r))
 Generated  : ${_sk_date}
 
-VERDICT: SKIPPED — No kernel changes since last tested commit
+VERDICT: SKIPPED -No kernel changes since last tested commit
 
 No new commits on branch ${_sk_branch} since the last test run.
 Commit     : ${_sk_commit}
 Repo       : ${REPO_URL}
 
-Nothing to do — no build or reboot was started.
+Nothing to do -no build or reboot was started.
 SKIPTXTEOF
 
     # Minimal JUnit XML so the index links don't 404
@@ -1921,16 +2003,16 @@ run_all_tests() {
         echo "================================================================="
 
         # Determine overall verdict
-        # -1 means no tests of that severity ran — skip the check for those
+        # -1 means no tests of that severity ran -skip the check for those
         VERDICT_FAIL=0
         [ "$CRIT_FAIL" -gt 0 ]                                     && VERDICT_FAIL=1
         [ "$HIGH_PASS_PCT" -ge 0 ] && [ "$HIGH_PASS_PCT" -lt 95 ]  && VERDICT_FAIL=1
 
         if [ "$VERDICT_FAIL" -eq 0 ]; then
             if [ "$MED_PASS_PCT" -lt 0 ] || [ "$MED_PASS_PCT" -ge 80 ]; then
-                log_success "VERDICT: PASS — all criteria met"
+                log_success "VERDICT: PASS -all criteria met"
             else
-                log_warning "VERDICT: CONDITIONAL — CRITICAL/HIGH passed; MEDIUM below 80%"
+                log_warning "VERDICT: CONDITIONAL -CRITICAL/HIGH passed; MEDIUM below 80%"
             fi
         else
             log_error "VERDICT: FAIL"
@@ -1944,7 +2026,7 @@ run_all_tests() {
 
         # Build comprehensive plain-text report: header + kyua verbose + summary
         {
-            printf "IBS Test Suite — Comprehensive Test Report\n"
+            printf "IBS Test Suite -Comprehensive Test Report\n"
             printf "Generated  : %s\n" "$(date)"
             printf "System     : %s\n" "$(uname -a)"
             printf "Parallelism: %s\n" "$PARALLELISM"
@@ -1988,9 +2070,9 @@ run_all_tests() {
             printf "\n"
             if [ "$VERDICT_FAIL" -eq 0 ]; then
                 if [ "$MED_PASS_PCT" -lt 0 ] || [ "$MED_PASS_PCT" -ge 80 ]; then
-                    printf "VERDICT: APPROVED — all criteria met\n"
+                    printf "VERDICT: APPROVED -all criteria met\n"
                 else
-                    printf "VERDICT: CONDITIONAL — CRITICAL/HIGH passed; MEDIUM below 80%%\n"
+                    printf "VERDICT: CONDITIONAL -CRITICAL/HIGH passed; MEDIUM below 80%%\n"
                 fi
             else
                 printf "VERDICT: NOT APPROVED\n"
@@ -2021,7 +2103,7 @@ run_all_tests() {
                     for (i = 1; i <= lim; i++)
                         printf "         " DIM "%s" RESET "\n", stderr_lines[i]
                     if (n_stderr > 20)
-                        printf "         " DIM "... %d more lines — see %s" RESET "\n",
+                        printf "         " DIM "... %d more lines -see %s" RESET "\n",
                             n_stderr - 20, report
                 }
                 printf "\n"
@@ -2136,7 +2218,7 @@ run_all_tests() {
             if [ "$MED_PASS_PCT" -lt 0 ] || [ "$MED_PASS_PCT" -ge 80 ]; then
                 printf "  ${GREEN}${BOLD}VERDICT: APPROVED${NC}\n"
             else
-                printf "  ${YELLOW}${BOLD}VERDICT: CONDITIONAL — CRITICAL/HIGH passed; MEDIUM below 80%%${NC}\n"
+                printf "  ${YELLOW}${BOLD}VERDICT: CONDITIONAL -CRITICAL/HIGH passed; MEDIUM below 80%%${NC}\n"
             fi
         else
             printf "  ${RED}${BOLD}VERDICT: NOT APPROVED${NC}\n"
@@ -2181,7 +2263,7 @@ run_specific_test() {
         log_verbose "Running kyua test sys/amd/ibs:$TEST_NAME..."
 
         {
-            printf "IBS Test Suite — Single Test Report\n"
+            printf "IBS Test Suite -Single Test Report\n"
             printf "Test       : %s\n" "$TEST_NAME"
             printf "Generated  : %s\n" "$(date)"
             printf "System     : %s\n" "$(uname -a)"
@@ -2253,7 +2335,7 @@ list_tests() {
 
     IMPL=$(kyua list 2>/dev/null | grep -c "sys/amd/ibs" || echo 0)
     echo ""
-    printf '%s\n' "${YELLOW}═══ PLACEHOLDERS — not yet implemented ═══${NC}"
+    printf '%s\n' "${YELLOW}═══ PLACEHOLDERS -not yet implemented ═══${NC}"
     printf "  %-38s %-12s %-24s %s\n" "TEST AREA" "CATEGORY" "LABEL" "SEVERITY"
     printf "  %-38s %-12s %-24s %s\n" "---------" "--------" "-----" "--------"
     # Core PMC
@@ -2329,7 +2411,7 @@ show_status() {
             printf "  CPUBIT IbsOpEnable    [MSR C001_1033h bit 19]       = ${GREEN}on${NC} (HW)\n"
             ;;
         *)
-            printf "IBS Support : ${YELLOW}None (non-AMD CPU — all IBS CPUITs off)${NC}\n"
+            printf "IBS Support : ${YELLOW}None (non-AMD CPU -all IBS CPUITs off)${NC}\n"
             printf "  CPUBIT IBS_SUPPORT    [CPUID 8000_0001h ECX bit 10] = ${RED}off${NC}\n"
             printf "  CPUBIT IbsFetchEnable [MSR C001_1030h bit 18]       = ${RED}off${NC}\n"
             printf "  CPUBIT IbsOpEnable    [MSR C001_1033h bit 19]       = ${RED}off${NC}\n"
@@ -2341,7 +2423,7 @@ show_status() {
     if [ -d "$SRC_DIR/.git" ]; then
         cd "$SRC_DIR" || true
         LAST_COMMIT=$(git log -1 --format="%h - %s (%cd)" --date=format:'%Y-%m-%d %H:%M')
-        echo "GitHub fork : synced — $LAST_COMMIT"
+        echo "GitHub fork : synced -$LAST_COMMIT"
     else
         echo "GitHub fork : not synced (run --download)"
     fi
@@ -2434,7 +2516,7 @@ load_module() {
         else
             confirm_cmd "Load hwpmc kernel module (required for PMC API tests)" \
                 "kldload hwpmc" || return 1
-            kldload hwpmc || log_warning "Failed to load hwpmc — TC-HWPMC tests will skip"
+            kldload hwpmc || log_warning "Failed to load hwpmc -TC-HWPMC tests will skip"
             log_success "hwpmc module loaded successfully"
         fi
     else
@@ -2457,9 +2539,9 @@ show_menu() {
         _vendor=$(get_cpu_vendor)
         case "$_vendor" in
             AuthenticAMD|AMD)
-                printf "  CPU    : ${GREEN}%s — hardware IBS active${NC}\n" "$_vendor" ;;
+                printf "  CPU    : ${GREEN}%s -hardware IBS active${NC}\n" "$_vendor" ;;
             *)
-                printf "  CPU    : ${YELLOW}%s — no hardware IBS${NC}\n" "$_vendor" ;;
+                printf "  CPU    : ${YELLOW}%s -no hardware IBS${NC}\n" "$_vendor" ;;
         esac
 
         # cpuctl module
@@ -2474,7 +2556,7 @@ show_menu() {
             _cnt=$(find "$TESTS_INSTALL_DIR" -name "*test" -type f 2>/dev/null | wc -l | tr -d ' ')
             printf "  Tests  : ${GREEN}installed (%s binaries in %s)${NC}\n" "$_cnt" "$TESTS_INSTALL_DIR"
         else
-            printf "  Tests  : ${RED}not installed — choose option 3 to compile${NC}\n"
+            printf "  Tests  : ${RED}not installed -choose option 3 to compile${NC}\n"
         fi
 
         # Source location

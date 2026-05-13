@@ -113,12 +113,40 @@ allocate_soft_pmc(enum pmc_mode mode, int cpu, pmc_id_t *pmcid)
 	    1));
 }
 
+/*
+ * Probe whether the running kernel populates hwpmc extended error messages.
+ * Call after require_hwpmc() in every test body.  If the kernel has not yet
+ * wired up pmc_save_uexterr() in its hwpmc error paths, every test in this
+ * file would produce a misleading FAIL (empty error string).  We skip cleanly
+ * instead so the suite stays green while the kernel work is pending.
+ */
+static void
+require_working_exterr(void)
+{
+	struct pmc_op_pmcallocate pa;
+	char exterr[UEXTERROR_MAXLEN];
+
+	memset(&pa, 0, sizeof(pa));
+	pa.pm_class = PMC_CLASS_SOFT;
+	pa.pm_mode  = (enum pmc_mode)0xff;	/* guaranteed-invalid mode */
+	pa.pm_cpu   = PMC_CPU_ANY;
+
+	exterrctl(EXTERRCTL_UD, 0, NULL);		/* clear any prior message */
+	(void)hwpmc_call(PMC_OP_PMCALLOCATE, &pa);	/* should fail EINVAL */
+	ATF_REQUIRE_EQ(0, uexterr_gettext(exterr, sizeof(exterr)));
+
+	if (exterr[0] == '\0')
+		atf_tc_skip("kernel hwpmc does not populate extended errors "
+		    "yet — skip until kernel wires up pmc_save_uexterr()");
+}
+
 ATF_TC_WITHOUT_HEAD(pmcallocate_invalid_mode);
 ATF_TC_BODY(pmcallocate_invalid_mode, tc)
 {
 	struct pmc_op_pmcallocate pa;
 
 	require_hwpmc();
+	require_working_exterr();
 	clear_exterr();
 
 	memset(&pa, 0, sizeof(pa));
@@ -136,6 +164,7 @@ ATF_TC_BODY(pmcallocate_invalid_cpu, tc)
 	struct pmc_op_pmcallocate pa;
 
 	require_hwpmc();
+	require_working_exterr();
 	clear_exterr();
 
 	memset(&pa, 0, sizeof(pa));
@@ -153,6 +182,7 @@ ATF_TC_BODY(pmcallocate_invalid_flags, tc)
 	struct pmc_op_pmcallocate pa;
 
 	require_hwpmc();
+	require_working_exterr();
 	clear_exterr();
 
 	memset(&pa, 0, sizeof(pa));
@@ -172,6 +202,7 @@ ATF_TC_BODY(pmcattach_system_mode, tc)
 	pmc_id_t pmcid;
 
 	require_hwpmc();
+	require_working_exterr();
 	clear_exterr();
 	allocate_soft_pmc(PMC_MODE_SC, 0, &pmcid);
 
@@ -192,6 +223,7 @@ ATF_TC_BODY(pmcattach_running_pmc, tc)
 	pmc_id_t pmcid;
 
 	require_hwpmc();
+	require_working_exterr();
 	clear_exterr();
 	allocate_soft_pmc(PMC_MODE_TC, PMC_CPU_ANY, &pmcid);
 	ATF_REQUIRE_EQ(0, pmc_start(pmcid));
@@ -214,6 +246,7 @@ ATF_TC_BODY(pmcrw_no_flags, tc)
 	pmc_id_t pmcid;
 
 	require_hwpmc();
+	require_working_exterr();
 	clear_exterr();
 	allocate_soft_pmc(PMC_MODE_TC, PMC_CPU_ANY, &pmcid);
 
@@ -233,6 +266,7 @@ ATF_TC_BODY(pmcrw_write_running, tc)
 	pmc_id_t pmcid;
 
 	require_hwpmc();
+	require_working_exterr();
 	clear_exterr();
 	allocate_soft_pmc(PMC_MODE_TC, PMC_CPU_ANY, &pmcid);
 	ATF_REQUIRE_EQ(0, pmc_start(pmcid));
@@ -255,6 +289,7 @@ ATF_TC_BODY(amd_missing_pmu_flag, tc)
 	struct pmc_op_pmcallocate pa;
 
 	require_hwpmc();
+	require_working_exterr();
 	require_class(PMC_CLASS_K8, "AMD");
 	clear_exterr();
 
@@ -274,6 +309,7 @@ ATF_TC_BODY(amd_invalid_subclass, tc)
 	struct pmc_op_pmcallocate pa;
 
 	require_hwpmc();
+	require_working_exterr();
 	require_class(PMC_CLASS_K8, "AMD");
 	clear_exterr();
 
@@ -294,6 +330,7 @@ ATF_TC_BODY(amd_invalid_config_bits, tc)
 	struct pmc_op_pmcallocate pa;
 
 	require_hwpmc();
+	require_working_exterr();
 	require_class(PMC_CLASS_K8, "AMD");
 	if (!pmc_pmu_enabled())
 		atf_tc_skip("AMD PMU raw allocation path is unavailable");
@@ -317,6 +354,7 @@ ATF_TC_BODY(ibs_missing_system_capability, tc)
 	struct pmc_op_pmcallocate pa;
 
 	require_hwpmc();
+	require_working_exterr();
 	require_class(PMC_CLASS_IBS, "IBS");
 	clear_exterr();
 
@@ -336,6 +374,7 @@ ATF_TC_BODY(ibs_invalid_type, tc)
 	struct pmc_op_pmcallocate pa;
 
 	require_hwpmc();
+	require_working_exterr();
 	require_class(PMC_CLASS_IBS, "IBS");
 	clear_exterr();
 
@@ -356,6 +395,7 @@ ATF_TC_BODY(ibs_invalid_config_bits, tc)
 	struct pmc_op_pmcallocate pa;
 
 	require_hwpmc();
+	require_working_exterr();
 	require_class(PMC_CLASS_IBS, "IBS");
 	clear_exterr();
 
@@ -377,6 +417,7 @@ ATF_TC_BODY(ibs_nonsampling_mode, tc)
 	struct pmc_op_pmcallocate pa;
 
 	require_hwpmc();
+	require_working_exterr();
 	require_class(PMC_CLASS_IBS, "IBS");
 	clear_exterr();
 

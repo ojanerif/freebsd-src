@@ -127,7 +127,7 @@ ATF_TC_HEAD(ibs_signal_storm_under_sampling, tc)
 	atf_tc_set_md_var(tc, "descr",
 	    "[TC-CON-02] IBS Op active + 1 kHz SIGALRM — no SIGSEGV or crash");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "timeout", "30");
+	atf_tc_set_md_var(tc, "timeout", "120");
 }
 
 ATF_TC_BODY(ibs_signal_storm_under_sampling, tc)

@@ -159,15 +159,17 @@ ATF_TC_BODY(ibs_smp_per_cpu_config, tc)
 		}
 
 		/* Write a unique period value per CPU.
-		 * Retry up to 3 times: an in-flight IBS NMI (from active sampling
+		 * Retry up to 10 times: an in-flight IBS NMI (from active sampling
 		 * before this test) can fire between write_msr and read_msr and
-		 * re-arm the counter with the previous period.  Three consecutive
-		 * NMI-corrupted reads is astronomically unlikely for a real issue.
+		 * re-arm the counter with the previous period.  Writing 0 first
+		 * quiesces in-flight NMIs before each attempt.
 		 */
 		test_maxcnt = 0x100 + cpu;
 		{
 			int retry;
-			for (retry = 0; retry < 3; retry++) {
+			for (retry = 0; retry < 10; retry++) {
+				/* Quiesce: disable IBS fetch to drain any in-flight NMI. */
+				(void)write_msr(cpu, MSR_IBS_FETCH_CTL, 0ULL);
 				written = (original & ~IBS_MAXCNT_MASK) | test_maxcnt;
 				written &= ~IBS_FETCH_ENABLE_BIT;
 				error = write_msr(cpu, MSR_IBS_FETCH_CTL, written);
@@ -383,7 +385,14 @@ smp_migration_thread(void *arg)
 		return (NULL);
 	}
 
-	/* Read MSR on original CPU */
+	/*
+	 * Disable IBS fetch on original CPU before reading the baseline
+	 * to prevent an in-flight NMI from mutating MaxCnt between the
+	 * read here and the verify_val comparison after migration.
+	 */
+	(void)write_msr(ma->original_cpu, MSR_IBS_FETCH_CTL, 0ULL);
+
+	/* Read MSR on original CPU after quiescing */
 	error = read_msr(ma->original_cpu, MSR_IBS_FETCH_CTL, &orig_val);
 	if (error != 0) {
 		ma->error = error;
