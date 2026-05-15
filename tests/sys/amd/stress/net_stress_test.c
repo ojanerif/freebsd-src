@@ -273,6 +273,17 @@ tcp_client_thread(void *arg)
 			continue;
 		}
 
+		/*
+		 * Cap recv time so the thread exits promptly after stop=true.
+		 * Without this, a slow echo server under load can hold recv
+		 * indefinitely and cause the test to hit the 200 s ATF timeout.
+		 */
+		{
+			struct timeval rcv_tv = { 5, 0 };
+			setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+			    &rcv_tv, sizeof(rcv_tv));
+		}
+
 		/* Fill buffer with a recognisable pattern. */
 		size_t j;
 		for (j = 0; j < sizeof(buf) / sizeof(uint64_t); j++)

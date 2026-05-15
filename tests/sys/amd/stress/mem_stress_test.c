@@ -79,7 +79,12 @@ thrash_thread(void *arg)
 	    sizeof(mask), &mask);
 
 	idx = (uint64_t)(ta->cpu + 1) * STRESS_LCG_MUL;
-	acc = 0;
+	/*
+	 * Seed acc non-zero so the first buf[idx] ^= acc write is meaningful.
+	 * Starting at 0 + calloc'd buffer means XOR is a no-op on every pass.
+	 * Use a thread-unique prime multiple so threads don't cancel each other.
+	 */
+	acc = idx ^ 0xDEADBEEFCAFE0001ULL;
 
 	while (!*ta->stop) {
 		for (step = 0; step < ta->n_elements && !*ta->stop;
@@ -90,9 +95,6 @@ thrash_thread(void *arg)
 			ta->accesses++;
 		}
 	}
-
-	if (acc == 0)
-		ta->buf[0] ^= 1;	/* prevent dead-store elimination */
 
 	ta->error = 0;
 	return (NULL);

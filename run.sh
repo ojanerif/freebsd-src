@@ -193,8 +193,10 @@ XFAIL_TESTS=0
 BROKEN_TESTS=0
 
 # Suite / category selection
-# SUITE: IBS | UMCDF | PMC | STRESS | ALL
-SUITE="${SUITE:-IBS}"
+# SUITE: IBS | UMCDF | PMC | STRESS | ALL | DEFAULT
+# DEFAULT (no --suite flag) expands to: IBS UMCDF PMC
+# ALL expands to: IBS UMCDF PMC STRESS
+SUITE="${SUITE:-DEFAULT}"
 # CATEGORIES: space-separated list of TC-* codes; empty = all categories for the suite
 CATEGORIES=""
 
@@ -260,6 +262,15 @@ suite_install_dir() {
         PMC)    printf '/usr/tests/sys/amd/pmc' ;;
         STRESS) printf '/usr/tests/sys/amd/stress' ;;
         *)      printf '/usr/tests/sys/amd/ibs' ;;
+    esac
+}
+
+# Expand a SUITE selector to a space-separated list of individual suites.
+expand_suite_list() {
+    case "$1" in
+        IBS|UMCDF|PMC|STRESS) printf '%s' "$1" ;;
+        ALL)     printf 'IBS UMCDF PMC STRESS' ;;
+        *)       printf 'IBS UMCDF PMC' ;;
     esac
 }
 
@@ -601,6 +612,7 @@ write_autotest_sentinel() {
 # Consumed and deleted by ${RCD_SERVICE} after tests complete.
 AUTOTEST_EMAIL=${_email}
 AUTOTEST_SUITE=${SUITE}
+AUTOTEST_SUITE_LIST=${SUITE_LIST}
 AUTOTEST_CATEGORIES=${CATEGORIES}
 AUTOTEST_SCRIPT_DIR=${SCRIPT_DIR}
 AUTOTEST_KERNCONF=${AUTO_KERNCONF}
@@ -1099,11 +1111,12 @@ ${YELLOW}COMMANDS${NC}
       Show this help message and exit.
 
 ${YELLOW}SUITE SELECTION${NC}
-    --suite IBS         Instruction-Based Sampling tests (default)
+    --suite IBS         Instruction-Based Sampling tests
     --suite UMCDF       UMC + Data Fabric PMU tests
     --suite PMC         General hwpmc counter tests
     --suite STRESS      Standalone stress-test suite (cpu/mem/net/disk ATF tests)
-    --suite ALL         All suites in sequence (IBS → UMCDF → PMC → STRESS)
+    --suite ALL         All suites: IBS + UMCDF + PMC + STRESS
+    (default)           IBS + UMCDF + PMC  (all production suites)
 
     Affects which source directory is compiled (--compile) and which
     install directory is used for test runs (--run-all, --list, etc.).
@@ -1204,6 +1217,9 @@ ${YELLOW}EXAMPLES${NC}
 
     # Run only unit and hwpmc-API tests (no hardware needed for unit)
     $0 --run-all --category TC-UNIT --category TC-HWPMC
+
+    # Run IBS suite with concurrent background stress (validates IBS under load)
+    $0 --suite IBS --run-all --stress --force
 
     # Run the standalone STRESS suite (validates stressors pass on their own)
     $0 --suite STRESS --compile --run-all
@@ -1711,9 +1727,17 @@ generate_html_report() {
     fi
 
     # Matrix rows from TMP_MATRIX (pipe-delimited: tc|cat|sev|status|dur)
+    # Descriptions are looked up from TMP_DESC (tc<TAB>description) if available.
     _mrows=""
+    _TAB="$(printf '\t')"
     while IFS='|' read -r _tc _cat _sev _st _tm; do
         _tce=$(_he "$_tc")
+        # Look up ATF description for tooltip; gracefully absent if TMP_DESC missing.
+        _desc=""
+        if [ -n "${TMP_DESC:-}" ] && [ -f "$TMP_DESC" ]; then
+            _desc=$(grep -m1 "^${_tc}${_TAB}" "$TMP_DESC" 2>/dev/null | cut -f2-)
+        fi
+        _desce=$(_he "$_desc")
         case "$_st" in
             passed)  _rcls="r-pass";   _slbl="PASS"  ;;
             failed)  _rcls="r-fail";   _slbl="FAIL"  ;;
@@ -1728,7 +1752,7 @@ generate_html_report() {
             MEDIUM)   _sevcls="s-med"  ;;
             *)        _sevcls=""       ;;
         esac
-        _mrows="${_mrows}<tr class=\"${_rcls}\"><td class=\"tc\">${_tce}</td><td>${_cat}</td><td class=\"${_sevcls}\">${_sev}</td><td><span class=\"badge ${_rcls}\">${_slbl}</span></td><td class=\"dur\">${_tm}</td></tr>
+        _mrows="${_mrows}<tr class=\"${_rcls}\"><td class=\"tc\" data-desc=\"${_desce}\" onclick=\"toggleDesc(this)\"><span class=\"tc-name\">${_tce}</span></td><td>${_cat}</td><td class=\"${_sevcls}\">${_sev}</td><td><span class=\"badge ${_rcls}\">${_slbl}</span></td><td class=\"dur\">${_tm}</td></tr>
 "
     done < "$TMP_MATRIX"
 
@@ -1782,7 +1806,9 @@ header .meta{color:#8b949e;font-size:12px;margin-top:4px;font-family:monospace}
 table.matrix{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
 table.matrix th{background:#21262d;padding:9px 12px;text-align:left;font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;font-weight:500;position:sticky;top:0}
 table.matrix td{padding:7px 12px;border-top:1px solid #21262d;font-family:monospace;font-size:12px}
-table.matrix td.tc{max-width:440px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+table.matrix td.tc{max-width:440px;cursor:pointer}
+.tc-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tc-desc{font-family:'Segoe UI',system-ui,sans-serif;font-size:11px;color:#8b949e;white-space:normal;margin-top:4px;padding-top:4px;border-top:1px dotted #30363d;line-height:1.4}
 table.matrix td.dur{color:#8b949e;white-space:nowrap}
 tr.r-fail{background:#1f0e0e}
 tr.r-broken{background:#1f1400}
@@ -1843,6 +1869,18 @@ ${_mrows}
   <a href="report.xml">JUnit XML (.xml)</a>
   <a href="../">&#8592; All runs</a>
 </footer>
+<script>
+function toggleDesc(el){
+  var d=el.querySelector('.tc-desc');
+  if(d){d.remove();return;}
+  var desc=el.dataset.desc;
+  if(!desc)return;
+  d=document.createElement('div');
+  d.className='tc-desc';
+  d.textContent=desc;
+  el.appendChild(d);
+}
+</script>
 </body>
 </html>
 HTMLEOF
@@ -1866,7 +1904,7 @@ generate_html_index() {
         [ -z "$_date" ] && _date="—"
 
         _verdict=$(grep "^VERDICT:" "$_rpt" 2>/dev/null | head -1 | sed 's/VERDICT: //')
-        _verdict_short=$(printf '%s' "$_verdict" | sed 's/ —.*//')
+        _verdict_short=$(printf '%s' "$_verdict" | sed 's/ [-—].*//')
         case "$_verdict_short" in
             APPROVED)     _vc="v-approved"    ;;
             CONDITIONAL)  _vc="v-conditional" ;;
@@ -2080,217 +2118,268 @@ SKIPHTMLEOF
     log_success "Skipped HTML report: ${_sk_html}"
 }
 
+# Run kyua for a single suite, accumulating results into shared temp files.
+# Args: $1 = suite name (IBS|UMCDF|PMC|STRESS)
+# Globals written: TMP_PASS, TMP_FAIL, TMP_SKIP, TMP_XFAIL, TMP_BROKEN,
+#                  TMP_CRIT_F, TMP_HIGH_P, TMP_HIGH_F, TMP_MED_P, TMP_MED_F,
+#                  TMP_MATRIX, TMP_DESC, LAST_RUN_LOG, LAST_TEST_STATE,
+#                  REPORT_TXT (kyua verbose appended)
+# Returns: kyua exit code (0 = all tests passed/skipped, non-zero = failures)
+_run_suite_once() {
+    _rs_suite="$1"
+    SUITE="$_rs_suite"
+    TESTS_INSTALL_DIR=$(suite_install_dir "$_rs_suite")
+
+    if [ ! -d "$TESTS_INSTALL_DIR" ]; then
+        log_error "[$_rs_suite] Tests not installed at $TESTS_INSTALL_DIR. Run --compile first."
+        return 1
+    fi
+
+    # Parallelism rules per suite
+    _rs_par="$PARALLELISM"
+    if [ "$_rs_suite" = "STRESS" ]; then
+        _rs_par=1
+    elif [ "$WITH_STRESS" -eq 1 ]; then
+        _rs_par=1
+    fi
+
+    echo ""
+    echo "================================================================="
+    printf "SUITE: %s — LIVE OUTPUT  (parallelism: %s)\n" "$_rs_suite" "$_rs_par"
+    echo "================================================================="
+
+    printf '\n=== SUITE: %s started: %s ===\n' "$_rs_suite" "$(date)" >> "$LAST_RUN_LOG"
+    printf 'SUITE=%s\nSTARTED=%s\nPARALLELISM=%s\nLAST_COMPLETED=\nLAST_STATUS=\nLAST_SEEN_AT=\n' \
+        "$_rs_suite" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_rs_par" > "$LAST_TEST_STATE"
+
+    cd "$TESTS_INSTALL_DIR" || return 1
+
+    # Category filter
+    _rs_kyuafile_opt=""
+    _rs_cat_label=""
+    _rs_kf=""
+    if [ -n "$CATEGORIES" ]; then
+        _rs_kf=$(build_filtered_kyuafile "$TESTS_INSTALL_DIR")
+        if [ -n "$_rs_kf" ] && [ -f "$_rs_kf" ]; then
+            _rs_kyuafile_opt="--kyuafile $_rs_kf"
+            _rs_cat_label=" [categories: $CATEGORIES]"
+        fi
+    fi
+
+    # Build description lookup for this suite (append to shared TMP_DESC)
+    # shellcheck disable=SC2086
+    kyua list --verbose${_rs_kyuafile_opt:+ $_rs_kyuafile_opt} 2>/dev/null | awk '
+        /^[^[:space:]]/ { tc = $1; sub(/ .*$/, "", tc) }
+        /^[[:space:]]+description[[:space:]]*=/ {
+            d = $0
+            sub(/^[[:space:]]+description[[:space:]]*=[[:space:]]*/, "", d)
+            printf "%s\t%s\n", tc, d
+        }
+    ' >> "$TMP_DESC"
+
+    # Stress monitor for the STRESS suite
+    _rs_sm_pid=""
+    if [ "$_rs_suite" = "STRESS" ]; then
+        echo 0 > "$TMP_SM_DONE"
+        printf '(starting)' > "$TMP_SM_LAST"
+        _rs_sm_start=$(date +%s)
+        _rs_sm_total=$(kyua list 2>/dev/null | wc -l | tr -d ' \t')
+        [ -z "$_rs_sm_total" ] || [ "$_rs_sm_total" -le 0 ] && _rs_sm_total=12
+        log_info "Stress monitor started (${_rs_sm_total} tests, sequential)"
+        stress_monitor_loop "$_rs_sm_start" "$_rs_sm_total" "$TMP_SM_DONE" "$TMP_SM_LAST" &
+        _rs_sm_pid=$!
+    fi
+
+    # Confirm + run kyua
+    confirm_cmd "Run${_rs_cat_label} $_rs_suite tests in $TESTS_INSTALL_DIR (parallelism: $_rs_par)" \
+        "kyua -v parallelism=$_rs_par test${_rs_kyuafile_opt:+ $_rs_kyuafile_opt}" || {
+        [ -n "$_rs_sm_pid" ] && kill "$_rs_sm_pid" 2>/dev/null
+        return 1
+    }
+
+    _rs_exit_f="/tmp/ibs_exit_${$}_${_rs_suite}.tmp"
+    # shellcheck disable=SC2086
+    { kyua -v parallelism="$_rs_par" test $_rs_kyuafile_opt 2>&1; echo $? > "$_rs_exit_f"; } | \
+    tee -a "$LAST_RUN_LOG" | \
+    while IFS= read -r line; do
+        PREFIX=""
+        SEV=""
+        TESTID=""
+        _TIME=""
+        case "$line" in
+            *" -> "*)
+                BIN=$(printf '%s' "$line" | sed 's/:.*//' | sed 's|.*/||')
+                META=$(get_test_meta "$BIN")
+                CAT=$(printf '%s' "$META" | cut -d: -f1)
+                SEV=$(printf '%s' "$META" | cut -d: -f3)
+                SCOL=$(severity_color "$SEV")
+                PREFIX="${SCOL}[${CAT}]${NC}${SCOL}[${SEV}]${NC} "
+                TESTID=$(printf '%s' "$line" | sed 's/ *->.*//' | sed 's|.*/||' | sed 's/[[:space:]]*$//')
+                _TIME=$(printf '%s' "$line" | grep -oE '\[[0-9]+\.[0-9]+s\]' | tr -d '[]')
+                [ -z "$_TIME" ] && _TIME="—"
+                ;;
+        esac
+        case "$line" in
+            *" -> "*"passed"*)
+                echo $(( $(cat "$TMP_PASS") + 1 )) > "$TMP_PASS"
+                case "$SEV" in
+                    HIGH)   echo $(( $(cat "$TMP_HIGH_P") + 1 )) > "$TMP_HIGH_P" ;;
+                    MEDIUM) echo $(( $(cat "$TMP_MED_P")  + 1 )) > "$TMP_MED_P"  ;;
+                esac
+                printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "passed" "$_TIME" >> "$TMP_MATRIX"
+                printf 'LAST_COMPLETED=%s\nLAST_STATUS=passed\nLAST_SEEN_AT=%s\n' \
+                    "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
+                printf '%s\n' "${PREFIX}${GREEN}✓${NC} ${line}"
+                ;;
+            *" -> "*"failed"*)
+                echo $(( $(cat "$TMP_FAIL") + 1 )) > "$TMP_FAIL"
+                case "$SEV" in
+                    CRITICAL) echo $(( $(cat "$TMP_CRIT_F") + 1 )) > "$TMP_CRIT_F" ;;
+                    HIGH)     echo $(( $(cat "$TMP_HIGH_F") + 1 )) > "$TMP_HIGH_F" ;;
+                    MEDIUM)   echo $(( $(cat "$TMP_MED_F")  + 1 )) > "$TMP_MED_F"  ;;
+                esac
+                printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "failed" "$_TIME" >> "$TMP_MATRIX"
+                printf 'LAST_COMPLETED=%s\nLAST_STATUS=failed\nLAST_SEEN_AT=%s\n' \
+                    "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
+                printf '%s\n' "${PREFIX}${RED}✗${NC} ${line}"
+                ;;
+            *" -> "*"skipped"*)
+                echo $(( $(cat "$TMP_SKIP") + 1 )) > "$TMP_SKIP"
+                printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "skipped" "$_TIME" >> "$TMP_MATRIX"
+                printf 'LAST_COMPLETED=%s\nLAST_STATUS=skipped\nLAST_SEEN_AT=%s\n' \
+                    "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
+                printf '%s\n' "${PREFIX}${YELLOW}⊘${NC} ${line}"
+                ;;
+            *" -> "*"expected_failure"*)
+                echo $(( $(cat "$TMP_XFAIL") + 1 )) > "$TMP_XFAIL"
+                printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "xfail" "$_TIME" >> "$TMP_MATRIX"
+                printf 'LAST_COMPLETED=%s\nLAST_STATUS=xfail\nLAST_SEEN_AT=%s\n' \
+                    "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
+                printf '%s\n' "${PREFIX}${CYAN}~${NC} ${line}"
+                ;;
+            *" -> "*"broken"*)
+                echo $(( $(cat "$TMP_BROKEN") + 1 )) > "$TMP_BROKEN"
+                case "$SEV" in
+                    CRITICAL) echo $(( $(cat "$TMP_CRIT_F") + 1 )) > "$TMP_CRIT_F" ;;
+                    HIGH)     echo $(( $(cat "$TMP_HIGH_F") + 1 )) > "$TMP_HIGH_F" ;;
+                    MEDIUM)   echo $(( $(cat "$TMP_MED_F")  + 1 )) > "$TMP_MED_F"  ;;
+                esac
+                printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "broken" "$_TIME" >> "$TMP_MATRIX"
+                printf 'LAST_COMPLETED=%s\nLAST_STATUS=broken\nLAST_SEEN_AT=%s\n' \
+                    "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
+                printf '%s\n' "${PREFIX}${RED}⚠${NC} ${line}"
+                ;;
+            *)
+                [ -n "$line" ] && printf '%s\n' "$line"
+                ;;
+        esac
+        if [ -n "$TESTID" ]; then
+            _cnt=$(cat "$TMP_SM_DONE" 2>/dev/null || echo 0)
+            echo $(( _cnt + 1 )) > "$TMP_SM_DONE"
+            printf '%s [%s]' "$TESTID" "$_TIME" > "$TMP_SM_LAST"
+        fi
+    done
+
+    # Stop stress monitor
+    if [ -n "$_rs_sm_pid" ]; then
+        kill "$_rs_sm_pid" 2>/dev/null
+        wait "$_rs_sm_pid" 2>/dev/null || true
+    fi
+
+    # Append kyua verbose report for this suite (while kyua.db is fresh)
+    {
+        printf '\n=================================================================\n'
+        printf 'SUITE: %s — DETAILED RESULTS\n' "$_rs_suite"
+        printf '=================================================================\n'
+    } >> "$REPORT_TXT"
+    kyua report --verbose --results-filter passed,skipped,xfail,broken,failed \
+        >> "$REPORT_TXT" 2>&1
+
+    # Per-suite JUnit XML
+    kyua report-junit > "$RESULTS_DIR/report-${_rs_suite}.xml" 2>/dev/null || true
+
+    # Clean up per-suite filtered kyuafile if we created one
+    [ -n "$_rs_kf" ] && rm -f "$_rs_kf"
+
+    _rs_ec=$(cat "$_rs_exit_f" 2>/dev/null || echo 1)
+    rm -f "$_rs_exit_f"
+    return "$_rs_ec"
+}
+
 # Test execution and reporting
 run_all_tests() {
-    log_info "Executing complete IBS test suite..."
+    log_info "Running suites: ${SUITE_LIST}"
     preflight_checks
     load_module
     [ "$WITH_STRESS" -eq 1 ] && start_background_stressors
 
-    if [ ! -d "$TESTS_INSTALL_DIR" ]; then
-        log_error "Tests not installed. Run --compile first"
-        exit 1
-    fi
-
-    cd "$TESTS_INSTALL_DIR" || exit 1
-
-    # Stress tests saturate every CPU and main memory — parallel execution causes
-    # resource starvation and inter-test interference.  Force sequential regardless
-    # of the global --parallelism flag.
-    if [ "$SUITE" = "STRESS" ]; then
-        PARALLELISM=1
-    fi
-
     if [ $DRY_RUN -eq 0 ]; then
         print_cpu_test_context
 
-        echo ""
-        echo "================================================================="
-        printf "%s TEST SUITE - LIVE OUTPUT  (parallelism: %s)\n" "$SUITE" "$PARALLELISM"
-        echo "================================================================="
-
-        # Temp files for counters and exit code (pipes run in a subshell,
-        # so variables set inside don't propagate back to the parent shell)
         mkdir -p "$RESULTS_DIR"
         REPORT_TXT="$RESULTS_DIR/report.txt"
         REPORT_XML="$RESULTS_DIR/report.xml"
 
-        TMP_EXIT="/tmp/ibs_exit_$$.tmp"
+        # ── Counter temp files — initialised once, accumulated across all suites ──
         TMP_PASS="/tmp/ibs_pass_$$.tmp"
         TMP_FAIL="/tmp/ibs_fail_$$.tmp"
         TMP_SKIP="/tmp/ibs_skip_$$.tmp"
         TMP_XFAIL="/tmp/ibs_xfail_$$.tmp"
         TMP_BROKEN="/tmp/ibs_broken_$$.tmp"
-        echo 0 > "$TMP_PASS"; echo 0 > "$TMP_FAIL"; echo 0 > "$TMP_SKIP"
-        echo 0 > "$TMP_XFAIL"; echo 0 > "$TMP_BROKEN"
-
-        # Per-severity temp files (HIGH/MEDIUM track pass+fail for rate calc;
-        # CRITICAL only tracks failures since any failure is an instant FAIL)
         TMP_CRIT_F="/tmp/ibs_crit_f_$$.tmp"
         TMP_HIGH_P="/tmp/ibs_high_p_$$.tmp"
         TMP_HIGH_F="/tmp/ibs_high_f_$$.tmp"
         TMP_MED_P="/tmp/ibs_med_p_$$.tmp"
         TMP_MED_F="/tmp/ibs_med_f_$$.tmp"
         TMP_MATRIX="/tmp/ibs_matrix_$$.tmp"
-        for f in "$TMP_CRIT_F" "$TMP_HIGH_P" "$TMP_HIGH_F" "$TMP_MED_P" "$TMP_MED_F"; do
-            echo 0 > "$f"
-        done
-        > "$TMP_MATRIX"
-
-        # Stress monitor temp files (updated by the result-processing while loop,
-        # read by the background stress_monitor_loop process).
+        TMP_DESC="/tmp/ibs_desc_$$.tmp"
         TMP_SM_DONE="/tmp/ibs_sm_done_$$.tmp"
         TMP_SM_LAST="/tmp/ibs_sm_last_$$.tmp"
-        STRESS_MON_PID=""
-        echo 0    > "$TMP_SM_DONE"
+        for _f in "$TMP_PASS" "$TMP_FAIL" "$TMP_SKIP" "$TMP_XFAIL" "$TMP_BROKEN" \
+                  "$TMP_CRIT_F" "$TMP_HIGH_P" "$TMP_HIGH_F" "$TMP_MED_P" "$TMP_MED_F"; do
+            echo 0 > "$_f"
+        done
+        > "$TMP_MATRIX"
+        > "$TMP_DESC"
+        echo 0 > "$TMP_SM_DONE"
         printf '(starting)' > "$TMP_SM_LAST"
 
-        if [ "$SUITE" = "STRESS" ]; then
-            _sm_run_start=$(date +%s)
-            _sm_run_total=$(kyua list 2>/dev/null | wc -l | tr -d ' \t')
-            [ -z "$_sm_run_total" ] || [ "$_sm_run_total" -le 0 ] && _sm_run_total=12
-            log_info "Stress monitor started (${_sm_run_total} tests, sequential)"
-            stress_monitor_loop "$_sm_run_start" "$_sm_run_total" \
-                "$TMP_SM_DONE" "$TMP_SM_LAST" &
-            STRESS_MON_PID=$!
-        fi
+        # ── Report header ──
+        {
+            printf "AMD CI Test Suite — Comprehensive Report\n"
+            printf "Generated  : %s\n" "$(date)"
+            printf "System     : %s\n" "$(uname -a)"
+            printf "Suites     : %s\n" "$SUITE_LIST"
+            printf "Parallelism: %s\n" "$PARALLELISM"
+            [ "$WITH_STRESS" -eq 1 ] && \
+                printf "Background : stress active (cpu_stressor/mem_stressor/net_stressor/disk_stressor)\n"
+            printf "=================================================================\n\n"
+        } > "$REPORT_TXT"
 
-        # Use filtered Kyuafile when categories are selected
-        _kyuafile_opt=""
-        if [ -n "$TMP_KYUAFILE" ] && [ -f "$TMP_KYUAFILE" ]; then
-            _kyuafile_opt="--kyuafile $TMP_KYUAFILE"
-            _cat_label=" [categories: $CATEGORIES]"
-        else
-            _cat_label=""
-        fi
-
-        log_verbose "Running kyua test suite (parallelism: $PARALLELISM)..."
-        confirm_cmd "Run${_cat_label} test suite in $TESTS_INSTALL_DIR (parallelism: $PARALLELISM)" \
-            "kyua -v parallelism=$PARALLELISM test${_kyuafile_opt:+ $_kyuafile_opt}" || return 1
-
-        # Initialize persistent live log for panic recovery.
-        # If the kernel panics mid-run, this file survives the reboot and
-        # shows every result that completed before the crash.  The first test
-        # absent from the log (next in Kyuafile order) is the likely culprit.
+        # ── Live-log header (panic recovery) ──
         {
             printf '=== ibs-ci run started: %s ===\n' "$(date)"
-            printf 'SUITE=%s  PARALLELISM=%s  STRESS=%s\n' \
-                "$SUITE" "$PARALLELISM" "$WITH_STRESS"
-            printf 'RESULTS_DIR=%s\n\n' "$RESULTS_DIR"
+            printf 'SUITES=%s  WITH_STRESS=%s\n\n' "$SUITE_LIST" "$WITH_STRESS"
         } > "$LAST_RUN_LOG"
         {
-            printf 'SUITE=%s\n' "$SUITE"
+            printf 'SUITES=%s\n' "$SUITE_LIST"
             printf 'STARTED=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             printf 'RESULTS_DIR=%s\n' "$RESULTS_DIR"
-            printf 'PARALLELISM=%s\n' "$PARALLELISM"
-            printf 'STRESS=%s\n' "$WITH_STRESS"
-            printf 'LAST_COMPLETED=\n'
-            printf 'LAST_STATUS=\n'
-            printf 'LAST_SEEN_AT=\n'
+            printf 'WITH_STRESS=%s\n' "$WITH_STRESS"
+            printf 'LAST_COMPLETED=\nLAST_STATUS=\nLAST_SEEN_AT=\n'
         } > "$LAST_TEST_STATE"
 
-        # Run kyua and process each line as it arrives; capture exit code via
-        # temp file because the pipe subshell would swallow it otherwise.
-        # Each result line gets a [CATEGORY][SEVERITY] prefix from get_test_meta().
-        # tee duplicates raw kyua output to the live log for panic triage.
-        # shellcheck disable=SC2086
-        { kyua -v parallelism="$PARALLELISM" test $_kyuafile_opt 2>&1; echo $? > "$TMP_EXIT"; } | \
-        tee -a "$LAST_RUN_LOG" | \
-        while IFS= read -r line; do
-            PREFIX=""
-            SEV=""
-            TESTID=""
-            _TIME=""
-            # Detect result lines (format: "binary:tc_name  ->  STATUS  [Xs]")
-            case "$line" in
-                *" -> "*)
-                    BIN=$(printf '%s' "$line" | sed 's/:.*//' | sed 's|.*/||')
-                    META=$(get_test_meta "$BIN")
-                    CAT=$(printf '%s' "$META" | cut -d: -f1)
-                    SEV=$(printf '%s' "$META" | cut -d: -f3)
-                    SCOL=$(severity_color "$SEV")
-                    PREFIX="${SCOL}[${CAT}]${NC}${SCOL}[${SEV}]${NC} "
-                    TESTID=$(printf '%s' "$line" | sed 's/ *->.*//; s|.*/ibs/||' | sed 's/[[:space:]]*$//')
-                    _TIME=$(printf '%s' "$line" | grep -oE '\[[0-9]+\.[0-9]+s\]' | tr -d '[]')
-                    [ -z "$_TIME" ] && _TIME="—"
-                    ;;
-            esac
-            case "$line" in
-                *" -> "*"passed"*)
-                    echo $(( $(cat "$TMP_PASS") + 1 )) > "$TMP_PASS"
-                    case "$SEV" in
-                        HIGH)   echo $(( $(cat "$TMP_HIGH_P") + 1 )) > "$TMP_HIGH_P" ;;
-                        MEDIUM) echo $(( $(cat "$TMP_MED_P")  + 1 )) > "$TMP_MED_P"  ;;
-                    esac
-                    printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "passed" "$_TIME" >> "$TMP_MATRIX"
-                    printf 'LAST_COMPLETED=%s\nLAST_STATUS=passed\nLAST_SEEN_AT=%s\n' \
-                        "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
-                    printf '%s\n' "${PREFIX}${GREEN}✓${NC} ${line}"
-                    ;;
-                *" -> "*"failed"*)
-                    echo $(( $(cat "$TMP_FAIL") + 1 )) > "$TMP_FAIL"
-                    case "$SEV" in
-                        CRITICAL) echo $(( $(cat "$TMP_CRIT_F") + 1 )) > "$TMP_CRIT_F" ;;
-                        HIGH)     echo $(( $(cat "$TMP_HIGH_F") + 1 )) > "$TMP_HIGH_F" ;;
-                        MEDIUM)   echo $(( $(cat "$TMP_MED_F")  + 1 )) > "$TMP_MED_F"  ;;
-                    esac
-                    printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "failed" "$_TIME" >> "$TMP_MATRIX"
-                    printf 'LAST_COMPLETED=%s\nLAST_STATUS=failed\nLAST_SEEN_AT=%s\n' \
-                        "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
-                    printf '%s\n' "${PREFIX}${RED}✗${NC} ${line}"
-                    ;;
-                *" -> "*"skipped"*)
-                    echo $(( $(cat "$TMP_SKIP") + 1 )) > "$TMP_SKIP"
-                    printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "skipped" "$_TIME" >> "$TMP_MATRIX"
-                    printf 'LAST_COMPLETED=%s\nLAST_STATUS=skipped\nLAST_SEEN_AT=%s\n' \
-                        "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
-                    printf '%s\n' "${PREFIX}${YELLOW}⊘${NC} ${line}"
-                    ;;
-                *" -> "*"expected_failure"*)
-                    echo $(( $(cat "$TMP_XFAIL") + 1 )) > "$TMP_XFAIL"
-                    printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "xfail" "$_TIME" >> "$TMP_MATRIX"
-                    printf 'LAST_COMPLETED=%s\nLAST_STATUS=xfail\nLAST_SEEN_AT=%s\n' \
-                        "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
-                    printf '%s\n' "${PREFIX}${CYAN}~${NC} ${line}"
-                    ;;
-                *" -> "*"broken"*)
-                    echo $(( $(cat "$TMP_BROKEN") + 1 )) > "$TMP_BROKEN"
-                    case "$SEV" in
-                        CRITICAL) echo $(( $(cat "$TMP_CRIT_F") + 1 )) > "$TMP_CRIT_F" ;;
-                        HIGH)     echo $(( $(cat "$TMP_HIGH_F") + 1 )) > "$TMP_HIGH_F" ;;
-                        MEDIUM)   echo $(( $(cat "$TMP_MED_F")  + 1 )) > "$TMP_MED_F"  ;;
-                    esac
-                    printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "broken" "$_TIME" >> "$TMP_MATRIX"
-                    printf 'LAST_COMPLETED=%s\nLAST_STATUS=broken\nLAST_SEEN_AT=%s\n' \
-                        "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
-                    printf '%s\n' "${PREFIX}${RED}⚠${NC} ${line}"
-                    ;;
-                *)
-                    [ -n "$line" ] && printf '%s\n' "$line"
-                    ;;
-            esac
-            # Update stress monitor state after every completed test.
-            if [ -n "$TESTID" ]; then
-                _cnt=$(cat "$TMP_SM_DONE" 2>/dev/null || echo 0)
-                echo $(( _cnt + 1 )) > "$TMP_SM_DONE"
-                printf '%s [%s]' "$TESTID" "$_TIME" > "$TMP_SM_LAST"
-            fi
+        # ── Run each suite ──
+        TEST_EXIT_CODE=0
+        for _s in $SUITE_LIST; do
+            _run_suite_once "$_s" || TEST_EXIT_CODE=1
         done
 
-        # Stop the stress monitor background process.
-        if [ -n "$STRESS_MON_PID" ]; then
-            kill "$STRESS_MON_PID" 2>/dev/null
-            wait "$STRESS_MON_PID" 2>/dev/null || true
-        fi
+        [ "$WITH_STRESS" -eq 1 ] && stop_background_stressors
+        printf '\n=== ibs-ci run finished: %s ===\n' "$(date)" >> "$LAST_RUN_LOG"
         rm -f "$TMP_SM_DONE" "$TMP_SM_LAST"
 
-        # Stop background stressors now that kyua has finished.
-        [ "$WITH_STRESS" -eq 1 ] && stop_background_stressors
-
-        # Finalize live log so --last-test can confirm the run completed normally.
-        printf '\n=== ibs-ci run finished: %s ===\n' "$(date)" >> "$LAST_RUN_LOG"
-
-        TEST_EXIT_CODE=$(cat "$TMP_EXIT" 2>/dev/null || echo 1)
+        # ── Read accumulated counters ──
         PASSED_TESTS=$(cat "$TMP_PASS")
         FAILED_TESTS=$(cat "$TMP_FAIL")
         SKIPPED_TESTS=$(cat "$TMP_SKIP")
@@ -2302,7 +2391,7 @@ run_all_tests() {
         MED_PASS=$(cat "$TMP_MED_P")
         MED_FAIL=$(cat "$TMP_MED_F")
         TOTAL_TESTS=$((PASSED_TESTS + FAILED_TESTS + SKIPPED_TESTS + XFAIL_TESTS + BROKEN_TESTS))
-        rm -f "$TMP_EXIT" "$TMP_PASS" "$TMP_FAIL" "$TMP_SKIP" "$TMP_XFAIL" "$TMP_BROKEN" \
+        rm -f "$TMP_PASS" "$TMP_FAIL" "$TMP_SKIP" "$TMP_XFAIL" "$TMP_BROKEN" \
               "$TMP_CRIT_F" "$TMP_HIGH_P" "$TMP_HIGH_F" "$TMP_MED_P" "$TMP_MED_F"
 
         if [ "$TOTAL_TESTS" -gt 0 ]; then
@@ -2315,10 +2404,10 @@ run_all_tests() {
 
         HIGH_TOTAL=$((HIGH_PASS + HIGH_FAIL))
         MED_TOTAL=$((MED_PASS + MED_FAIL))
-        # -1 = no tests of this severity ran (not the same as 0% pass rate)
         HIGH_PASS_PCT=$([ "$HIGH_TOTAL" -gt 0 ] && echo $((HIGH_PASS * 100 / HIGH_TOTAL)) || echo -1)
         MED_PASS_PCT=$([ "$MED_TOTAL"  -gt 0 ] && echo $((MED_PASS  * 100 / MED_TOTAL))  || echo -1)
 
+        # ── Console summary ──
         echo ""
         echo "================================================================="
         echo "SUMMARY:"
@@ -2349,8 +2438,7 @@ run_all_tests() {
         fi
         echo "================================================================="
 
-        # Determine overall verdict
-        # -1 means no tests of that severity ran -skip the check for those
+        # ── Verdict ──
         VERDICT_FAIL=0
         [ "$CRIT_FAIL" -gt 0 ]                                     && VERDICT_FAIL=1
         [ "$HIGH_PASS_PCT" -ge 0 ] && [ "$HIGH_PASS_PCT" -lt 95 ]  && VERDICT_FAIL=1
@@ -2367,27 +2455,11 @@ run_all_tests() {
             [ "$HIGH_PASS_PCT" -ge 0 ] && [ "$HIGH_PASS_PCT" -lt 95 ] && log_error "  HIGH pass rate ${HIGH_PASS_PCT}% is below the 95% threshold"
         fi
 
-        # Generate saved reports
-        echo ""
         log_info "Generating reports..."
 
-        # Build comprehensive plain-text report: header + kyua verbose + summary
+        # ── Append summary to REPORT_TXT ──
         {
-            printf "IBS Test Suite -Comprehensive Test Report\n"
-            printf "Generated  : %s\n" "$(date)"
-            printf "System     : %s\n" "$(uname -a)"
-            printf "Suite      : %s\n" "$SUITE"
-            printf "Parallelism: %s\n" "$PARALLELISM"
-            [ "$WITH_STRESS" -eq 1 ] && \
-                printf "Background : stress active (cpu_stressor/mem_stressor/net_stressor/disk_stressor)\n"
-            printf "=================================================================\n"
-            printf "\n"
-        } > "$REPORT_TXT"
-        kyua report --verbose --results-filter passed,skipped,xfail,broken,failed \
-            >> "$REPORT_TXT" 2>&1
-        {
-            printf "\n"
-            printf "=================================================================\n"
+            printf "\n=================================================================\n"
             printf "TEST RUN SUMMARY\n"
             printf "=================================================================\n"
             printf "Tests Run : %d\n" "$TOTAL_TESTS"
@@ -2396,8 +2468,7 @@ run_all_tests() {
             printf "Skipped   : %d (%d%%)\n" "$SKIPPED_TESTS" "$SKIPPED_PERCENT"
             printf "Exp.Fail  : %d\n" "$XFAIL_TESTS"
             printf "Broken    : %d\n" "$BROKEN_TESTS"
-            printf "\n"
-            printf "SEVERITY CRITERIA:\n"
+            printf "\nSEVERITY CRITERIA:\n"
             if [ "$CRIT_FAIL" -eq 0 ]; then
                 printf "  [CRITICAL]  %d failed    PASS\n" "$CRIT_FAIL"
             else
@@ -2432,10 +2503,21 @@ run_all_tests() {
             printf "=================================================================\n"
         } >> "$REPORT_TXT"
 
-        kyua report-junit > "$REPORT_XML" 2>/dev/null || true
+        # ── Merge per-suite JUnit XMLs into one report.xml ──
+        {
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites>\n'
+            for _s in $SUITE_LIST; do
+                _xf="$RESULTS_DIR/report-${_s}.xml"
+                if [ -f "$_xf" ]; then
+                    grep -v '<?xml\|<testsuites\|</testsuites>' "$_xf" || true
+                fi
+            done
+            printf '</testsuites>\n'
+        } > "$REPORT_XML"
+
         log_success "Reports saved to: $RESULTS_DIR"
 
-        # Per-test details parsed from the saved report
+        # ── Failures detail (from REPORT_TXT) ──
         if [ "$FAILED_TESTS" -gt 0 ] || [ "$BROKEN_TESTS" -gt 0 ]; then
             echo ""
             echo "── Failures & broken tests ──"
@@ -2503,7 +2585,7 @@ run_all_tests() {
             done
         fi
 
-        # ── Test results matrix ───────────────────────────────────
+        # ── Results matrix ──
         echo ""
         echo "===================================================================================================="
         echo "TEST RESULTS MATRIX"
@@ -2543,7 +2625,6 @@ run_all_tests() {
         printf "   Skip: %d   XFail: %d   Brkn: %d\n" \
             "$SKIPPED_TESTS" "$XFAIL_TESTS" "$BROKEN_TESTS"
         echo ""
-        # Pass rate excluding skipped and expected failures
         _denom=$((PASSED_TESTS + FAILED_TESTS + BROKEN_TESTS))
         if [ "$_denom" -gt 0 ]; then
             _rate=$(( PASSED_TESTS * 100 / _denom ))
@@ -2552,17 +2633,9 @@ run_all_tests() {
             printf "  Pass rate: N/A\n"
         fi
         printf "  CRITICAL: %d failed   HIGH: " "$CRIT_FAIL"
-        if [ "$HIGH_PASS_PCT" -lt 0 ]; then
-            printf "N/A"
-        else
-            printf "%d%%" "$HIGH_PASS_PCT"
-        fi
+        if [ "$HIGH_PASS_PCT" -lt 0 ]; then printf "N/A"; else printf "%d%%" "$HIGH_PASS_PCT"; fi
         printf "   MEDIUM: "
-        if [ "$MED_PASS_PCT" -lt 0 ]; then
-            printf "N/A"
-        else
-            printf "%d%%" "$MED_PASS_PCT"
-        fi
+        if [ "$MED_PASS_PCT" -lt 0 ]; then printf "N/A"; else printf "%d%%" "$MED_PASS_PCT"; fi
         printf "\n\n"
         if [ "$VERDICT_FAIL" -eq 0 ]; then
             if [ "$MED_PASS_PCT" -lt 0 ] || [ "$MED_PASS_PCT" -ge 80 ]; then
@@ -2581,14 +2654,13 @@ run_all_tests() {
 
         generate_html_report
         generate_html_index
-        rm -f "$TMP_MATRIX"
+        rm -f "$TMP_MATRIX" "$TMP_DESC"
 
         echo ""
         log_info "Full report : $REPORT_TXT"
         log_info "JUnit XML   : $REPORT_XML"
         log_info "Live log    : $LAST_RUN_LOG  (use --last-test after a panic)"
 
-        # Send email only when --email was explicitly given on the command line.
         if [ "$EMAIL_REQUESTED" -eq 1 ]; then
             _rt_verdict="UNKNOWN"
             grep -q "VERDICT: APPROVED"     "$REPORT_TXT" 2>/dev/null && _rt_verdict="APPROVED"
@@ -2598,7 +2670,7 @@ run_all_tests() {
             send_report_email "$REPORT_TXT" "$_rt_verdict" "$REPORT_EMAIL"
         fi
     else
-        log_info "Would run complete test suite (dry run)"
+        log_info "Would run suites: $SUITE_LIST (dry run)"
     fi
 }
 
@@ -2929,7 +3001,7 @@ show_menu() {
         fi
 
         printf '%s\n' "${CYAN}=================================================================${NC}"
-        printf "  Suite  : ${BOLD}%s${NC}  (change with --suite IBS|UMCDF|PMC|STRESS|ALL)\n" "$SUITE"
+        printf "  Suites : ${BOLD}%s${NC}  (change with --suite IBS|UMCDF|PMC|STRESS|ALL)\n" "$SUITE_LIST"
         printf '\n'
         printf '  %s1)%s Run all tests (suite: %s)\n'      "$BOLD" "$NC" "$SUITE"
         printf '  %s2)%s Run specific test\n'              "$BOLD" "$NC"
@@ -2981,10 +3053,8 @@ show_menu() {
                     CATEGORIES="$_cats"
                     _idir=$(suite_install_dir "$SUITE")
                     TESTS_INSTALL_DIR="$_idir"
-                    TMP_KYUAFILE=$(build_filtered_kyuafile "$TESTS_INSTALL_DIR")
                     run_all_tests
                     CATEGORIES=""
-                    TMP_KYUAFILE=""
                 else
                     log_error "No categories given"
                 fi
@@ -3213,13 +3283,13 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-# Apply suite-aware directory overrides before dispatching
-TESTS_DIR=$(suite_src_dir "$SUITE")
-TESTS_INSTALL_DIR=$(suite_install_dir "$SUITE")
-
-# When categories are selected, build a filtered Kyuafile (stored in TMP_KYUAFILE)
-# run_all_tests reads TMP_KYUAFILE when set.
-TMP_KYUAFILE=""
+# Expand SUITE to the list of suites that will be run.
+SUITE_LIST=$(expand_suite_list "$SUITE")
+# For commands that operate on a single suite (--compile, --list, etc.),
+# use the first suite in the list.
+_SUITE_PRIMARY=$(printf '%s' "$SUITE_LIST" | awk '{print $1}')
+TESTS_DIR=$(suite_src_dir "$_SUITE_PRIMARY")
+TESTS_INSTALL_DIR=$(suite_install_dir "$_SUITE_PRIMARY")
 
 # Execute command
 case $COMMAND in
@@ -3235,9 +3305,6 @@ case $COMMAND in
         ;;
     run-all)
         check_root_privileges
-        if [ -n "$CATEGORIES" ]; then
-            TMP_KYUAFILE=$(build_filtered_kyuafile "$TESTS_INSTALL_DIR")
-        fi
         run_all_tests
         ;;
     run-specific)
