@@ -103,6 +103,15 @@ get_test_meta() {
         umcdf_unit_vendor_test)          printf "TC-UMCUNIT:UMCDF Unit:MEDIUM" ;;
         umcdf_unit_zen_map_test)         printf "TC-UMCUNIT:UMCDF Unit:MEDIUM" ;;
         umcdf_unit_zen_name_test)        printf "TC-UMCUNIT:UMCDF Unit:MEDIUM" ;;
+        # STRESS suite tests
+        cpu_stress_test)                 printf "TC-CSTR:CPU Stress:MEDIUM" ;;
+        mem_stress_test)                 printf "TC-MSTR:Memory Stress:MEDIUM" ;;
+        net_stress_test)                 printf "TC-NSTR:Network Stress:MEDIUM" ;;
+        disk_stress_test)                printf "TC-DSTR:Disk Stress:MEDIUM" ;;
+        ibs_op_stress_test)              printf "TC-ISTR:IBS-Op Stress:MEDIUM" ;;
+        ibs_fetch_stress_test)           printf "TC-FSTR:IBS-Fetch Stress:MEDIUM" ;;
+        # IBS NMI stress test (TC-INT, lives in IBS suite)
+        ibs_nmi_stress_test)             printf "TC-INT:Interrupt Delivery:HIGH" ;;
         *)                               printf "TC-MISC:Miscellaneous:MEDIUM" ;;
     esac
 }
@@ -184,10 +193,21 @@ XFAIL_TESTS=0
 BROKEN_TESTS=0
 
 # Suite / category selection
-# SUITE: IBS | UMCDF | PMC | ALL
+# SUITE: IBS | UMCDF | PMC | STRESS | ALL
 SUITE="${SUITE:-IBS}"
 # CATEGORIES: space-separated list of TC-* codes; empty = all categories for the suite
 CATEGORIES=""
+
+# --stress: launch background stressors (cpu/mem/net/disk) while the primary suite runs.
+# WARNING: combining --stress with IBS tests at high sampling rates can trigger the NMI
+# overflow crash described in FreeBSD-Tests-026.  Use --safe-ibs-rate to cap the period.
+WITH_STRESS=0
+SAFE_IBS_RATE=""	# if non-empty, written to dev.hwpmc.ibs.min_period before the run
+STRESS_PIDS=""		# PIDs of background stressor processes (space-separated)
+
+# --email: set to 1 when --email flag is given explicitly; --run-all sends a report only
+# when this is 1.  --auto always emails regardless.
+EMAIL_REQUESTED=0
 
 # --auto mode
 AUTO_MODE=0
@@ -198,8 +218,19 @@ AUTOTEST_SENTINEL="/var/db/ibs-autotest-sentinel"
 LAST_COMMIT_FILE="/var/db/ibs-autotest-last-commit"
 RCD_SERVICE="/usr/local/etc/rc.d/ibs_autotest"
 
+# Panic-recovery / --last-test persistent files.
+# Written during every --run-all so that after a kernel panic + reboot we
+# can see exactly which test was running when the system went down.
+LAST_RUN_LOG="/var/log/ibs-last-run.log"   # full raw kyua output, appended per line
+LAST_TEST_STATE="/var/log/ibs-last-test.state"  # last completed test + timestamp
+
 # Remove temp files on exit or interrupt (SIGINT/SIGTERM)
 _ibs_cleanup() {
+    # Kill any background stressor processes before cleaning temp files.
+    if [ -n "$STRESS_PIDS" ]; then
+        # shellcheck disable=SC2086
+        kill -TERM $STRESS_PIDS 2>/dev/null || true
+    fi
     rm -f /tmp/ibs_exit_$$.tmp /tmp/ibs_pass_$$.tmp /tmp/ibs_fail_$$.tmp \
           /tmp/ibs_skip_$$.tmp /tmp/ibs_xfail_$$.tmp /tmp/ibs_broken_$$.tmp \
           /tmp/ibs_crit_f_$$.tmp /tmp/ibs_high_p_$$.tmp /tmp/ibs_high_f_$$.tmp \
@@ -213,21 +244,146 @@ trap _ibs_cleanup EXIT INT TERM
 # Return the source (build) directory for a suite
 suite_src_dir() {
     case "$1" in
-        IBS)   printf '%s' "${SCRIPT_DIR}/tests/sys/amd/ibs" ;;
-        UMCDF) printf '%s' "${SCRIPT_DIR}/tests/sys/amd/umcdf" ;;
-        PMC)   printf '%s' "${SCRIPT_DIR}/tests/sys/amd/pmc" ;;
-        *)     printf '%s' "${SCRIPT_DIR}/tests/sys/amd/ibs" ;;
+        IBS)    printf '%s' "${SCRIPT_DIR}/tests/sys/amd/ibs" ;;
+        UMCDF)  printf '%s' "${SCRIPT_DIR}/tests/sys/amd/umcdf" ;;
+        PMC)    printf '%s' "${SCRIPT_DIR}/tests/sys/amd/pmc" ;;
+        STRESS) printf '%s' "${SCRIPT_DIR}/tests/sys/amd/stress" ;;
+        *)      printf '%s' "${SCRIPT_DIR}/tests/sys/amd/ibs" ;;
     esac
 }
 
 # Return the install (kyua) directory for a suite
 suite_install_dir() {
     case "$1" in
-        IBS)   printf '/usr/tests/sys/amd/ibs' ;;
-        UMCDF) printf '/usr/tests/sys/amd/umcdf' ;;
-        PMC)   printf '/usr/tests/sys/amd/pmc' ;;
-        *)     printf '/usr/tests/sys/amd/ibs' ;;
+        IBS)    printf '/usr/tests/sys/amd/ibs' ;;
+        UMCDF)  printf '/usr/tests/sys/amd/umcdf' ;;
+        PMC)    printf '/usr/tests/sys/amd/pmc' ;;
+        STRESS) printf '/usr/tests/sys/amd/stress' ;;
+        *)      printf '/usr/tests/sys/amd/ibs' ;;
     esac
+}
+
+# ── Background stressor management ─────────────────────────────────────────
+
+# Start the four stressor binaries as background processes.
+# Sets STRESS_PIDS to the space-separated list of PIDs.
+# Called by run_all_tests() when WITH_STRESS=1.
+start_background_stressors() {
+    _stress_dir='/usr/tests/sys/amd/stress'
+
+    if [ ! -d "$_stress_dir" ]; then
+        log_error "Stressor binaries not found in ${_stress_dir}."
+        log_error "Run: ./run.sh --suite STRESS --compile first."
+        exit 1
+    fi
+
+    # Safety warning when combining with suites that exercise IBS at high rates.
+    case "$SUITE" in
+        IBS|ALL)
+            printf '%s\n' ""
+            printf '%s[WARNING] --stress + %s suite:%s\n' "$RED" "$SUITE" "$NC"
+            printf '  Combining background stressors with IBS tests at high\n'
+            printf '  NMI rates can reproduce the crash described in\n'
+            printf '  FreeBSD-Tests-026 (NMI storm -> network stack panic).\n'
+            printf '  The net stressor runs at reduced intensity\n'
+            printf '  (NET_STRESS_THREADS=2).  Use --safe-ibs-rate N to cap\n'
+            printf '  the minimum IBS sampling period before the run.\n'
+            printf '%s\n' ""
+            ;;
+    esac
+
+    # Apply safe IBS rate cap if requested.
+    if [ -n "$SAFE_IBS_RATE" ]; then
+        log_info "Applying safe IBS rate cap: dev.hwpmc.ibs.min_period=${SAFE_IBS_RATE}"
+        sysctl "dev.hwpmc.ibs.min_period=${SAFE_IBS_RATE}" 2>/dev/null || \
+            log_warning "Could not set dev.hwpmc.ibs.min_period (sysctl not present yet)"
+    fi
+
+    # Net stressor runs at reduced thread count when used as background load.
+    NET_STRESS_THREADS=2
+    export NET_STRESS_THREADS
+
+    log_info "Starting background stressors (stress dir: ${_stress_dir})..."
+    STRESS_PIDS=""
+    for _s in cpu_stressor mem_stressor net_stressor disk_stressor; do
+        if [ ! -x "${_stress_dir}/${_s}" ]; then
+            log_warning "Stressor binary not found: ${_stress_dir}/${_s} (skipping)"
+            continue
+        fi
+        "${_stress_dir}/${_s}" &
+        _pid=$!
+        STRESS_PIDS="${STRESS_PIDS} ${_pid}"
+        log_verbose "Started ${_s} (pid ${_pid})"
+    done
+
+    log_info "Background stressors running (PIDs:${STRESS_PIDS})"
+    log_info "Waiting 2 s for stressors to reach steady state..."
+    sleep 2
+}
+
+# Stop all background stressor processes started by start_background_stressors().
+stop_background_stressors() {
+    [ -z "$STRESS_PIDS" ] && return 0
+    log_info "Stopping background stressors (PIDs:${STRESS_PIDS})..."
+    # shellcheck disable=SC2086
+    for _pid in $STRESS_PIDS; do
+        kill -TERM "$_pid" 2>/dev/null || true
+    done
+    sleep 1
+    # shellcheck disable=SC2086
+    for _pid in $STRESS_PIDS; do
+        wait "$_pid" 2>/dev/null || true
+    done
+    STRESS_PIDS=""
+    log_info "Background stressors stopped"
+}
+
+# ── Stress suite console monitor ────────────────────────────────────────────
+
+# Background loop: every 10 s write a two-line resource snapshot to /dev/tty
+# (not stdout) so it appears on the console without polluting the kyua pipe.
+# Args: start_epoch  total_tests  done_count_file  last_test_file
+stress_monitor_loop() {
+    _sm_start="$1"; _sm_total="$2"; _sm_done_f="$3"; _sm_last_f="$4"
+    _sm_ps=$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)
+    _sm_total_pages=$(sysctl -n vm.stats.vm.v_page_count 2>/dev/null || echo 0)
+    _sm_total_mb=$(( _sm_total_pages * _sm_ps / 1048576 ))
+
+    while true; do
+        sleep 10
+        _sm_now=$(date +%s)
+        _sm_el=$(( _sm_now - _sm_start ))
+        _sm_done=$(cat "$_sm_done_f" 2>/dev/null || echo 0)
+        _sm_last=$(cat "$_sm_last_f" 2>/dev/null || echo "(none yet)")
+
+        # ETA: pro-rate elapsed time; fall back to 120 s/test if nothing done yet
+        if [ "$_sm_done" -gt 0 ]; then
+            _sm_rem=$(( _sm_el / _sm_done * (_sm_total - _sm_done) ))
+        else
+            _sm_rem=$(( _sm_total * 120 ))
+        fi
+        [ "$_sm_rem" -lt 0 ] && _sm_rem=0
+
+        # CPU load average (1 / 5 / 15 min)
+        _sm_load=$(sysctl -n vm.loadavg 2>/dev/null | awk '{printf "%s %s %s", $2, $3, $4}')
+
+        # Free + used memory
+        _sm_fp=$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null || echo 0)
+        _sm_free_mb=$(( _sm_fp * _sm_ps / 1048576 ))
+        _sm_used_mb=$(( _sm_total_mb - _sm_free_mb ))
+
+        # /tmp available (KiB → MiB)
+        _sm_df=$(df -k /tmp 2>/dev/null | awk 'NR==2 {printf "%d MiB avail", int($4/1024)}')
+
+        # lo0 cumulative bytes (link-level row)
+        _sm_lo=$(netstat -ibn 2>/dev/null | \
+            awk '$1=="lo0" && $3~/<Link/{printf "rx=%s tx=%s", $7, $10}')
+
+        printf '\n  [STRESS %ds / ~%ds | %d/%d done | running: %s]\n  [CPU load: %s | mem: %d/%d MiB used | /tmp: %s | lo0: %s]\n' \
+            "$_sm_el" "$_sm_rem" "$_sm_done" "$_sm_total" "$_sm_last" \
+            "$_sm_load" "$_sm_used_mb" "$_sm_total_mb" "$_sm_df" "${_sm_lo:-(n/a)}" \
+            > /dev/tty
+    done
 }
 
 # ── Category / filtered Kyuafile ───────────────────────────────────────────
@@ -450,6 +606,7 @@ AUTOTEST_SCRIPT_DIR=${SCRIPT_DIR}
 AUTOTEST_KERNCONF=${AUTO_KERNCONF}
 AUTOTEST_TRIGGER_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 AUTOTEST_SRC_COMMIT=${_sentinel_commit}
+AUTOTEST_WITH_STRESS=${WITH_STRESS}
 EOF
     chmod 600 "$AUTOTEST_SENTINEL"
     log_success "Sentinel written"
@@ -509,7 +666,8 @@ ibs_autotest_run()
 
     # Build args ---force skips all confirm_cmd prompts (no tty in rc.d context)
     _args="--run-all --force"
-    [ -n "$AUTOTEST_SUITE" ]      && _args="$_args --suite $AUTOTEST_SUITE"
+    [ -n "$AUTOTEST_SUITE" ]         && _args="$_args --suite $AUTOTEST_SUITE"
+    [ "$AUTOTEST_WITH_STRESS" = "1" ] && _args="$_args --stress"
     _cat_args=""
     for _c in $AUTOTEST_CATEGORIES; do
         _cat_args="$_cat_args --category $_c"
@@ -725,6 +883,61 @@ auto_mode() {
     [ $DRY_RUN -eq 0 ] && reboot || log_info "Dry run -would reboot here"
 }
 
+# ── --last-test: show what ran last and what may have caused a panic ───────
+
+show_last_test() {
+    echo ""
+    echo "================================================================="
+    echo "LAST TEST RUN — PANIC RECOVERY REPORT"
+    echo "================================================================="
+
+    # 1. Run state metadata
+    if [ -f "$LAST_TEST_STATE" ]; then
+        echo ""
+        echo "Last run state:"
+        cat "$LAST_TEST_STATE"
+    else
+        printf '  No state file found (%s)\n' "$LAST_TEST_STATE"
+        printf '  Run --run-all at least once to populate it.\n'
+    fi
+
+    # 2. Most recent results directory
+    echo ""
+    _latest_results=""
+    if [ -d "${SCRIPT_DIR}/work" ]; then
+        _latest_results=$(ls -dt "${SCRIPT_DIR}/work/results-"* 2>/dev/null | head -1)
+    fi
+    if [ -n "$_latest_results" ]; then
+        printf 'Most recent results dir: %s\n' "$_latest_results"
+        [ -f "${_latest_results}/report.txt" ] && \
+            printf '  report.txt : %s/report.txt\n' "$_latest_results"
+        [ -f "${_latest_results}/report.xml" ] && \
+            printf '  report.xml : %s/report.xml\n' "$_latest_results"
+    else
+        printf '  No results directory found under %s/work/\n' "$SCRIPT_DIR"
+    fi
+
+    # 3. Live run log — last 60 lines (most useful for panic triage)
+    echo ""
+    if [ -f "$LAST_RUN_LOG" ]; then
+        _log_lines=$(wc -l < "$LAST_RUN_LOG" 2>/dev/null || echo 0)
+        printf 'Live run log (%s) — last 60 of %d lines:\n' "$LAST_RUN_LOG" "$_log_lines"
+        echo "-----------------------------------------------------------------"
+        tail -60 "$LAST_RUN_LOG"
+        echo "-----------------------------------------------------------------"
+        echo ""
+        echo "TIP: If the system panicked mid-run, the test AFTER the last"
+        echo "     completed entry above is the likely culprit."
+        echo "     Cross-reference with: dmesg | tail -100"
+        echo "     and: /var/log/messages"
+    else
+        printf '  No live run log found (%s)\n' "$LAST_RUN_LOG"
+        printf '  The log is created on the first --run-all invocation.\n'
+    fi
+
+    echo "================================================================="
+}
+
 # Show usage information
 show_usage() {
     cat << EOF
@@ -889,7 +1102,8 @@ ${YELLOW}SUITE SELECTION${NC}
     --suite IBS         Instruction-Based Sampling tests (default)
     --suite UMCDF       UMC + Data Fabric PMU tests
     --suite PMC         General hwpmc counter tests
-    --suite ALL         All suites in sequence (IBS → UMCDF → PMC)
+    --suite STRESS      Standalone stress-test suite (cpu/mem/net/disk ATF tests)
+    --suite ALL         All suites in sequence (IBS → UMCDF → PMC → STRESS)
 
     Affects which source directory is compiled (--compile) and which
     install directory is used for test runs (--run-all, --list, etc.).
@@ -919,13 +1133,50 @@ ${YELLOW}CATEGORY SELECTION${NC}
       TC-UMCPMC  UMC/DF PMC       UMC and DF counter read/write paths       [HIGH]
       TC-UMCUNIT UMCDF Unit       Software unit tests for decode/map logic  [MEDIUM]
 
+    STRESS categories:
+      TC-CSTR  CPU Stress     Per-CPU compute, context-switch, FPU load     [MEDIUM]
+      TC-MSTR  Memory Stress  Cache thrash, bandwidth, TLB pressure         [MEDIUM]
+      TC-NSTR  Network Stress UNIX sockets, TCP loopback, connection rate   [MEDIUM]
+      TC-DSTR  Disk Stress    Sequential, random, fsync I/O under /tmp      [MEDIUM]
+      TC-ISTR  IBS-Op Stress    IBS Op sampling concurrent with each stressor   [MEDIUM]
+      TC-FSTR  IBS-Fetch Stress IBS Fetch sampling concurrent with each stressor [MEDIUM]
+
+${YELLOW}STRESS OPTIONS${NC}
+    --stress            Launch cpu/mem/net/disk background stressor processes
+                        while the primary test suite runs.  Lets you validate
+                        that hardware counter operations behave correctly under
+                        sustained system load.  Works with --run-all and --auto.
+                        WARNING: combining --stress with IBS tests at high
+                        sampling rates can reproduce the NMI storm crash in
+                        FreeBSD-Tests-026.  Use --safe-ibs-rate to cap the
+                        minimum IBS sampling period in that case.
+
+    --safe-ibs-rate N   Set dev.hwpmc.ibs.min_period=N via sysctl before
+                        starting the test run.  Caps the maximum IBS NMI rate
+                        when using --stress + IBS suite together.  Has no
+                        effect if the sysctl is not present in the kernel.
+
+${YELLOW}PANIC RECOVERY${NC}
+    --last-test         Show the last test run's live output and state.
+                        Every --run-all writes a live log to:
+                          ${LAST_RUN_LOG}
+                        and a state file to:
+                          ${LAST_TEST_STATE}
+                        Both files survive a kernel panic and reboot.
+                        After a panic, run --last-test to see which test was
+                        the last to complete before the crash.  The test
+                        immediately following it in Kyuafile order is the
+                        likely culprit.  Cross-reference with dmesg.
+
 ${YELLOW}AUTO MODE OPTIONS${NC}
     --kernconf CONF     Kernel configuration to build with make buildkernel
                         (default: GENERIC).  Use AMD_IBS for the IBS-enabled
                         config if it is present in the FreeBSD source tree.
-    --email ADDR        Email address for the post-reboot report.
-                        Default: ojanerif@amd.com
-                        Delivery uses the system MTA (dma → txsmtp.amd.com).
+    --email ADDR        Email address for the post-reboot report (--auto always
+                        emails).  For --run-all, email is sent only when --email
+                        is explicitly given on the command line.
+                        Default: freebsd-test@mailman-svr.amd.com,ojanerif@amd.com
+                        Delivery uses the system MTA (dma → atlsmtp10.amd.com).
 
 ${YELLOW}OPTIONS${NC}
     -v, --verbose       Print additional diagnostic messages (git SHAs,
@@ -945,8 +1196,17 @@ ${YELLOW}EXAMPLES${NC}
     # Full first-time IBS workflow
     $0 --download --compile --run-all
 
+    # Run IBS suite under background stress load and email the report
+    $0 --run-all --stress --email me@amd.com
+
+    # Run IBS + stress with a capped NMI rate (safer for NMI-storm scenarios)
+    $0 --run-all --stress --safe-ibs-rate 0x1000
+
     # Run only unit and hwpmc-API tests (no hardware needed for unit)
     $0 --run-all --category TC-UNIT --category TC-HWPMC
+
+    # Run the standalone STRESS suite (validates stressors pass on their own)
+    $0 --suite STRESS --compile --run-all
 
     # Run UMCDF suite
     $0 --suite UMCDF --compile --run-all
@@ -954,11 +1214,14 @@ ${YELLOW}EXAMPLES${NC}
     # Debug a single failing test
     $0 --run ibs_detect_test
 
+    # After a kernel panic: see which test was running at crash time
+    $0 --last-test
+
     # Preview the auto workflow without touching anything
     $0 --dry-run --auto --suite IBS --kernconf GENERIC --email me@amd.com
 
-    # Full automated kernel-build + reboot + test + email cycle
-    $0 --auto --suite IBS --kernconf GENERIC --email me@amd.com
+    # Full automated kernel-build + reboot + test + email cycle (with stress)
+    $0 --auto --suite IBS --kernconf GENERIC --stress --email me@amd.com
 
     # Sync changes to sos-git
     $0 --commit
@@ -981,10 +1244,14 @@ ${YELLOW}VERDICT CRITERIA${NC}
 ${YELLOW}FILES${NC}
     \$SCRIPT_DIR/tests/sys/amd/ibs/     IBS test source
     \$SCRIPT_DIR/tests/sys/amd/umcdf/   UMCDF test source
+    \$SCRIPT_DIR/tests/sys/amd/stress/  STRESS test source + stressor binaries
     /usr/tests/sys/amd/ibs/            Installed IBS tests (kyua target)
     /usr/tests/sys/amd/umcdf/          Installed UMCDF tests
+    /usr/tests/sys/amd/stress/         Installed stress tests + stressor binaries
     \$RESULTS_DIR/report.txt            Plain-text run report
     \$RESULTS_DIR/report.xml            JUnit XML (for CI systems)
+    /var/log/ibs-last-run.log          Live kyua output (survives kernel panic)
+    /var/log/ibs-last-test.state       Last completed test + metadata (panic triage)
     /var/db/ibs-autotest-sentinel      --auto sentinel (removed after run)
     /usr/local/etc/rc.d/ibs_autotest   --auto rc.d service (self-disables)
     /var/log/ibs-autotest.log          --auto post-reboot run log
@@ -1818,6 +2085,7 @@ run_all_tests() {
     log_info "Executing complete IBS test suite..."
     preflight_checks
     load_module
+    [ "$WITH_STRESS" -eq 1 ] && start_background_stressors
 
     if [ ! -d "$TESTS_INSTALL_DIR" ]; then
         log_error "Tests not installed. Run --compile first"
@@ -1826,12 +2094,19 @@ run_all_tests() {
 
     cd "$TESTS_INSTALL_DIR" || exit 1
 
+    # Stress tests saturate every CPU and main memory — parallel execution causes
+    # resource starvation and inter-test interference.  Force sequential regardless
+    # of the global --parallelism flag.
+    if [ "$SUITE" = "STRESS" ]; then
+        PARALLELISM=1
+    fi
+
     if [ $DRY_RUN -eq 0 ]; then
         print_cpu_test_context
 
         echo ""
         echo "================================================================="
-        printf "IBS TEST SUITE - LIVE OUTPUT  (parallelism: %s)\n" "$PARALLELISM"
+        printf "%s TEST SUITE - LIVE OUTPUT  (parallelism: %s)\n" "$SUITE" "$PARALLELISM"
         echo "================================================================="
 
         # Temp files for counters and exit code (pipes run in a subshell,
@@ -1862,6 +2137,24 @@ run_all_tests() {
         done
         > "$TMP_MATRIX"
 
+        # Stress monitor temp files (updated by the result-processing while loop,
+        # read by the background stress_monitor_loop process).
+        TMP_SM_DONE="/tmp/ibs_sm_done_$$.tmp"
+        TMP_SM_LAST="/tmp/ibs_sm_last_$$.tmp"
+        STRESS_MON_PID=""
+        echo 0    > "$TMP_SM_DONE"
+        printf '(starting)' > "$TMP_SM_LAST"
+
+        if [ "$SUITE" = "STRESS" ]; then
+            _sm_run_start=$(date +%s)
+            _sm_run_total=$(kyua list 2>/dev/null | wc -l | tr -d ' \t')
+            [ -z "$_sm_run_total" ] || [ "$_sm_run_total" -le 0 ] && _sm_run_total=12
+            log_info "Stress monitor started (${_sm_run_total} tests, sequential)"
+            stress_monitor_loop "$_sm_run_start" "$_sm_run_total" \
+                "$TMP_SM_DONE" "$TMP_SM_LAST" &
+            STRESS_MON_PID=$!
+        fi
+
         # Use filtered Kyuafile when categories are selected
         _kyuafile_opt=""
         if [ -n "$TMP_KYUAFILE" ] && [ -f "$TMP_KYUAFILE" ]; then
@@ -1875,14 +2168,39 @@ run_all_tests() {
         confirm_cmd "Run${_cat_label} test suite in $TESTS_INSTALL_DIR (parallelism: $PARALLELISM)" \
             "kyua -v parallelism=$PARALLELISM test${_kyuafile_opt:+ $_kyuafile_opt}" || return 1
 
+        # Initialize persistent live log for panic recovery.
+        # If the kernel panics mid-run, this file survives the reboot and
+        # shows every result that completed before the crash.  The first test
+        # absent from the log (next in Kyuafile order) is the likely culprit.
+        {
+            printf '=== ibs-ci run started: %s ===\n' "$(date)"
+            printf 'SUITE=%s  PARALLELISM=%s  STRESS=%s\n' \
+                "$SUITE" "$PARALLELISM" "$WITH_STRESS"
+            printf 'RESULTS_DIR=%s\n\n' "$RESULTS_DIR"
+        } > "$LAST_RUN_LOG"
+        {
+            printf 'SUITE=%s\n' "$SUITE"
+            printf 'STARTED=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'RESULTS_DIR=%s\n' "$RESULTS_DIR"
+            printf 'PARALLELISM=%s\n' "$PARALLELISM"
+            printf 'STRESS=%s\n' "$WITH_STRESS"
+            printf 'LAST_COMPLETED=\n'
+            printf 'LAST_STATUS=\n'
+            printf 'LAST_SEEN_AT=\n'
+        } > "$LAST_TEST_STATE"
+
         # Run kyua and process each line as it arrives; capture exit code via
         # temp file because the pipe subshell would swallow it otherwise.
         # Each result line gets a [CATEGORY][SEVERITY] prefix from get_test_meta().
+        # tee duplicates raw kyua output to the live log for panic triage.
         # shellcheck disable=SC2086
         { kyua -v parallelism="$PARALLELISM" test $_kyuafile_opt 2>&1; echo $? > "$TMP_EXIT"; } | \
+        tee -a "$LAST_RUN_LOG" | \
         while IFS= read -r line; do
             PREFIX=""
             SEV=""
+            TESTID=""
+            _TIME=""
             # Detect result lines (format: "binary:tc_name  ->  STATUS  [Xs]")
             case "$line" in
                 *" -> "*)
@@ -1905,6 +2223,8 @@ run_all_tests() {
                         MEDIUM) echo $(( $(cat "$TMP_MED_P")  + 1 )) > "$TMP_MED_P"  ;;
                     esac
                     printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "passed" "$_TIME" >> "$TMP_MATRIX"
+                    printf 'LAST_COMPLETED=%s\nLAST_STATUS=passed\nLAST_SEEN_AT=%s\n' \
+                        "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
                     printf '%s\n' "${PREFIX}${GREEN}✓${NC} ${line}"
                     ;;
                 *" -> "*"failed"*)
@@ -1915,16 +2235,22 @@ run_all_tests() {
                         MEDIUM)   echo $(( $(cat "$TMP_MED_F")  + 1 )) > "$TMP_MED_F"  ;;
                     esac
                     printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "failed" "$_TIME" >> "$TMP_MATRIX"
+                    printf 'LAST_COMPLETED=%s\nLAST_STATUS=failed\nLAST_SEEN_AT=%s\n' \
+                        "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
                     printf '%s\n' "${PREFIX}${RED}✗${NC} ${line}"
                     ;;
                 *" -> "*"skipped"*)
                     echo $(( $(cat "$TMP_SKIP") + 1 )) > "$TMP_SKIP"
                     printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "skipped" "$_TIME" >> "$TMP_MATRIX"
+                    printf 'LAST_COMPLETED=%s\nLAST_STATUS=skipped\nLAST_SEEN_AT=%s\n' \
+                        "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
                     printf '%s\n' "${PREFIX}${YELLOW}⊘${NC} ${line}"
                     ;;
                 *" -> "*"expected_failure"*)
                     echo $(( $(cat "$TMP_XFAIL") + 1 )) > "$TMP_XFAIL"
                     printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "xfail" "$_TIME" >> "$TMP_MATRIX"
+                    printf 'LAST_COMPLETED=%s\nLAST_STATUS=xfail\nLAST_SEEN_AT=%s\n' \
+                        "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
                     printf '%s\n' "${PREFIX}${CYAN}~${NC} ${line}"
                     ;;
                 *" -> "*"broken"*)
@@ -1935,13 +2261,34 @@ run_all_tests() {
                         MEDIUM)   echo $(( $(cat "$TMP_MED_F")  + 1 )) > "$TMP_MED_F"  ;;
                     esac
                     printf '%s|%s|%s|%s|%s\n' "$TESTID" "$CAT" "$SEV" "broken" "$_TIME" >> "$TMP_MATRIX"
+                    printf 'LAST_COMPLETED=%s\nLAST_STATUS=broken\nLAST_SEEN_AT=%s\n' \
+                        "$TESTID" "$(date -u +%H:%M:%SZ)" >> "$LAST_TEST_STATE"
                     printf '%s\n' "${PREFIX}${RED}⚠${NC} ${line}"
                     ;;
                 *)
                     [ -n "$line" ] && printf '%s\n' "$line"
                     ;;
             esac
+            # Update stress monitor state after every completed test.
+            if [ -n "$TESTID" ]; then
+                _cnt=$(cat "$TMP_SM_DONE" 2>/dev/null || echo 0)
+                echo $(( _cnt + 1 )) > "$TMP_SM_DONE"
+                printf '%s [%s]' "$TESTID" "$_TIME" > "$TMP_SM_LAST"
+            fi
         done
+
+        # Stop the stress monitor background process.
+        if [ -n "$STRESS_MON_PID" ]; then
+            kill "$STRESS_MON_PID" 2>/dev/null
+            wait "$STRESS_MON_PID" 2>/dev/null || true
+        fi
+        rm -f "$TMP_SM_DONE" "$TMP_SM_LAST"
+
+        # Stop background stressors now that kyua has finished.
+        [ "$WITH_STRESS" -eq 1 ] && stop_background_stressors
+
+        # Finalize live log so --last-test can confirm the run completed normally.
+        printf '\n=== ibs-ci run finished: %s ===\n' "$(date)" >> "$LAST_RUN_LOG"
 
         TEST_EXIT_CODE=$(cat "$TMP_EXIT" 2>/dev/null || echo 1)
         PASSED_TESTS=$(cat "$TMP_PASS")
@@ -2029,7 +2376,10 @@ run_all_tests() {
             printf "IBS Test Suite -Comprehensive Test Report\n"
             printf "Generated  : %s\n" "$(date)"
             printf "System     : %s\n" "$(uname -a)"
+            printf "Suite      : %s\n" "$SUITE"
             printf "Parallelism: %s\n" "$PARALLELISM"
+            [ "$WITH_STRESS" -eq 1 ] && \
+                printf "Background : stress active (cpu_stressor/mem_stressor/net_stressor/disk_stressor)\n"
             printf "=================================================================\n"
             printf "\n"
         } > "$REPORT_TXT"
@@ -2236,6 +2586,17 @@ run_all_tests() {
         echo ""
         log_info "Full report : $REPORT_TXT"
         log_info "JUnit XML   : $REPORT_XML"
+        log_info "Live log    : $LAST_RUN_LOG  (use --last-test after a panic)"
+
+        # Send email only when --email was explicitly given on the command line.
+        if [ "$EMAIL_REQUESTED" -eq 1 ]; then
+            _rt_verdict="UNKNOWN"
+            grep -q "VERDICT: APPROVED"     "$REPORT_TXT" 2>/dev/null && _rt_verdict="APPROVED"
+            grep -q "VERDICT: CONDITIONAL"  "$REPORT_TXT" 2>/dev/null && _rt_verdict="CONDITIONAL"
+            grep -q "VERDICT: NOT APPROVED" "$REPORT_TXT" 2>/dev/null && _rt_verdict="NOT APPROVED"
+            log_info "Sending report email to: $REPORT_EMAIL"
+            send_report_email "$REPORT_TXT" "$_rt_verdict" "$REPORT_EMAIL"
+        fi
     else
         log_info "Would run complete test suite (dry run)"
     fi
@@ -2568,7 +2929,7 @@ show_menu() {
         fi
 
         printf '%s\n' "${CYAN}=================================================================${NC}"
-        printf "  Suite  : ${BOLD}%s${NC}  (change with --suite IBS|UMCDF|PMC|ALL)\n" "$SUITE"
+        printf "  Suite  : ${BOLD}%s${NC}  (change with --suite IBS|UMCDF|PMC|STRESS|ALL)\n" "$SUITE"
         printf '\n'
         printf '  %s1)%s Run all tests (suite: %s)\n'      "$BOLD" "$NC" "$SUITE"
         printf '  %s2)%s Run specific test\n'              "$BOLD" "$NC"
@@ -2764,12 +3125,12 @@ while [ $# -gt 0 ]; do
         --suite)
             shift
             if [ $# -eq 0 ]; then
-                log_error "--suite requires IBS|UMCDF|PMC|ALL"
+                log_error "--suite requires IBS|UMCDF|PMC|STRESS|ALL"
                 exit 1
             fi
             case "$1" in
-                IBS|UMCDF|PMC|ALL) SUITE="$1" ;;
-                *) log_error "--suite: unknown suite '$1' (use IBS|UMCDF|PMC|ALL)"; exit 1 ;;
+                IBS|UMCDF|PMC|STRESS|ALL) SUITE="$1" ;;
+                *) log_error "--suite: unknown suite '$1' (use IBS|UMCDF|PMC|STRESS|ALL)"; exit 1 ;;
             esac
             ;;
         --category)
@@ -2787,6 +3148,7 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             REPORT_EMAIL="$1"
+            EMAIL_REQUESTED=1
             ;;
         --kernconf)
             shift
@@ -2823,6 +3185,20 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             RESULTS_DIR="$1"
+            ;;
+        --stress)
+            WITH_STRESS=1
+            ;;
+        --safe-ibs-rate)
+            shift
+            if [ $# -eq 0 ]; then
+                log_error "--safe-ibs-rate requires a period value (e.g. 0x1000)"
+                exit 1
+            fi
+            SAFE_IBS_RATE="$1"
+            ;;
+        --last-test)
+            COMMAND="last-test"
             ;;
         -h|--help)
             show_usage
@@ -2894,6 +3270,9 @@ case $COMMAND in
         ;;
     auto)
         auto_mode "$REPORT_EMAIL"
+        ;;
+    last-test)
+        show_last_test
         ;;
     *)
         if [ -z "$COMMAND" ]; then
