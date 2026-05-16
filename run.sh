@@ -77,10 +77,11 @@ get_test_meta() {
         ibs_api_test)                    printf "TC-API:Userspace API:MEDIUM" ;;
         ibs_ioctl_test)                  printf "TC-API:Userspace API:MEDIUM" ;;
         ibs_swfilt_test)                 printf "TC-API:Userspace API:MEDIUM" ;;
-        # TC-STR -Stability/Stress [MEDIUM]
+        # TC-STR -CPU/MSR Stability Stress [MEDIUM] — Stress Batch 1 (CPU)
         ibs_stress_test)                 printf "TC-STR:Stability/Stress:MEDIUM" ;;
         ibs_cpu_stress_test)             printf "TC-STR:Stability/Stress:MEDIUM" ;;
-        ibs_mem_stress_test)             printf "TC-STR:Stability/Stress:MEDIUM" ;;
+        # TC-MEMIBS -IBS Memory Stress [MEDIUM] — Stress Batch 2 (Memory)
+        ibs_mem_stress_test)             printf "TC-MEMIBS:Memory/IBS Stress:MEDIUM" ;;
         # TC-UNIT -Unit Tests (no hardware required) [MEDIUM]
         ibs_unit_cpuid_parse_test)       printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_datasrc_test)           printf "TC-UNIT:Unit Tests:MEDIUM" ;;
@@ -110,8 +111,8 @@ get_test_meta() {
         disk_stress_test)                printf "TC-DSTR:Disk Stress:MEDIUM" ;;
         ibs_op_stress_test)              printf "TC-ISTR:IBS-Op Stress:MEDIUM" ;;
         ibs_fetch_stress_test)           printf "TC-FSTR:IBS-Fetch Stress:MEDIUM" ;;
-        # IBS NMI stress test (TC-INT, lives in IBS suite)
-        ibs_nmi_stress_test)             printf "TC-INT:Interrupt Delivery:HIGH" ;;
+        # TC-NMISTR -NMI Stress [HIGH] — Stress Batch 1 (CPU); was TC-INT
+        ibs_nmi_stress_test)             printf "TC-NMISTR:NMI Stress:HIGH" ;;
         *)                               printf "TC-MISC:Miscellaneous:MEDIUM" ;;
     esac
 }
@@ -397,6 +398,149 @@ stress_monitor_loop() {
     done
 }
 
+# ── Per-test diagnostic table ──────────────────────────────────────────────
+#
+# diag_for_test TESTID
+#
+# Prints four lines to stdout:
+#   CLASS:      normal | actionable
+#   OPERATION:  one-line description of what the test does
+#   CAUSE:      why it skipped / failed
+#   ACTION:     what to do about it (empty for "normal" skips)
+#
+# "normal" = hardware/version mismatch — skip is expected, no action needed.
+# "actionable" = missing kernel feature, patch, or config — needs follow-up.
+#
+diag_for_test() {
+    _dt_id="$1"
+    case "$_dt_id" in
+
+    # ── IBS NMI stress ────────────────────────────────────────────────────
+    ibs_nmi_stress_test:ibs_nmi_drain_under_load)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Executes AMD Erratum #420 workaround drain sequence 100 times under full CPU stress (192 threads): clear MaxCnt, clear IbsOpEn, then 50x1us zero-writes to the MSR per iteration; asserts each drain completes within 5000 us.\n'
+        printf 'CAUSE:4 of 100 drain iterations exceeded the 5000 us latency threshold. Under maximum CPU load the NMI handler contention slows the drain sequence beyond the expected bound.\n'
+        printf 'ACTION:Investigate NMI handler re-arm contention under 192-CPU load; consider raising the threshold for high-core-count machines or pinning the drain loop to an isolated CPU.\n'
+        ;;
+
+    ibs_nmi_stress_test:ibs_nmi_rate_limit_enforce)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Programs an IBS Op period below the kernel-enforced minimum and verifies the kernel clamps it to the minimum value via sysctl dev.hwpmc.ibs.min_period.\n'
+        printf 'CAUSE:sysctl dev.hwpmc.ibs.min_period does not exist in this kernel; the IBS rate-limiting patch (FreeBSD-Tests-026) has not been applied.\n'
+        printf 'ACTION:Apply kernel patch FreeBSD-Tests-026, rebuild the kernel, and re-run.\n'
+        ;;
+
+    # ── IBS robustness ────────────────────────────────────────────────────
+    ibs_robustness_test:ibs_robustness_nmi_flood)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Enables IBS Op with MaxCnt=1 (16-cycle period, ~250M NMIs/s at 4 GHz) to stress-test NMI delivery robustness on a single CPU.\n'
+        printf 'CAUSE:Placeholder — the hwpmc IBS NMI handler is not yet registered in this kernel build. Without a registered handler the system would lock up on the first unhandled NMI.\n'
+        printf 'ACTION:Register the IBS NMI handler in hwpmc before enabling; see TODO.md TC-ROB-01.\n'
+        ;;
+
+    ibs_robustness_test:ibs_robustness_all_cpus_nmi_flood)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Same as TC-ROB-01 but enables MaxCnt=1 IBS Op sampling simultaneously on every CPU to test system-wide NMI storm resilience.\n'
+        printf 'CAUSE:Placeholder — same prerequisite as TC-ROB-01: hwpmc IBS NMI handler must be registered first.\n'
+        printf 'ACTION:Register the IBS NMI handler in hwpmc before enabling; see TODO.md TC-ROB-02.\n'
+        ;;
+
+    # ── IBS routing ───────────────────────────────────────────────────────
+    ibs_routing_test:ibs_ibsctl_global)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Writes MSR_AMD64_IBSCTL (0xc001103a) to set the global IBSCTL_FETCH_EN and IBSCTL_OP_EN bits, then reads back to verify the write took effect.\n'
+        printf 'CAUSE:The write to MSR_AMD64_IBSCTL returned an error (Bad address / EIO). The MSR requires elevated kernel privilege that is not present, or cpuctl.ko is not exposing write access to this register.\n'
+        printf 'ACTION:Verify cpuctl.ko is loaded and the process has the required capability; check if IBSCTL is accessible on this BIOS/firmware configuration.\n'
+        ;;
+
+    # ── IBS detection ─────────────────────────────────────────────────────
+    ibs_detect_test:ibs_detect_msr_access)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Reads MSR_AMD64_IBSOPDATA4 (0xc001103d) to verify Zen4+ IBS Op extended data is accessible; this register is only populated during active IBS Op sampling.\n'
+        printf 'CAUSE:Read of MSR_AMD64_IBSOPDATA4 returned Bad address without active IBS Op sampling running. The register is read-only and only valid while the IBS Op engine is counting.\n'
+        printf 'ACTION:Start IBS Op sampling before reading IBSOPDATA4, or restructure the test to enable sampling first; alternatively confirm the kernel exposes IBSOPDATA4 reads via cpuctl.\n'
+        ;;
+
+    # ── IBS CPU detection — hardware-specific (normal skips) ─────────────
+    ibs_cpu_test:ibs_cpu_zen5_detection)
+        printf 'CLASS:normal\n'
+        printf 'OPERATION:Detects AMD Zen5 (Family 0x1a) CPU via CPUID and validates Zen5-specific IBS feature bits.\n'
+        printf 'CAUSE:CPU is Family 0x19 (Zen 4) — not a Zen5 processor. Skip is expected on this hardware.\n'
+        printf 'ACTION:\n'
+        ;;
+
+    ibs_cpu_test:ibs_cpu_tsc_frequency)
+        printf 'CLASS:normal\n'
+        printf 'OPERATION:Determines TSC frequency using CPUID leaf 0x15 (TSC/core crystal clock ratio) or 0x16 (processor frequency info).\n'
+        printf 'CAUSE:AMD EPYC 9654 (Zen 4) does not expose CPUID leaf 0x15 or 0x16 with valid data. Skip is expected on this CPU family.\n'
+        printf 'ACTION:\n'
+        ;;
+
+    # ── IBS data accuracy — Zen4+ MSR (normal on this stepping) ──────────
+    ibs_data_accuracy_test:ibs_op_data4_zen4)
+        printf 'CLASS:normal\n'
+        printf 'OPERATION:Validates IBS Op Data 4 fields (remote latency, L3 miss data) by writing and reading back test values via MSR_AMD64_IBSOPDATA4 on a Zen4+ CPU.\n'
+        printf 'CAUSE:MSR_AMD64_IBSOPDATA4 returned Bad address on this CPU/stepping even though the CPU family is Zen4; the MSR may require sampling to be active or is not accessible via cpuctl on this build.\n'
+        printf 'ACTION:\n'
+        ;;
+
+    # ── IBS ioctl ─────────────────────────────────────────────────────────
+    ibs_ioctl_test:ibs_ioctl_not_implemented)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Placeholder for IBS-specific ioctl API validation against /dev/cpuctl.\n'
+        printf 'CAUSE:The IBS ioctl interface has not been implemented in the FreeBSD hwpmc kernel module yet.\n'
+        printf 'ACTION:Implement the IBS ioctl handler in sys/dev/hwpmc/hwpmc_amd.c and wire it to /dev/cpuctl.\n'
+        ;;
+
+    # ── IBS L3MissOnly — normal skip (Zen4+ correctly skips this) ─────────
+    ibs_l3miss_test:ibs_l3miss_disabled_on_older)
+        printf 'CLASS:normal\n'
+        printf 'OPERATION:Verifies that the L3MissOnly filter bit (IBS_FETCH_L3_MISS_ONLY, bit 59) is not retained on pre-Zen4 CPUs by writing it and confirming it reads back as 0.\n'
+        printf 'CAUSE:CPU supports L3MissOnly (Zen4+), so the test guards against false positives and skips intentionally on capable hardware.\n'
+        printf 'ACTION:\n'
+        ;;
+
+    # ── IBS swfilt — bare-metal normal skip ───────────────────────────────
+    ibs_swfilt_test:ibs_swfilt_exclude_hv)
+        printf 'CLASS:normal\n'
+        printf 'OPERATION:Tests the hypervisor-exclude software filter bit in IBS Fetch Control by enabling sampling, running HV-mode instructions, and verifying HV samples are excluded.\n'
+        printf 'CAUSE:System is running on bare metal (kern.vm_guest=none). The hypervisor-exclude filter is only meaningful inside a guest VM. Skip is expected.\n'
+        printf 'ACTION:\n'
+        ;;
+
+    # ── IBS stress — kernel bug skip ──────────────────────────────────────
+    ibs_stress_test:ibs_stress_period_changes)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Performs 500 rapid IBS Op period changes while sampling is disabled (IbsOpEn=0), verifying the MaxCnt field is preserved across each write/read cycle.\n'
+        printf 'CAUSE:Known kernel bug FreeBSD-Tests-010: the hwpmc NMI handler re-arms the IBS counter with its stored period even when IbsOpEn=0, corrupting the MaxCnt field and causing the test to skip to avoid a false failure.\n'
+        printf 'ACTION:Fix the kernel NMI handler to skip counter re-arm when IbsOpEn=0; tracked as FreeBSD-Tests-010.\n'
+        ;;
+
+    # ── UMCDF ─────────────────────────────────────────────────────────────
+    umcdf_df_test:umcdf_df_runtime_smoke)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Allocates an AMD Data Fabric PMC event, starts and stops sampling, then generates memory traffic to verify the counter increments correctly.\n'
+        printf 'CAUSE:Either the FreeBSD PMU JSON tables in this tree do not carry DF event definitions for this CPU generation, or the test is disabled because amd.umcdf.df_runtime is not set to true in the kyua config.\n'
+        printf 'ACTION:Add DF JSON tables for Zen4 to FreeBSD, or enable the test via kyua config: set amd.umcdf.df_runtime=true.\n'
+        ;;
+
+    umcdf_umc_test:umcdf_umc_runtime_smoke_if_supported)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Allocates an AMD UMC (Unified Memory Controller) PMC event, starts and stops sampling, and generates memory traffic to confirm the counter increments.\n'
+        printf 'CAUSE:pmc_allocate() returned Operation not supported (EOPNOTSUPP) — the UMC PMC backend is not yet implemented in this libpmc/hwpmc tree even though UMC metadata is present.\n'
+        printf 'ACTION:Implement the UMC PMC runtime backend in hwpmc and libpmc for Zen4 (EPYC 9xxx series).\n'
+        ;;
+
+    # ── Fallback ──────────────────────────────────────────────────────────
+    *)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Unknown — no diagnostic entry for this test.\n'
+        printf 'CAUSE:See skip/fail message above.\n'
+        printf 'ACTION:Add a diag_for_test() entry in run.sh for this test ID.\n'
+        ;;
+    esac
+}
+
 # ── Category / filtered Kyuafile ───────────────────────────────────────────
 
 # Return true (0) if test binary $1 belongs to any category in $2 (space-sep list)
@@ -411,7 +555,9 @@ test_in_categories() {
 }
 
 # Build a filtered Kyuafile containing only tests from the selected categories.
-# Writes to /tmp/ibs_kyuafile_$$.tmp and prints the path.
+# The filtered file is written inside $1 (the install dir) so kyua can resolve
+# test program names as relative paths from that directory.
+# Prints the path of the file to use (original or filtered).
 # If CATEGORIES is empty, prints the original Kyuafile path unchanged.
 build_filtered_kyuafile() {
     _install_dir="$1"
@@ -422,7 +568,8 @@ build_filtered_kyuafile() {
         return 0
     fi
 
-    _tmp="/tmp/ibs_kyuafile_$$.tmp"
+    # Write alongside the real Kyuafile so relative test-program names resolve.
+    _tmp="${_install_dir}/.kyuafile_filtered_$$.tmp"
     # Copy header lines (syntax / test_suite declarations)
     grep -v '^atf_test_program' "$_original" > "$_tmp" 2>/dev/null || true
 
@@ -1726,10 +1873,45 @@ generate_html_report() {
         _crit_str="${CRIT_FAIL} failed &mdash; FAIL"; _crit_cls="sc-fail"
     fi
 
+    # Diagnostic rows for non-passed tests (shown in Diagnostics section below matrix)
+    _diag_rows=""
+    _TAB="$(printf '\t')"
+    while IFS='|' read -r _tc _cat _sev _st _tm; do
+        case "$_st" in passed) continue ;; esac
+        _dtce=$(_he "$_tc")
+        _diag_info=$(diag_for_test "$_tc")
+        _dclass=$(printf '%s' "$_diag_info"  | grep '^CLASS:'     | sed 's/^CLASS://')
+        _dop=$(printf '%s'    "$_diag_info"  | grep '^OPERATION:' | sed 's/^OPERATION://')
+        _dcause=$(printf '%s' "$_diag_info"  | grep '^CAUSE:'     | sed 's/^CAUSE://')
+        _daction=$(printf '%s' "$_diag_info" | grep '^ACTION:'    | sed 's/^ACTION://')
+        _dope=$(_he "$_dop"); _dcausee=$(_he "$_dcause"); _dactione=$(_he "$_daction")
+        case "$_st" in
+            failed)  _dbadge="<span class=\"badge r-fail\">FAIL</span>";   _dbg="diag-fail" ;;
+            broken)  _dbadge="<span class=\"badge r-broken\">BRKN</span>"; _dbg="diag-broken" ;;
+            skipped)
+                if [ "$_dclass" = "normal" ]; then
+                    _dbadge="<span class=\"badge r-skip\">SKIP-OK</span>"; _dbg="diag-skip-ok"
+                else
+                    _dbadge="<span class=\"badge r-skip\">SKIP</span>";    _dbg="diag-skip"
+                fi ;;
+            *)       _dbadge="<span class=\"badge\">${_st}</span>";        _dbg="" ;;
+        esac
+        _diag_rows="${_diag_rows}
+<details class=\"diag-block ${_dbg}\">
+  <summary>${_dbadge} <code>${_dtce}</code></summary>
+  <div class=\"diag-body\">
+    <table class=\"diag-table\">
+$([ -n "$_dop"     ] && printf '    <tr><th>Operation</th><td>%s</td></tr>\n' "$_dope")
+$([ -n "$_dcause"  ] && printf '    <tr><th>Root cause</th><td>%s</td></tr>\n' "$_dcausee")
+$([ -n "$_daction" ] && [ "$_daction" != "" ] && printf '    <tr><th>Action</th><td>%s</td></tr>\n' "$_dactione")
+    </table>
+  </div>
+</details>"
+    done < "$TMP_MATRIX"
+
     # Matrix rows from TMP_MATRIX (pipe-delimited: tc|cat|sev|status|dur)
     # Descriptions are looked up from TMP_DESC (tc<TAB>description) if available.
     _mrows=""
-    _TAB="$(printf '\t')"
     while IFS='|' read -r _tc _cat _sev _st _tm; do
         _tce=$(_he "$_tc")
         # Look up ATF description for tooltip; gracefully absent if TMP_DESC missing.
@@ -1752,7 +1934,15 @@ generate_html_report() {
             MEDIUM)   _sevcls="s-med"  ;;
             *)        _sevcls=""       ;;
         esac
-        _mrows="${_mrows}<tr class=\"${_rcls}\"><td class=\"tc\" data-desc=\"${_desce}\" onclick=\"toggleDesc(this)\"><span class=\"tc-name\">${_tce}</span></td><td>${_cat}</td><td class=\"${_sevcls}\">${_sev}</td><td><span class=\"badge ${_rcls}\">${_slbl}</span></td><td class=\"dur\">${_tm}</td></tr>
+        # Derive execution phase/batch from category code
+        case "$_cat" in
+            TC-CSTR|TC-ISTR|TC-FSTR|TC-STR|TC-NMISTR) _phase="Stress B1·CPU"   ; _phcls="ph-s1" ;;
+            TC-MSTR|TC-MEMIBS)                          _phase="Stress B2·Mem"   ; _phcls="ph-s2" ;;
+            TC-DSTR)                                    _phase="Stress B3·Disk"  ; _phcls="ph-s3" ;;
+            TC-NSTR)                                    _phase="Stress B4·Net"   ; _phcls="ph-s4" ;;
+            *)                                          _phase="Ph1·Non-stress"  ; _phcls="ph-1"  ;;
+        esac
+        _mrows="${_mrows}<tr class=\"${_rcls}\"><td class=\"tc\" data-desc=\"${_desce}\" onclick=\"toggleDesc(this)\"><span class=\"tc-name\">${_tce}</span></td><td>${_cat}</td><td class=\"${_sevcls}\">${_sev}</td><td><span class=\"badge ${_rcls}\">${_slbl}</span></td><td class=\"dur\">${_tm}</td><td class=\"phase ${_phcls}\">${_phase}</td></tr>
 "
     done < "$TMP_MATRIX"
 
@@ -1820,6 +2010,32 @@ tr.r-skip{background:#161b22;opacity:.7}
 .badge.r-broken{background:#2d1800;color:#db6d28}
 .badge.r-xfail{background:#0d2a3d;color:#58a6ff}
 footer{background:#161b22;border-top:1px solid #30363d;padding:16px 32px;color:#8b949e;font-size:12px;display:flex;gap:24px;align-items:center}
+.diag-block{background:#161b22;border:1px solid #30363d;border-radius:6px;margin-bottom:8px;overflow:hidden}
+.diag-block summary{padding:10px 14px;cursor:pointer;font-family:monospace;font-size:12px;list-style:none;display:flex;align-items:center;gap:10px;color:#e6edf3}
+.diag-block summary::-webkit-details-marker{display:none}
+.diag-block summary::before{content:"▶";font-size:10px;color:#8b949e;transition:transform .15s}
+.diag-block[open] summary::before{transform:rotate(90deg)}
+.diag-block.diag-fail{border-color:#f85149}
+.diag-block.diag-broken{border-color:#db6d28}
+.diag-block.diag-skip{border-color:#d29922}
+.diag-block.diag-skip-ok{opacity:.6}
+.diag-body{padding:12px 16px;border-top:1px solid #30363d}
+.diag-table{width:100%;border-collapse:collapse;font-size:12px}
+.diag-table th{width:110px;padding:6px 10px 6px 0;color:#8b949e;font-weight:500;vertical-align:top;white-space:nowrap}
+.diag-table td{padding:6px 0;color:#e6edf3;line-height:1.5}
+td.phase{font-size:11px;white-space:nowrap;font-family:monospace}
+.ph-1  {color:#8b949e}
+.ph-s1 {color:#f0883e}
+.ph-s2 {color:#79c0ff}
+.ph-s3 {color:#d2a8ff}
+.ph-s4 {color:#56d364}
+.phase-legend{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px}
+.phase-pill{padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;font-family:monospace}
+.pill-1 {background:#21262d;color:#8b949e;border:1px solid #30363d}
+.pill-s1{background:#2d1a00;color:#f0883e;border:1px solid #f0883e}
+.pill-s2{background:#00213d;color:#79c0ff;border:1px solid #79c0ff}
+.pill-s3{background:#1e0a3d;color:#d2a8ff;border:1px solid #d2a8ff}
+.pill-s4{background:#0d2a14;color:#56d364;border:1px solid #56d364}
 </style>
 </head>
 <body>
@@ -1853,14 +2069,28 @@ footer{background:#161b22;border-top:1px solid #30363d;padding:16px 32px;color:#
 </tbody>
 </table>
 
+<div class="section-title">Execution Phases</div>
+<div class="phase-legend">
+  <span class="phase-pill pill-1">Phase 1 &mdash; Non-stress (full parallelism)</span>
+  <span class="phase-pill pill-s1">Stress Batch 1 &mdash; CPU</span>
+  <span class="phase-pill pill-s2">Stress Batch 2 &mdash; Memory</span>
+  <span class="phase-pill pill-s3">Stress Batch 3 &mdash; Disk</span>
+  <span class="phase-pill pill-s4">Stress Batch 4 &mdash; Network</span>
+</div>
+
 <div class="section-title">Test Results Matrix</div>
 <div class="matrix-wrap">
 <table class="matrix">
-<thead><tr><th>Test Case</th><th>Category</th><th>Severity</th><th>Status</th><th>Duration</th></tr></thead>
+<thead><tr><th>Test Case</th><th>Category</th><th>Severity</th><th>Status</th><th>Duration</th><th>Phase</th></tr></thead>
 <tbody>
 ${_mrows}
 </tbody>
 </table>
+</div>
+
+<div class="section-title">Diagnostics — Non-Passed Tests</div>
+<div style="margin-bottom:24px">
+${_diag_rows}
 </div>
 
 </div>
@@ -2135,13 +2365,11 @@ _run_suite_once() {
         return 1
     fi
 
-    # Parallelism rules per suite
+    # Parallelism: all suites and stress batches now respect $PARALLELISM.
+    # Resource isolation is achieved by running stress batches sequentially
+    # (Batch 1 CPU → Batch 2 Memory → Batch 3 Disk → Batch 4 Network) via
+    # _run_stress_batches(), not by forcing parallelism=1 here.
     _rs_par="$PARALLELISM"
-    if [ "$_rs_suite" = "STRESS" ]; then
-        _rs_par=1
-    elif [ "$WITH_STRESS" -eq 1 ]; then
-        _rs_par=1
-    fi
 
     echo ""
     echo "================================================================="
@@ -2306,6 +2534,128 @@ _run_suite_once() {
     return "$_rs_ec"
 }
 
+# ── Stress batch helpers ────────────────────────────────────────────────────
+
+# _suite_has_batch_tests SUITE CATEGORIES
+# Returns 0 if the filtered Kyuafile for SUITE with CATEGORIES has >=1 test.
+# Returns 1 (skip silently) otherwise.
+_suite_has_batch_tests() {
+    _sht_suite="$1"
+    _sht_cats="$2"
+    _sht_orig_cats="$CATEGORIES"
+    CATEGORIES="$_sht_cats"
+    _sht_dir=$(suite_install_dir "$_sht_suite")
+    if [ -z "$_sht_dir" ]; then
+        CATEGORIES="$_sht_orig_cats"
+        return 1
+    fi
+    _sht_kf=$(build_filtered_kyuafile "$_sht_dir")
+    _sht_count=$(grep -c '^atf_test_program' "$_sht_kf" 2>/dev/null)
+    _sht_count=${_sht_count:-0}
+    # Clean up filtered Kyuafile if one was created (lives in install dir)
+    case "$_sht_kf" in *".kyuafile_filtered_"*) rm -f "$_sht_kf" ;; esac
+    CATEGORIES="$_sht_orig_cats"
+    [ "${_sht_count}" -gt 0 ] 2>/dev/null || return 1
+}
+
+# _run_stress_batches
+# Runs stress tests in 4 sequential resource-based batches.
+# Within each batch all matching tests run in parallel ($PARALLELISM).
+# Batches that have no tests for the active SUITE_LIST are skipped silently.
+# Globals written: same as _run_suite_once (TMP_PASS, TMP_FAIL, etc., REPORT_TXT)
+# Globals read:    SUITE_LIST, PARALLELISM, REPORT_TXT, TEST_EXIT_CODE
+_run_stress_batches() {
+    _srb_orig_cats="$CATEGORIES"
+
+    # Which suites can carry stress tests
+    _srb_ibs_active=0; _srb_str_active=0
+    for _srb_s in $SUITE_LIST; do
+        case "$_srb_s" in IBS|ALL)    _srb_ibs_active=1 ;; esac
+        case "$_srb_s" in STRESS|ALL) _srb_str_active=1 ;; esac
+    done
+
+    # ── Batch 1 — CPU stress ─────────────────────────────────────────────
+    # Tests: cpu_stress_test, ibs_op_stress_test, ibs_fetch_stress_test (STRESS suite)
+    #        ibs_stress_test, ibs_cpu_stress_test (TC-STR, IBS suite)
+    #        ibs_nmi_stress_test (TC-NMISTR, IBS suite)
+    _srb_b1_cats="TC-CSTR TC-ISTR TC-FSTR TC-STR TC-NMISTR"
+    _srb_b1_run=0
+    {
+        printf '\n=================================================================\n'
+        printf 'STRESS BATCH 1/4 — CPU  [%s]\n' "$_srb_b1_cats"
+        printf '=================================================================\n'
+    } >> "$REPORT_TXT"
+    if [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b1_cats"; then
+        log_info "Stress Batch 1/4 — CPU: STRESS suite"
+        CATEGORIES="$_srb_b1_cats"
+        _run_suite_once STRESS || TEST_EXIT_CODE=1
+        _srb_b1_run=1
+    fi
+    if [ "$_srb_ibs_active" -eq 1 ] && _suite_has_batch_tests IBS "$_srb_b1_cats"; then
+        log_info "Stress Batch 1/4 — CPU: IBS suite"
+        CATEGORIES="$_srb_b1_cats"
+        _run_suite_once IBS || TEST_EXIT_CODE=1
+        _srb_b1_run=1
+    fi
+    [ "$_srb_b1_run" -eq 0 ] && printf '  (no tests for active suite selection)\n' >> "$REPORT_TXT"
+
+    # ── Batch 2 — Memory stress ──────────────────────────────────────────
+    # Tests: mem_stress_test (STRESS suite)
+    #        ibs_mem_stress_test (TC-MEMIBS, IBS suite)
+    _srb_b2_cats="TC-MSTR TC-MEMIBS"
+    _srb_b2_run=0
+    {
+        printf '\n=================================================================\n'
+        printf 'STRESS BATCH 2/4 — Memory  [%s]\n' "$_srb_b2_cats"
+        printf '=================================================================\n'
+    } >> "$REPORT_TXT"
+    if [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b2_cats"; then
+        log_info "Stress Batch 2/4 — Memory: STRESS suite"
+        CATEGORIES="$_srb_b2_cats"
+        _run_suite_once STRESS || TEST_EXIT_CODE=1
+        _srb_b2_run=1
+    fi
+    if [ "$_srb_ibs_active" -eq 1 ] && _suite_has_batch_tests IBS "$_srb_b2_cats"; then
+        log_info "Stress Batch 2/4 — Memory: IBS suite"
+        CATEGORIES="$_srb_b2_cats"
+        _run_suite_once IBS || TEST_EXIT_CODE=1
+        _srb_b2_run=1
+    fi
+    [ "$_srb_b2_run" -eq 0 ] && printf '  (no tests for active suite selection)\n' >> "$REPORT_TXT"
+
+    # ── Batch 3 — Disk stress ────────────────────────────────────────────
+    _srb_b3_cats="TC-DSTR"
+    {
+        printf '\n=================================================================\n'
+        printf 'STRESS BATCH 3/4 — Disk  [%s]\n' "$_srb_b3_cats"
+        printf '=================================================================\n'
+    } >> "$REPORT_TXT"
+    if [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b3_cats"; then
+        log_info "Stress Batch 3/4 — Disk: STRESS suite"
+        CATEGORIES="$_srb_b3_cats"
+        _run_suite_once STRESS || TEST_EXIT_CODE=1
+    else
+        printf '  (no tests for active suite selection)\n' >> "$REPORT_TXT"
+    fi
+
+    # ── Batch 4 — Network stress ─────────────────────────────────────────
+    _srb_b4_cats="TC-NSTR"
+    {
+        printf '\n=================================================================\n'
+        printf 'STRESS BATCH 4/4 — Network  [%s]\n' "$_srb_b4_cats"
+        printf '=================================================================\n'
+    } >> "$REPORT_TXT"
+    if [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b4_cats"; then
+        log_info "Stress Batch 4/4 — Network: STRESS suite"
+        CATEGORIES="$_srb_b4_cats"
+        _run_suite_once STRESS || TEST_EXIT_CODE=1
+    else
+        printf '  (no tests for active suite selection)\n' >> "$REPORT_TXT"
+    fi
+
+    CATEGORIES="$_srb_orig_cats"
+}
+
 # Test execution and reporting
 run_all_tests() {
     log_info "Running suites: ${SUITE_LIST}"
@@ -2369,11 +2719,53 @@ run_all_tests() {
             printf 'LAST_COMPLETED=\nLAST_STATUS=\nLAST_SEEN_AT=\n'
         } > "$LAST_TEST_STATE"
 
-        # ── Run each suite ──
+        # ── Two-phase execution ──────────────────────────────────────────────
+        # Phase 1: all non-stress tests run with full parallelism.
+        # Phase 2: stress tests run in 4 sequential resource-based batches
+        #          (CPU → Memory → Disk → Network); tests within each batch
+        #          run in parallel with each other at $PARALLELISM.
         TEST_EXIT_CODE=0
+        _ph_orig_cats="$CATEGORIES"
+
+        # Non-stress categories for IBS and UMCDF suites.
+        # TC-NMISTR and TC-MEMIBS are stress; TC-STR is stress — all excluded here.
+        _NONSTRESS_CATS="TC-DET TC-MSR TC-INT TC-DATA TC-SMP TC-HWPMC TC-DRV \
+TC-CONC TC-SEC TC-API TC-UNIT TC-UMCDET TC-UMCPMC TC-UMCUNIT"
+
+        # ── Phase 1: non-stress tests ──
+        {
+            printf '\n=================================================================\n'
+            printf 'PHASE 1 — NON-STRESS TESTS  (parallelism: %s)\n' "$PARALLELISM"
+            printf '=================================================================\n'
+        } >> "$REPORT_TXT"
+        log_info "Phase 1/2: non-stress tests (parallelism: $PARALLELISM)"
         for _s in $SUITE_LIST; do
-            _run_suite_once "$_s" || TEST_EXIT_CODE=1
+            case "$_s" in
+                STRESS) continue ;;  # STRESS suite contains only stress tests
+            esac
+            if _suite_has_batch_tests "$_s" "$_NONSTRESS_CATS"; then
+                CATEGORIES="$_NONSTRESS_CATS"
+                _run_suite_once "$_s" || TEST_EXIT_CODE=1
+            fi
         done
+        CATEGORIES="$_ph_orig_cats"
+
+        # ── Phase 2: stress batches ──
+        # Check whether any active suite has stress tests.
+        _ph_has_stress=0
+        for _s in $SUITE_LIST; do
+            case "$_s" in IBS|STRESS|ALL) _ph_has_stress=1 ;; esac
+        done
+        if [ "$_ph_has_stress" -eq 1 ]; then
+            {
+                printf '\n=================================================================\n'
+                printf 'PHASE 2 — STRESS BATCHES  (parallelism: %s per batch)\n' "$PARALLELISM"
+                printf '=================================================================\n'
+            } >> "$REPORT_TXT"
+            log_info "Phase 2/2: stress batches (parallelism: $PARALLELISM per batch)"
+            _run_stress_batches
+        fi
+        CATEGORIES="$_ph_orig_cats"
 
         [ "$WITH_STRESS" -eq 1 ] && stop_background_stressors
         printf '\n=== ibs-ci run finished: %s ===\n' "$(date)" >> "$LAST_RUN_LOG"
@@ -2517,36 +2909,103 @@ run_all_tests() {
 
         log_success "Reports saved to: $RESULTS_DIR"
 
-        # ── Failures detail (from REPORT_TXT) ──
+        # ── DIAGNOSTIC SUMMARY section appended to report.txt ──────────────
+        # For every non-passed test, write a structured diagnostic block with
+        # Operation / Root cause / Action fields drawn from diag_for_test().
+        _ds_total=$((FAILED_TESTS + BROKEN_TESTS + SKIPPED_TESTS))
+        if [ "$_ds_total" -gt 0 ]; then
+            {
+                printf '\n=================================================================\n'
+                printf 'DIAGNOSTIC SUMMARY — NON-PASSED TESTS\n'
+                printf '=================================================================\n'
+                printf 'Legend: [FAIL/BRKN] requires investigation\n'
+                printf '        [SKIP]      actionable — missing feature/patch/config\n'
+                printf '        [SKIP-OK]   expected   — hardware or version mismatch\n'
+                printf '=================================================================\n'
+            } >> "$REPORT_TXT"
+
+            # FAILED and BROKEN
+            if [ "$((FAILED_TESTS + BROKEN_TESTS))" -gt 0 ]; then
+                grep -E "^[a-z_].*:.*->  (failed|broken):" "$REPORT_TXT" | \
+                while IFS= read -r _dl; do
+                    _tid=$(printf '%s' "$_dl" | sed 's/  ->  .*//')
+                    _res=$(printf '%s' "$_dl" | sed 's/.*->  //' | sed 's/ \[.*//')
+                    _diag=$(diag_for_test "$_tid")
+                    _op=$(printf '%s'     "$_diag" | grep '^OPERATION:' | sed 's/^OPERATION://')
+                    _cause=$(printf '%s'  "$_diag" | grep '^CAUSE:'     | sed 's/^CAUSE://')
+                    _action=$(printf '%s' "$_diag" | grep '^ACTION:'    | sed 's/^ACTION://')
+                    printf '\n----------------------------------------------------------------\n'
+                    printf '[FAIL/BRKN] %s\n' "$_tid"
+                    printf '  Result    : %s\n' "$_res"
+                    [ -n "$_op"     ] && printf '  Operation : %s\n' "$_op"
+                    [ -n "$_cause"  ] && printf '  Root cause: %s\n' "$_cause"
+                    [ -n "$_action" ] && printf '  Action    : %s\n' "$_action"
+                done >> "$REPORT_TXT"
+            fi
+
+            # SKIPPED
+            if [ "$SKIPPED_TESTS" -gt 0 ]; then
+                grep -E "^[a-z_].*:.*->  skipped:" "$REPORT_TXT" | \
+                while IFS= read -r _dl; do
+                    _tid=$(printf '%s' "$_dl" | sed 's/  ->  skipped:.*//')
+                    _reason=$(printf '%s' "$_dl" | sed 's/.*->  skipped: //' | sed 's/ \[.*//')
+                    _diag=$(diag_for_test "$_tid")
+                    _class=$(printf '%s'  "$_diag" | grep '^CLASS:'     | sed 's/^CLASS://')
+                    _op=$(printf '%s'     "$_diag" | grep '^OPERATION:' | sed 's/^OPERATION://')
+                    _cause=$(printf '%s'  "$_diag" | grep '^CAUSE:'     | sed 's/^CAUSE://')
+                    _action=$(printf '%s' "$_diag" | grep '^ACTION:'    | sed 's/^ACTION://')
+                    if [ "$_class" = "normal" ]; then
+                        printf '[SKIP-OK]   %-52s  %s\n' "$_tid" "$_reason"
+                    else
+                        printf '\n----------------------------------------------------------------\n'
+                        printf '[SKIP]      %s\n' "$_tid"
+                        printf '  Skip msg  : %s\n' "$_reason"
+                        [ -n "$_op"     ] && printf '  Operation : %s\n' "$_op"
+                        [ -n "$_cause"  ] && printf '  Root cause: %s\n' "$_cause"
+                        [ -n "$_action" ] && printf '  Action    : %s\n' "$_action"
+                    fi
+                done >> "$REPORT_TXT"
+            fi
+
+            printf '\n=================================================================\n' >> "$REPORT_TXT"
+        fi
+
+        # ── Failures & broken tests detail (from REPORT_TXT) ──────────────
         if [ "$FAILED_TESTS" -gt 0 ] || [ "$BROKEN_TESTS" -gt 0 ]; then
             echo ""
             echo "── Failures & broken tests ──"
             echo ""
+            # Extract per-test blocks from the kyua verbose report, then augment
+            # each FAIL/BROKEN entry with full stdout/stderr and diagnostic info.
             awk -v RED="$RED" -v BOLD="$BOLD" -v DIM="$DIM" -v RESET="$NC" \
-                -v report="$REPORT_TXT" '
-            function flush_block(    tag, i, lim) {
+                -v CYAN="$CYAN" -v YELLOW="$YELLOW" \
+            '
+            function flush_block(    tag, i) {
                 if (!in_fail || testid == "") return
                 tag = (result ~ /^broken/) ? "BRKN" : "FAIL"
-                printf "  [" RED BOLD "%s" RESET "] " BOLD "%s" RESET "\n", tag, testid
-                printf "       Result  : " RED "%s" RESET "\n", result
+                printf "  %s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n", BOLD, RESET
+                printf "  [%s%s%s%s] %s%s%s\n", RED, BOLD, tag, RESET, BOLD, testid, RESET
+                printf "  %s  Result  :%s %s%s%s\n", DIM, RESET, RED, result, RESET
+                if (n_stdout > 0) {
+                    printf "  %s  Stdout  :%s\n", DIM, RESET
+                    for (i = 1; i <= n_stdout; i++)
+                        printf "             %s%s%s\n", DIM, stdout_lines[i], RESET
+                }
                 if (n_stderr > 0) {
-                    lim = (n_stderr > 20) ? 20 : n_stderr
-                    printf "       Output  :\n"
-                    for (i = 1; i <= lim; i++)
-                        printf "         " DIM "%s" RESET "\n", stderr_lines[i]
-                    if (n_stderr > 20)
-                        printf "         " DIM "... %d more lines -see %s" RESET "\n",
-                            n_stderr - 20, report
+                    printf "  %s  Stderr  :%s\n", DIM, RESET
+                    for (i = 1; i <= n_stderr; i++)
+                        printf "             %s%s%s\n", RED, stderr_lines[i], RESET
                 }
                 printf "\n"
             }
             /^===> / {
                 flush_block()
-                in_fail = 0; in_stderr = 0; n_stderr = 0
-                delete stderr_lines
+                in_fail = 0; in_stdout = 0; in_stderr = 0
+                n_stdout = 0; n_stderr = 0
+                delete stdout_lines; delete stderr_lines
                 testid = substr($0, 6)
                 result = ""
-                if (testid ~ /^(Execution context|Failed tests|Skipped tests|Summary)$/) testid = ""
+                if (testid ~ /^(Execution context|Failed tests|Skipped tests|Summary|Passed tests|Expected failures|Broken tests)$/) testid = ""
                 next
             }
             testid == "" { next }
@@ -2555,12 +3014,34 @@ run_all_tests() {
                 if (result ~ /^failed|^broken/) in_fail = 1
                 next
             }
-            in_fail && /^Standard error:$/ { in_stderr = 1; next }
+            in_fail && /^Standard output:$/ { in_stdout = 1; in_stderr = 0; next }
+            in_fail && /^Standard error:$/  { in_stderr = 1; in_stdout = 0; next }
+            in_fail && in_stdout { stdout_lines[++n_stdout] = $0 }
             in_fail && in_stderr { stderr_lines[++n_stderr] = $0 }
             END { flush_block() }
-            ' "$REPORT_TXT"
+            ' "$REPORT_TXT" | while IFS= read -r _fline; do
+                # After awk emits each block, inject the diag fields.
+                # We use a sentinel approach: re-read the test ID from the [FAIL]/[BRKN] line.
+                _ftid=""
+                if printf '%s' "$_fline" | grep -qE '^\s+\[(FAIL|BRKN)\]'; then
+                    _ftid=$(printf '%s' "$_fline" | sed 's/.*\(FAIL\|BRKN\)\] //' | \
+                            sed "s/$(printf '\033')\\[[0-9;]*m//g")
+                    printf '%s\n' "$_fline"
+                    # Emit diagnostic fields immediately after the test ID line
+                    _diag=$(diag_for_test "$_ftid")
+                    _op=$(printf '%s' "$_diag"    | grep '^OPERATION:' | sed 's/^OPERATION://')
+                    _cause=$(printf '%s' "$_diag" | grep '^CAUSE:'     | sed 's/^CAUSE://')
+                    _action=$(printf '%s' "$_diag"| grep '^ACTION:'    | sed 's/^ACTION://')
+                    [ -n "$_op"     ] && printf "  %s  Operation:%s %s\n" "$CYAN" "$NC" "$_op"
+                    [ -n "$_cause"  ] && printf "  %s  Root cause:%s %s\n" "$YELLOW" "$NC" "$_cause"
+                    [ -n "$_action" ] && printf "  %s  Action    :%s %s\n" "$BOLD" "$NC" "$_action"
+                else
+                    printf '%s\n' "$_fline"
+                fi
+            done
         fi
 
+        # ── Skipped tests ──────────────────────────────────────────────────
         if [ "$SKIPPED_TESTS" -gt 0 ]; then
             echo ""
             echo "── Skipped tests ──"
@@ -2568,8 +3049,25 @@ run_all_tests() {
             grep -E "^[a-z_].*:.*->  skipped:" "$REPORT_TXT" | while IFS= read -r line; do
                 TESTID=$(printf '%s' "$line" | sed 's/  ->  skipped:.*//')
                 REASON=$(printf '%s' "$line" | sed 's/.*->  skipped: //' | sed 's/ \[.*//')
-                printf "  [${YELLOW}SKIP${NC}] ${BOLD}%-48s${NC}  ${DIM}%s${NC}\n" \
-                    "$TESTID" "$REASON"
+                _diag=$(diag_for_test "$TESTID")
+                _class=$(printf '%s' "$_diag"  | grep '^CLASS:'     | sed 's/^CLASS://')
+                _op=$(printf '%s' "$_diag"     | grep '^OPERATION:' | sed 's/^OPERATION://')
+                _cause=$(printf '%s' "$_diag"  | grep '^CAUSE:'     | sed 's/^CAUSE://')
+                _action=$(printf '%s' "$_diag" | grep '^ACTION:'    | sed 's/^ACTION://')
+                if [ "$_class" = "normal" ]; then
+                    # Expected hardware/version mismatch — compact one-liner
+                    printf "  [${YELLOW}SKIP-OK${NC}] ${DIM}%-52s${NC}  %s\n" \
+                        "$TESTID" "$REASON"
+                else
+                    # Actionable skip — full diagnostic block
+                    printf "  ${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+                    printf "  [${YELLOW}SKIP${NC}] ${BOLD}%s${NC}\n" "$TESTID"
+                    printf "  ${DIM}  Skip msg  :${NC} %s\n" "$REASON"
+                    [ -n "$_op"     ] && printf "  ${CYAN}  Operation :${NC} %s\n" "$_op"
+                    [ -n "$_cause"  ] && printf "  ${YELLOW}  Root cause:${NC} %s\n" "$_cause"
+                    [ -n "$_action" ] && printf "  ${BOLD}  Action    :${NC} %s\n" "$_action"
+                    echo ""
+                fi
             done
         fi
 
