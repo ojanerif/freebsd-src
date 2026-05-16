@@ -4,6 +4,9 @@ AMD Instruction-Based Sampling (IBS) test suite for FreeBSD.
 Tests live in `tests/sys/amd/ibs/` and are built with the FreeBSD ATF
 (`Automated Test Framework`) infrastructure.
 
+35 test programs — unit, integration, and E2E tiers.  
+Last validated: 2026-05-16, AMD EPYC 9654 (Zen 4, 192 CPUs), FreeBSD 16.0-CURRENT.
+
 ---
 
 ## Table of Contents
@@ -12,30 +15,53 @@ Tests live in `tests/sys/amd/ibs/` and are built with the FreeBSD ATF
 2. [Hardware Requirements](#hardware-requirements)
 3. [Test Categories and Severity](#test-categories-and-severity)
 4. [Test Files and Cases](#test-files-and-cases)
-   - [ibs_msr_test](#ibs_msr_test)
-   - [ibs_detect_test](#ibs_detect_test)
-   - [ibs_cpu_test](#ibs_cpu_test)
-   - [ibs_api_test](#ibs_api_test)
-   - [ibs_interrupt_test](#ibs_interrupt_test)
-   - [ibs_period_test](#ibs_period_test)
-   - [ibs_routing_test](#ibs_routing_test)
-   - [ibs_data_accuracy_test](#ibs_data_accuracy_test)
-   - [ibs_smp_test](#ibs_smp_test)
-   - [ibs_stress_test](#ibs_stress_test)
-   - [ibs_l3miss_test](#ibs_l3miss_test)
-   - [ibs_ioctl_test](#ibs_ioctl_test)
-   - [ibs_swfilt_test (shell)](#ibs_swfilt_test)
-   - [ibs_unit_field_masks_test](#ibs_unit_field_masks_test)
-   - [ibs_unit_helpers_test](#ibs_unit_helpers_test)
-   - [ibs_unit_datasrc_test](#ibs_unit_datasrc_test)
-   - [ibs_unit_cpuid_parse_test](#ibs_unit_cpuid_parse_test)
-   - [ibs_unit_op_ext_maxcnt_test](#ibs_unit_op_ext_maxcnt_test)
-   - [ibs_unit_feature_flags_test](#ibs_unit_feature_flags_test)
-   - [ibs_cpuctl_access_test](#ibs_cpuctl_access_test)
-   - [ibs_access_control_test](#ibs_access_control_test)
-   - [ibs_invalid_input_test](#ibs_invalid_input_test)
-   - [ibs_robustness_test](#ibs_robustness_test)
-   - [ibs_concurrency_test](#ibs_concurrency_test)
+   - Detection / CPU
+     - [ibs_detect_test](#ibs_detect_test)
+     - [ibs_cpu_test](#ibs_cpu_test)
+   - MSR / Config
+     - [ibs_msr_test](#ibs_msr_test)
+     - [ibs_period_test](#ibs_period_test)
+     - [ibs_routing_test](#ibs_routing_test)
+   - Interrupt / Delivery
+     - [ibs_interrupt_test](#ibs_interrupt_test)
+   - Userspace API
+     - [ibs_api_test](#ibs_api_test)
+     - [ibs_swfilt_test](#ibs_swfilt_test)
+     - [ibs_ioctl_test](#ibs_ioctl_test)
+   - Data Accuracy / Filters
+     - [ibs_data_accuracy_test](#ibs_data_accuracy_test)
+     - [ibs_l3miss_test](#ibs_l3miss_test)
+   - SMP
+     - [ibs_smp_test](#ibs_smp_test)
+   - hwpmc / libpmc
+     - [ibs_hwpmc_alloc_test](#ibs_hwpmc_alloc_test)
+     - [ibs_hwpmc_caps_test](#ibs_hwpmc_caps_test)
+     - [ibs_hwpmc_info_test](#ibs_hwpmc_info_test)
+     - [ibs_hwpmc_runtime_test](#ibs_hwpmc_runtime_test)
+   - Driver / Access
+     - [ibs_cpuctl_access_test](#ibs_cpuctl_access_test)
+   - Concurrency / Robustness
+     - [ibs_robustness_test](#ibs_robustness_test)
+     - [ibs_concurrency_test](#ibs_concurrency_test)
+   - Security
+     - [ibs_access_control_test](#ibs_access_control_test)
+     - [ibs_invalid_input_test](#ibs_invalid_input_test)
+   - Unit Tests (no hardware)
+     - [ibs_unit_field_masks_test](#ibs_unit_field_masks_test)
+     - [ibs_unit_helpers_test](#ibs_unit_helpers_test)
+     - [ibs_unit_datasrc_test](#ibs_unit_datasrc_test)
+     - [ibs_unit_cpuid_parse_test](#ibs_unit_cpuid_parse_test)
+     - [ibs_unit_op_ext_maxcnt_test](#ibs_unit_op_ext_maxcnt_test)
+     - [ibs_unit_feature_flags_test](#ibs_unit_feature_flags_test)
+     - [ibs_unit_fetch_ctl_fields_test](#ibs_unit_fetch_ctl_fields_test)
+     - [ibs_unit_op_data_fields_test](#ibs_unit_op_data_fields_test)
+     - [ibs_unit_msr_range_test](#ibs_unit_msr_range_test)
+     - [ibs_unit_ldlat_test](#ibs_unit_ldlat_test)
+   - Stress (Phase 2 — see stress-tests.md)
+     - [ibs_stress_test](#ibs_stress_test)
+     - [ibs_cpu_stress_test](#ibs_cpu_stress_test)
+     - [ibs_mem_stress_test](#ibs_mem_stress_test)
+     - [ibs_nmi_stress_test](#ibs_nmi_stress_test)
 5. [Shared Infrastructure — ibs_decode.h / ibs_utils.h](#shared-infrastructure)
 6. [Known Skip Conditions](#known-skip-conditions)
 7. [Bug History and Fixes](#bug-history-and-fixes)
@@ -44,20 +70,43 @@ Tests live in `tests/sys/amd/ibs/` and are built with the FreeBSD ATF
 
 ## Test Summary
 
-| Test ID | File | Category | Status | Expected Result |
-|---|---|---|---|---|
-| TC-IBS-MSR-01 | `ibs_msr_test` | Smoke | Implemented | Fetch CTL MSR reads back written value; zero-write round-trips cleanly |
-| TC-IBS-DET-01 | `ibs_detect_test` | Detection | Implemented | Feature bits reported match CPUID Fn8000_0001_ECX and Fn8000_001B |
-| TC-IBS-API-01 | `ibs_api_test` | API | Implemented | Writable fields preserved; reserved bits not silently accepted |
-| TC-IBS-CPU-01 | `ibs_cpu_test` | Detection | Implemented | Family/model correctly decoded for all Zen generations |
-| TC-IBS-INT-01 | `ibs_interrupt_test` | Interrupt | Implemented | VALID bit set after sampling period; no spurious or missed NMIs |
-| TC-IBS-CFG-01 | `ibs_period_test` | Config | Implemented | Period round-trips across full 0–0xFFFF MaxCnt range |
-| TC-IBS-RTG-01 | `ibs_routing_test` | Config | Implemented | Enable/disable toggles take effect; global CTL gates both samplers |
-| TC-IBS-DAT-01 | `ibs_data_accuracy_test` | Data | Implemented | DataSrc, Op Data, and address fields decode to expected values |
-| TC-IBS-SMP-01 | `ibs_smp_test` | SMP | Implemented | Each CPU's MSRs are independent; thread migration causes no corruption |
-| TC-IBS-STR-01 | `ibs_stress_test` | Stress | Implemented | No error, hang, or MSR corruption after 1000 rapid cycles |
-| TC-IBS-FLT-01 | `ibs_l3miss_test` | Filter | Implemented | L3MissOnly bit accepted and read back; non-Zen-4 skipped cleanly |
-| TC-IBS-SWF-01 | `ibs_swfilt_test` | Filter | Implemented | Filter bits round-trip through MSR; combined settings preserved |
+| Category | File | Status | Expected Result |
+|---|---|---|---|
+| TC-DET | `ibs_detect_test` | Active | Feature bits match CPUID Fn8000_0001_ECX and Fn8000_001B |
+| TC-DET | `ibs_cpu_test` | Active | Family/model correctly decoded for Zen 1–5 generations |
+| TC-MSR | `ibs_msr_test` | Active | Fetch CTL MSR reads back written value; zero-write round-trips cleanly |
+| TC-MSR | `ibs_period_test` | Active | Period round-trips across full 0–0xFFFF MaxCnt range |
+| TC-INT | `ibs_routing_test` | Active | Enable/disable toggles take effect; global CTL gates both samplers |
+| TC-INT | `ibs_interrupt_test` | Active | VALID bit set after sampling period; no spurious or missed NMIs |
+| TC-API | `ibs_api_test` | Active | Writable fields preserved; reserved bits not silently accepted |
+| TC-API | `ibs_swfilt_test` | Active | Filter bits round-trip through MSR; combined settings preserved |
+| TC-API | `ibs_ioctl_test` | Placeholder | Skips — ioctl API not yet implemented in kernel |
+| TC-DATA | `ibs_data_accuracy_test` | Active | DataSrc, Op Data, and address fields decode to expected values |
+| TC-DATA | `ibs_l3miss_test` | Active | L3MissOnly bit accepted and read back; non-Zen-4 skipped cleanly |
+| TC-SMP | `ibs_smp_test` | Active | Each CPU's MSRs independent; thread migration causes no corruption |
+| TC-HWPMC | `ibs_hwpmc_alloc_test` | Active | IBS PMC allocation succeeds; bad rate/qualifier/mode rejected |
+| TC-HWPMC | `ibs_hwpmc_caps_test` | Active | PMC capability width and event queries return expected values |
+| TC-HWPMC | `ibs_hwpmc_info_test` | Active | IBS class name and event names visible in hwpmc/libpmc |
+| TC-HWPMC | `ibs_hwpmc_runtime_test` | Active | Fetch PMC lifecycle (alloc/attach/start/stop/detach) completes cleanly |
+| TC-DRV | `ibs_cpuctl_access_test` | Active | All per-CPU cpuctl devices open; CPUID and MSR ioctl succeed |
+| TC-CONC | `ibs_robustness_test` | Active | No panic/hang under reserved-bit write, fork, rapid affinity switch |
+| TC-CONC | `ibs_concurrency_test` | Active | N-process concurrent MSR access; signal storm under sampling — stable |
+| TC-SEC | `ibs_access_control_test` | Active | Non-root MSR access returns EPERM; root access succeeds |
+| TC-SEC | `ibs_invalid_input_test` | Active | Out-of-range MSR / invalid ioctl — no panic, correct errno |
+| TC-UNIT | `ibs_unit_field_masks_test` | Active | All field mask constants match AMD PPR; no overlaps |
+| TC-UNIT | `ibs_unit_helpers_test` | Active | MaxCnt get/set/clamp and period conversion correct |
+| TC-UNIT | `ibs_unit_datasrc_test` | Active | DataSrc extraction from MSR_IBS_OP_DATA2 correct for all encodings |
+| TC-UNIT | `ibs_unit_cpuid_parse_test` | Active | Family/model/stepping parsing correct for Zen 1–5 EAX values |
+| TC-UNIT | `ibs_unit_op_ext_maxcnt_test` | Active | Extended Op MaxCnt (23-bit) field correct for Zen 2+ |
+| TC-UNIT | `ibs_unit_feature_flags_test` | Active | CPUID feature flag bit positions and accessors correct |
+| TC-UNIT | `ibs_unit_fetch_ctl_fields_test` | Active | Fetch CTL multi-bit field encoding/decoding correct |
+| TC-UNIT | `ibs_unit_op_data_fields_test` | Active | Op Data 1–3 field bit layout and extraction correct |
+| TC-UNIT | `ibs_unit_msr_range_test` | Active | MSR address offsets, spans, and uniqueness correct |
+| TC-UNIT | `ibs_unit_ldlat_test` | Active | Load latency threshold field encoding and non-overlap correct |
+| TC-STR | `ibs_stress_test` | Active | No MSR corruption after rapid cycles, concurrent access, 60 s run |
+| TC-STR | `ibs_cpu_stress_test` | Active | MSR integrity maintained under CPU pipeline saturation |
+| TC-MEMIBS | `ibs_mem_stress_test` | Active | IBS coherence maintained during DRAM bandwidth/cache-thrash stress |
+| TC-NMISTR | `ibs_nmi_stress_test` | Active | NMI delivery stable; Erratum #420 drain within 5000 µs latency |
 | TC-IBS-IOC-01 | `ibs_ioctl_test` | API | Planned | IBS caps and period set/get succeed via hwpmc ioctl interface |
 | TC-IBS-UNIT-01 | `ibs_unit_field_masks_test` | Unit | Implemented | All constants match AMD PPR values exactly |
 | TC-IBS-UNIT-02 | `ibs_unit_helpers_test` | Unit | Implemented | Helpers encode and decode every value in the 16-bit range |
