@@ -39,6 +39,7 @@ ATF_TESTS_C=	ibs_cpu_test \
 		ibs_mem_stress_test \
 		ibs_cpu_stress_test \
 		ibs_unit_ldlat_test \
+		ibs_unit_zen3_errata_test \
 		ibs_unit_fetch_ctl_fields_test \
 		ibs_unit_op_data_fields_test \
 		ibs_unit_msr_range_test \

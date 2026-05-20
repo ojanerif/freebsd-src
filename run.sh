@@ -93,6 +93,7 @@ get_test_meta() {
         ibs_unit_msr_range_test)         printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_op_data_fields_test)    printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_op_ext_maxcnt_test)     printf "TC-UNIT:Unit Tests:MEDIUM" ;;
+        ibs_unit_zen3_errata_test)       printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         # UMCDF tests
         umcdf_cpuid_test)                printf "TC-UMCDET:UMC/DF Detection:CRITICAL" ;;
         umcdf_df_test)                   printf "TC-UMCPMC:DF PMC:HIGH" ;;

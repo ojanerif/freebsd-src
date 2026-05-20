@@ -39,3 +39,4 @@ atf_test_program{name="ibs_unit_ldlat_test", }
 atf_test_program{name="ibs_unit_msr_range_test", }
 atf_test_program{name="ibs_unit_op_data_fields_test", }
 atf_test_program{name="ibs_unit_op_ext_maxcnt_test", }
+atf_test_program{name="ibs_unit_zen3_errata_test", }
