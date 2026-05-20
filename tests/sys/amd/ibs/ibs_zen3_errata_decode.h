@@ -16,8 +16,8 @@
 #define	_IBS_ZEN3_ERRATA_DECODE_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 
 #include "ibs_decode.h"
 
@@ -26,18 +26,67 @@ struct ibs_zen3_errata_state {
 };
 
 static inline bool
+ibs_zen3_errata_consume_prefix(const char **cpuid, const char *prefix)
+{
+
+	while (*prefix != '\0') {
+		if (**cpuid != *prefix)
+			return (false);
+		(*cpuid)++;
+		prefix++;
+	}
+	return (true);
+}
+
+static inline bool
+ibs_zen3_errata_parse_uint(const char **cpuid, unsigned int base,
+    unsigned int *value)
+{
+	unsigned int digit;
+	bool found;
+	char c;
+
+	found = false;
+	*value = 0;
+	for (;;) {
+		c = **cpuid;
+		if (c >= '0' && c <= '9')
+			digit = (unsigned int)(c - '0');
+		else if (c >= 'a' && c <= 'f')
+			digit = (unsigned int)(c - 'a' + 10);
+		else if (c >= 'A' && c <= 'F')
+			digit = (unsigned int)(c - 'A' + 10);
+		else
+			break;
+		if (digit >= base)
+			break;
+		if (*value > (~0U - digit) / base)
+			return (false);
+		*value = *value * base + digit;
+		(*cpuid)++;
+		found = true;
+	}
+	return (found);
+}
+
+static inline bool
 ibs_zen3_errata_cpuid_is_zen3_b0(const char *cpuid)
 {
-	unsigned int family, model;
-	int end;
+	unsigned int family, model, stepping;
 
 	if (cpuid == NULL)
 		return (false);
-	end = 0;
-	if (sscanf(cpuid, "AuthenticAMD-%u-%x-%*u%n", &family, &model,
-	    &end) != 2 || cpuid[end] != '\0')
+	if (!ibs_zen3_errata_consume_prefix(&cpuid, "AuthenticAMD-") ||
+	    !ibs_zen3_errata_parse_uint(&cpuid, 10, &family) ||
+	    *cpuid++ != '-' ||
+	    !ibs_zen3_errata_parse_uint(&cpuid, 16, &model) ||
+	    *cpuid++ != '-' ||
+	    !ibs_zen3_errata_parse_uint(&cpuid, 10, &stepping) ||
+	    *cpuid != '\0')
 		return (false);
 
+	(void)stepping;
+	/* pmcstat's errata gate is the producer CPUID family/model range. */
 	return (family == 0x19 && model <= 0x0f);
 }
 

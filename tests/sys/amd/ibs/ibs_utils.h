@@ -285,12 +285,16 @@ static inline bool
 cpu_is_zen4(void)
 {
 	uint32_t regs[4];
-	uint32_t family;
+	uint32_t family, model;
 
 	if (do_cpuid_ioctl(0x1, regs) != 0)
 		return (false);
 	family = ((regs[0] >> 8) & 0xf) + ((regs[0] >> 20) & 0xff);
-	return (family == 0x19);
+	model = ((regs[0] >> 4) & 0xf) | (((regs[0] >> 16) & 0xf) << 4);
+	return (family == 0x19 &&
+	    ((model >= 0x10 && model <= 0x1f) ||
+	    (model >= 0x60 && model <= 0x7f) ||
+	    (model >= 0xa0 && model <= 0xaf)));
 }
 
 static inline uint64_t
@@ -309,12 +313,15 @@ static inline bool
 cpu_is_zen5(void)
 {
 	uint32_t regs[4];
-	uint32_t family;
+	uint32_t family, model;
 
 	if (do_cpuid_ioctl(0x1, regs) != 0)
 		return (false);
 	family = ((regs[0] >> 8) & 0xf) + ((regs[0] >> 20) & 0xff);
-	return (family == 0x1a);
+	model = ((regs[0] >> 4) & 0xf) | (((regs[0] >> 16) & 0xf) << 4);
+	return (family == 0x1a &&
+	    (model <= 0x2f || (model >= 0x40 && model <= 0x4f) ||
+	    (model >= 0x60 && model <= 0x7f)));
 }
 
 static inline uint32_t

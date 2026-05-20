@@ -19,6 +19,7 @@
 
 #define	ZEN3_B0_CPUID	"AuthenticAMD-25-00-1"
 #define	ZEN3_B0_EDGE_CPUID	"AuthenticAMD-25-0F-1"
+#define	ZEN3_B0_ALT_STEP_CPUID	"AuthenticAMD-25-00-9"
 #define	ZEN3_VERMEER_CPUID	"AuthenticAMD-25-20-1"
 #define	ZEN4_FIRST_MODEL_CPUID	"AuthenticAMD-25-10-1"
 #define	ZEN4_CPUID	"AuthenticAMD-25-11-1"
@@ -49,6 +50,7 @@ ATF_TC_BODY(ibs_unit_zen3_errata_detects_affected_cpu, tc)
 	ibs_zen3_errata_update(&state, ZEN3_B0_CPUID);
 	ATF_CHECK(state.zen3_b0);
 	ATF_CHECK(ibs_zen3_errata_cpuid_is_zen3_b0(ZEN3_B0_EDGE_CPUID));
+	ATF_CHECK(ibs_zen3_errata_cpuid_is_zen3_b0(ZEN3_B0_ALT_STEP_CPUID));
 }
 
 /* TC-UNIT-ZEN3ERR-02: affected fetch samples suppress invalid IbsIcMiss. */
@@ -102,8 +104,8 @@ ATF_TC_BODY(ibs_unit_zen3_errata_sanitizes_op_data3_swpf, tc)
 }
 
 /* TC-UNIT-ZEN3ERR-05: Zen 4+ synthetic CPUIDs are unaffected. */
-ATF_TC_WITHOUT_HEAD(ibs_unit_zen4_unaffected_not_sanitized);
-ATF_TC_BODY(ibs_unit_zen4_unaffected_not_sanitized, tc)
+ATF_TC_WITHOUT_HEAD(ibs_unit_zen3_errata_zen4_unaffected_not_sanitized);
+ATF_TC_BODY(ibs_unit_zen3_errata_zen4_unaffected_not_sanitized, tc)
 {
 	struct ibs_zen3_errata_state state = { 0 };
 	uint64_t fetch_ctl, data3;
@@ -122,8 +124,8 @@ ATF_TC_BODY(ibs_unit_zen4_unaffected_not_sanitized, tc)
 }
 
 /* TC-UNIT-ZEN3ERR-06: forced Zen 3 path is synthetic software only. */
-ATF_TC_WITHOUT_HEAD(ibs_unit_forced_zen3_path_is_software_only);
-ATF_TC_BODY(ibs_unit_forced_zen3_path_is_software_only, tc)
+ATF_TC_WITHOUT_HEAD(ibs_unit_zen3_errata_forced_path_is_software_only);
+ATF_TC_BODY(ibs_unit_zen3_errata_forced_path_is_software_only, tc)
 {
 	struct ibs_zen3_errata_state state = { 0 };
 	uint64_t data3;
@@ -140,8 +142,8 @@ ATF_TC_BODY(ibs_unit_forced_zen3_path_is_software_only, tc)
 }
 
 /* TC-UNIT-ZEN3ERR-07: default state and invalid CPUID strings are disabled. */
-ATF_TC_WITHOUT_HEAD(ibs_unit_default_disabled_and_invalid_inputs);
-ATF_TC_BODY(ibs_unit_default_disabled_and_invalid_inputs, tc)
+ATF_TC_WITHOUT_HEAD(ibs_unit_zen3_errata_default_disabled_and_invalid_inputs);
+ATF_TC_BODY(ibs_unit_zen3_errata_default_disabled_and_invalid_inputs, tc)
 {
 	struct ibs_zen3_errata_state state = { 0 };
 	uint64_t data3;
@@ -178,9 +180,9 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, ibs_unit_zen3_errata_sanitizes_fetch_icmiss);
 	ATF_TP_ADD_TC(tp, ibs_unit_zen3_errata_sanitizes_op_data3_nomab);
 	ATF_TP_ADD_TC(tp, ibs_unit_zen3_errata_sanitizes_op_data3_swpf);
-	ATF_TP_ADD_TC(tp, ibs_unit_zen4_unaffected_not_sanitized);
-	ATF_TP_ADD_TC(tp, ibs_unit_forced_zen3_path_is_software_only);
-	ATF_TP_ADD_TC(tp, ibs_unit_default_disabled_and_invalid_inputs);
+	ATF_TP_ADD_TC(tp, ibs_unit_zen3_errata_zen4_unaffected_not_sanitized);
+	ATF_TP_ADD_TC(tp, ibs_unit_zen3_errata_forced_path_is_software_only);
+	ATF_TP_ADD_TC(tp, ibs_unit_zen3_errata_default_disabled_and_invalid_inputs);
 	ATF_TP_ADD_TC(tp, ibs_unit_zen3_errata_op_data3_masks);
 	return (atf_no_error());
 }

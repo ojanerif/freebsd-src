@@ -17,7 +17,7 @@
  * Test case: Verify CPU family detection for AMD processors.
  * This test checks that we can correctly identify AMD CPU families
  * including Family 10h (K10), Family 15h (Bulldozer), Family 17h (Zen/Zen2),
- * Family 19h (Zen4), and Family 1Ah (Zen5).
+ * Family 19h (Zen3/Zen4), and Family 1Ah (Zen5/Zen6).
  */
 ATF_TC(ibs_cpu_detect_family);
 ATF_TC_HEAD(ibs_cpu_detect_family, tc)
@@ -103,7 +103,7 @@ ATF_TC_BODY(ibs_cpu_zen4_detection, tc)
 	family = cpu_get_family();
 	model = cpu_get_model();
 
-	if (family != 0x19) {
+	if (!cpu_is_zen4()) {
 		atf_tc_skip("Not a Zen4 CPU (Family 0x%x, Model 0x%x)",
 		    family, model);
 	}
@@ -113,15 +113,6 @@ ATF_TC_BODY(ibs_cpu_zen4_detection, tc)
 
 	printf("Zen4 detected: Family 0x%x, Model 0x%x\n", family, model);
 
-	/*
-	 * Zen4 specific checks based on Linux reference:
-	 * - Family 19h with model < 0x10 has some IBS quirks
-	 * - Erratum #1293 affects early Zen4 models
-	 */
-	if (model < 0x10) {
-		printf("Early Zen4 model detected (model < 0x10)\n");
-		printf("Note: May have IBS erratum #1293\n");
-	}
 }
 
 /*
@@ -155,7 +146,7 @@ ATF_TC_BODY(ibs_cpu_zen5_detection, tc)
 	family = cpu_get_family();
 	model = cpu_get_model();
 
-	if (family != 0x1a) {
+	if (!cpu_is_zen5()) {
 		atf_tc_skip("Not a Zen5 CPU (Family 0x%x, Model 0x%x)",
 		    family, model);
 	}

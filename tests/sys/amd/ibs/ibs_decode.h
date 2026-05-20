@@ -200,21 +200,32 @@ ibs_cpuid_stepping(uint32_t eax)
 
 /*
  * Determine Zen 4 from a raw CPUID 1 EAX value.
- * Zen 4 is AMD Family 19h with model numbers in the 0x10+ range.
- * (Zen 3 occupies Family 19h models 0x00-0x0F and 0x20-0x2F.)
+ * Family 19h is shared by Zen 3, Zen 3+, and Zen 4, so model range matters.
  */
 static inline bool
 cpu_is_zen4_from_eax(uint32_t eax)
 {
-	return (ibs_cpuid_family(eax) == 0x19U &&
-	    ibs_cpuid_model(eax) >= 0x10U);
+	uint32_t model;
+
+	if (ibs_cpuid_family(eax) != 0x19U)
+		return (false);
+	model = ibs_cpuid_model(eax);
+	return ((model >= 0x10U && model <= 0x1fU) ||
+	    (model >= 0x60U && model <= 0x7fU) ||
+	    (model >= 0xa0U && model <= 0xafU));
 }
 
-/* Determine Zen 5 from a raw CPUID 1 EAX value (Family 1Ah). */
+/* Determine Zen 5 from a raw CPUID 1 EAX value.  Family 1Ah also has Zen 6. */
 static inline bool
 cpu_is_zen5_from_eax(uint32_t eax)
 {
-	return (ibs_cpuid_family(eax) == 0x1aU);
+	uint32_t model;
+
+	if (ibs_cpuid_family(eax) != 0x1aU)
+		return (false);
+	model = ibs_cpuid_model(eax);
+	return (model <= 0x2fU || (model >= 0x40U && model <= 0x4fU) ||
+	    (model >= 0x60U && model <= 0x7fU));
 }
 
 /*

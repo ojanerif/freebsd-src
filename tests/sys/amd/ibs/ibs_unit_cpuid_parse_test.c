@@ -13,7 +13,7 @@
  *
  * No hardware access.  Runs on any architecture.
  *
- * Test IDs: TC-UNIT-CPUID-01 … TC-UNIT-CPUID-11
+ * Test IDs: TC-UNIT-CPUID-01 … TC-UNIT-CPUID-12
  *
  * EAX encoding (CPUID leaf 1):
  *   bits  3: 0  Stepping
@@ -80,7 +80,7 @@ ATF_TC_BODY(ibs_unit_family_intel, tc)
 	ATF_CHECK_EQ(ibs_cpuid_family(0x000306C3U), 0x06U);
 }
 
-/* TC-UNIT-CPUID-07: model extraction — Zen 4 model 0x21 */
+/* TC-UNIT-CPUID-07: model extraction — Family 19h model 0x21 */
 ATF_TC_WITHOUT_HEAD(ibs_unit_model_extraction);
 ATF_TC_BODY(ibs_unit_model_extraction, tc)
 {
@@ -103,16 +103,16 @@ ATF_TC_BODY(ibs_unit_stepping_extraction, tc)
 ATF_TC_WITHOUT_HEAD(ibs_unit_is_zen4_true);
 ATF_TC_BODY(ibs_unit_is_zen4_true, tc)
 {
-	/* Family 0x19, model 0x21 (>= 0x10) → Zen 4 */
-	ATF_CHECK(cpu_is_zen4_from_eax(0x00A20F10U) == true);
+	/* Family 0x19, model 0x11 → Zen 4 */
+	ATF_CHECK(cpu_is_zen4_from_eax(0x00A10F10U) == true);
 }
 
 /* TC-UNIT-CPUID-10: cpu_is_zen4_from_eax() returns false for Zen 3 EAX */
 ATF_TC_WITHOUT_HEAD(ibs_unit_is_zen4_false_zen3);
 ATF_TC_BODY(ibs_unit_is_zen4_false_zen3, tc)
 {
-	/* Family 0x19, model 0x01 (< 0x10) → Zen 3, not Zen 4 */
-	ATF_CHECK(cpu_is_zen4_from_eax(0x00A00F10U) == false);
+	/* Family 0x19, model 0x21 → Zen 3, not Zen 4 */
+	ATF_CHECK(cpu_is_zen4_from_eax(0x00A20F10U) == false);
 }
 
 /* TC-UNIT-CPUID-11: cpu_is_zen5_from_eax() returns true for Zen 5 EAX */
@@ -121,6 +121,14 @@ ATF_TC_BODY(ibs_unit_is_zen5_true, tc)
 {
 	/* Family 0x1A → Zen 5 */
 	ATF_CHECK(cpu_is_zen5_from_eax(0x00B10F00U) == true);
+}
+
+/* TC-UNIT-CPUID-12: cpu_is_zen5_from_eax() returns false for Zen 6 EAX */
+ATF_TC_WITHOUT_HEAD(ibs_unit_is_zen5_false_zen6);
+ATF_TC_BODY(ibs_unit_is_zen5_false_zen6, tc)
+{
+	/* Family 0x1A, model 0x50 → Zen 6, not Zen 5 */
+	ATF_CHECK(cpu_is_zen5_from_eax(0x00B50F00U) == false);
 }
 
 ATF_TP_ADD_TCS(tp)
@@ -136,5 +144,6 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, ibs_unit_is_zen4_true);
 	ATF_TP_ADD_TC(tp, ibs_unit_is_zen4_false_zen3);
 	ATF_TP_ADD_TC(tp, ibs_unit_is_zen5_true);
+	ATF_TP_ADD_TC(tp, ibs_unit_is_zen5_false_zen6);
 	return (atf_no_error());
 }
