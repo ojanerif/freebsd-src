@@ -32,7 +32,7 @@ tests/sys/amd/pmc/hwpmc_*test
 tests/sys/amd/pmc/hwpmc_*test.debug
 tests/sys/amd/pmc/hwpmc_*test.full
 tests/sys/amd/pmc/hwpmc_*test.pieo
-tests/sys/amd/pmc/pmcstat_tsc_test
+tests/sys/amd/pmc/pmcstat_*_test
 tests/sys/amd/stress/*_test
 tests/sys/amd/stress/*_test.debug
 tests/sys/amd/stress/*_test.full
