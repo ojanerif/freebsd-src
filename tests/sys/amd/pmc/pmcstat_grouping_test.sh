@@ -47,8 +47,17 @@ pmcstat_require_header_event_count()
 	local expected="$2"
 	local header="$3"
 
-	count=$(printf '%s\n' "$header" | awk -v event="$event" \
-	    '{ for (i = 1; i <= NF; i++) if ($i == event) n++ }
+	count=$(printf '%s\n' "$header" | awk -v event="$event" '
+	    {
+	        for (i = 1; i <= NF; i++) {
+	            if ($i == event)
+	                n++;
+	            else if (length($i) > length(event) &&
+	                substr($i, length($i) - length(event) + 1) == event &&
+	                substr($i, length($i) - length(event), 1) == "/")
+	                n++;
+	        }
+	    }
 	    END { print n + 0 }')
 	if [ "$count" -ne "$expected" ]; then
 		atf_fail "header has $count copies of $event, expected $expected: $header"
