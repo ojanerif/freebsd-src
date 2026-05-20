@@ -9,16 +9,21 @@
 # Purpose:
 #   Validate the real pmcstat(8) offline IBS decode path for AMD Zen 3 B0
 #   erratum #1238.  The test writes a minimal pmclog-compatible stream with
-#   a producer CPUID from PMCLOG_TYPE_INITIALIZE and a multipart IBS Fetch
-#   record, then checks pmcstat -R output.
+#   a producer CPUID from PMCLOG_TYPE_INITIALIZE plus multipart IBS Fetch and
+#   Op records, then checks pmcstat -R output.  The OP record keeps erratum
+#   #1293 trigger bits in the stream so multipart Op decode is covered too,
+#   but pmcstat does not currently print the affected fields in a directly
+#   assertable form.
 #
 #   Affected synthetic CPUIDs:
 #     AuthenticAMD-25-00-1  Family 19h model 00h, Zen 3 B0 range
 #     AuthenticAMD-25-0F-1  Family 19h model 0Fh, Zen 3 B0 range boundary
 #
 #   Unaffected synthetic CPUIDs:
+#     AuthenticAMD-25-20-1  Family 19h model 20h, Zen 3 non-B0 range
 #     AuthenticAMD-25-10-1  Family 19h model 10h, first Zen 4 server range
 #     AuthenticAMD-25-11-1  Family 19h model 11h, Zen 4 server range
+#     AuthenticAMD-26-00-0  Family 1Ah model 00h, Zen 5 server range
 
 pmcstat_errata_pmcstat()
 {
@@ -30,12 +35,12 @@ pmcstat_errata_pmcstat()
 		if [ ! -x "$p" ]; then
 			atf_skip "pmcstat override is not executable: $p"
 		fi
-		PMCSTAT_BIN=$p
+		PMCSTAT_BIN="$p"
 		;;
 	*)
 		resolved=$(command -v "$p") || \
 		    atf_skip "pmcstat not found in PATH"
-		PMCSTAT_BIN=$resolved
+		PMCSTAT_BIN="$resolved"
 		;;
 	esac
 }
@@ -56,6 +61,8 @@ pmcstat_errata_build_writer()
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#define	nitems(x)	(sizeof((x)) / sizeof((x)[0]))
 
 #define	PMCLOG_HEADER_MAGIC		0xeeU
 #define	PMCLOG_TYPE_CLOSELOG		1U
@@ -139,18 +146,27 @@ write_init(FILE *f, const char *cpuid)
 }
 
 static void
-write_callchain(FILE *f, uint8_t part, const uint64_t *qwords, uint8_t nqwords,
+write_callchain(FILE *f, uint8_t part, const uint64_t *qwords, size_t nqwords,
     uint64_t tsc)
 {
 	uint8_t hdr[8];
-	uint16_t len;
+	size_t len;
+
+	if (nqwords > UINT8_MAX) {
+		fprintf(stderr, "too many multipart qwords: %zu\n", nqwords);
+		exit(1);
+	}
 
 	memset(hdr, 0, sizeof(hdr));
 	hdr[0] = part;
-	hdr[1] = nqwords;
+	hdr[1] = (uint8_t)nqwords;
 	len = 16 + 16 + sizeof(hdr) + nqwords * sizeof(uint64_t);
+	if (len > UINT16_MAX) {
+		fprintf(stderr, "pmclog callchain record too large: %zu\n", len);
+		exit(1);
+	}
 
-	write_header(f, PMCLOG_TYPE_CALLCHAIN, len, tsc);
+	write_header(f, PMCLOG_TYPE_CALLCHAIN, (uint16_t)len, tsc);
 	w32(f, 1234);
 	w32(f, 1234);
 	w32(f, 0);
@@ -185,13 +201,13 @@ main(int argc, char **argv)
 	fetch[1] = 0;
 	fetch[2] = 0x40001234ULL;
 	fetch[3] = 0;
-	write_callchain(f, PMC_CC_MULTIPART_IBS_FETCH, fetch, 4, 2);
+	write_callchain(f, PMC_CC_MULTIPART_IBS_FETCH, fetch, nitems(fetch), 2);
 
 	/*
-	 * Include OP DATA3 bits from erratum #1293 so the synthetic log remains
-	 * representative of IBS multipart records.  pmcstat does not print the
-	 * affected L2Miss/OpenMemReqs fields today, so the visible assertions below
-	 * are intentionally limited to fetch erratum #1238.
+	 * Include OP DATA3 bits from erratum #1293 so the synthetic log also
+	 * carries an Op multipart record.  pmcstat does not print the affected
+	 * L2Miss/OpenMemReqs fields today, so the test only asserts that
+	 * non-erratum Op fields survive decode.
 	 */
 	data3 = IBS_OP_DATA3_LOAD | IBS_OP_DATA3_DCL1TLBMISS |
 	    IBS_OP_DATA3_DCMISS | IBS_OP_DATA3_DCMISSNOMABALLOC |
@@ -207,7 +223,7 @@ main(int argc, char **argv)
 	op[6] = 0x60001234ULL;
 	op[7] = 0;
 	op[8] = 0;
-	write_callchain(f, PMC_CC_MULTIPART_IBS_OP, op, 9, 3);
+	write_callchain(f, PMC_CC_MULTIPART_IBS_OP, op, nitems(op), 3);
 
 	write_header(f, PMCLOG_TYPE_CLOSELOG, 16, 4);
 	if (fclose(f) != 0) {
@@ -218,13 +234,13 @@ main(int argc, char **argv)
 }
 EOF
 
-	cc -Wall -Wextra -O2 -o mk_ibs_pmclog mk_ibs_pmclog.c || \
-	    atf_fail "failed to build synthetic pmclog writer"
+	atf_check -s exit:0 -o empty -e save:mk_ibs_pmclog.cc.err \
+	    cc -Wall -Wextra -O2 -o mk_ibs_pmclog mk_ibs_pmclog.c
 }
 
 pmcstat_errata_decode()
 {
-	local cpuid log out pmcstat_bin err
+	local cpuid log out pmcstat_bin
 
 	cpuid="$1"
 	log="$2"
@@ -233,10 +249,8 @@ pmcstat_errata_decode()
 
 	./mk_ibs_pmclog "$log" "$cpuid" || \
 	    atf_fail "failed to create synthetic pmclog for $cpuid"
-	if ! "$pmcstat_bin" -R "$log" > "$out" 2>"$out.err"; then
-		err=$(cat "$out.err")
-		atf_fail "pmcstat -R failed for $cpuid: $err"
-	fi
+	atf_check -s exit:0 -o save:"$out" -e save:"$out.err" \
+	    "$pmcstat_bin" -R "$log"
 	if [ ! -s "$out" ]; then
 		atf_fail "pmcstat -R produced empty output for $cpuid"
 	fi
@@ -247,11 +261,36 @@ pmcstat_errata_fetch_line()
 	local out line
 
 	out="$1"
-	line=$(grep '^ibs-fetch ' "$out" | grep -v 'Latency' | head -1)
+	line=$(grep '^ibs-fetch[[:space:]]' "$out" | grep -v 'Latency' | head -1)
 	if [ -z "$line" ]; then
 		atf_fail "pmcstat -R output has no IBS Fetch decode line: $(cat "$out")"
 	fi
 	printf '%s\n' "$line"
+}
+
+pmcstat_errata_op_line()
+{
+	local out line
+
+	out="$1"
+	line=$(grep '^ibs-op[[:space:]].*load ' "$out" | head -1)
+	if [ -z "$line" ]; then
+		atf_fail "pmcstat -R output has no IBS Op decode line: $(cat "$out")"
+	fi
+	printf '%s\n' "$line"
+}
+
+pmcstat_errata_line_has_token()
+{
+
+	case " $1 " in
+	*" $2 "*)
+		return 0
+		;;
+	*)
+		return 1
+		;;
+	esac
 }
 
 pmcstat_errata_require_fetch_context()
@@ -260,8 +299,20 @@ pmcstat_errata_require_fetch_context()
 
 	line="$1"
 	for bit in l1tlbmiss opcachemiss l3miss; do
-		if ! printf '%s\n' "$line" | grep -q "$bit"; then
+		if ! pmcstat_errata_line_has_token "$line" "$bit"; then
 			atf_fail "IBS Fetch line lost $bit while checking errata: $line"
+		fi
+	done
+}
+
+pmcstat_errata_require_op_context()
+{
+	local line
+
+	line="$1"
+	for bit in load l1tlbmiss dcmiss; do
+		if ! pmcstat_errata_line_has_token "$line" "$bit"; then
+			atf_fail "IBS Op line lost $bit while checking errata: $line"
 		fi
 	done
 }
@@ -269,11 +320,13 @@ pmcstat_errata_require_fetch_context()
 atf_test_case zen3_b0_fetch_icmiss_suppressed cleanup
 zen3_b0_fetch_icmiss_suppressed_head()
 {
-	atf_set "descr" "pmcstat -R suppresses invalid IbsIcMiss for AMD Zen 3 B0 producer CPUIDs"
+	atf_set "descr" \
+	    "pmcstat -R suppresses invalid IbsIcMiss for AMD Zen 3 B0 producer CPUIDs"
+	atf_set "require.progs" "cc"
 }
 zen3_b0_fetch_icmiss_suppressed_body()
 {
-	local cpuid line
+	local cpuid line opline
 
 	pmcstat_errata_check_support
 	pmcstat_errata_pmcstat
@@ -283,49 +336,59 @@ zen3_b0_fetch_icmiss_suppressed_body()
 		pmcstat_errata_decode "$cpuid" "$cpuid.pmc" "$cpuid.out" \
 		    "$PMCSTAT_BIN"
 		line=$(pmcstat_errata_fetch_line "$cpuid.out")
+		opline=$(pmcstat_errata_op_line "$cpuid.out")
 		pmcstat_errata_require_fetch_context "$line"
-		if printf '%s\n' "$line" | grep -q 'icmiss'; then
+		pmcstat_errata_require_op_context "$opline"
+		if pmcstat_errata_line_has_token "$line" icmiss; then
 			atf_fail "Zen 3 B0 CPUID $cpuid still prints invalid icmiss: $line"
 		fi
 	done
 }
 zen3_b0_fetch_icmiss_suppressed_cleanup()
 {
-	rm -f mk_ibs_pmclog mk_ibs_pmclog.c AuthenticAMD-25-*.pmc \
+	rm -f mk_ibs_pmclog mk_ibs_pmclog.c mk_ibs_pmclog.cc.err \
+	    AuthenticAMD-25-*.pmc \
 	    AuthenticAMD-25-*.out AuthenticAMD-25-*.out.err
 }
 
-atf_test_case zen4_fetch_icmiss_preserved cleanup
-zen4_fetch_icmiss_preserved_head()
+atf_test_case unaffected_fetch_icmiss_preserved cleanup
+unaffected_fetch_icmiss_preserved_head()
 {
-	atf_set "descr" "pmcstat -R preserves IbsIcMiss for AMD Zen 4 producer CPUIDs"
+	atf_set "descr" \
+	    "pmcstat -R preserves IbsIcMiss for unaffected AMD producer CPUIDs"
+	atf_set "require.progs" "cc"
 }
-zen4_fetch_icmiss_preserved_body()
+unaffected_fetch_icmiss_preserved_body()
 {
-	local cpuid line
+	local cpuid line opline
 
 	pmcstat_errata_check_support
 	pmcstat_errata_pmcstat
 	pmcstat_errata_build_writer
 
-	for cpuid in AuthenticAMD-25-10-1 AuthenticAMD-25-11-1; do
+	for cpuid in AuthenticAMD-25-20-1 AuthenticAMD-25-10-1 \
+	    AuthenticAMD-25-11-1 AuthenticAMD-26-00-0; do
 		pmcstat_errata_decode "$cpuid" "$cpuid.pmc" "$cpuid.out" \
 		    "$PMCSTAT_BIN"
 		line=$(pmcstat_errata_fetch_line "$cpuid.out")
+		opline=$(pmcstat_errata_op_line "$cpuid.out")
 		pmcstat_errata_require_fetch_context "$line"
-		if ! printf '%s\n' "$line" | grep -q 'icmiss'; then
-			atf_fail "Zen 4 CPUID $cpuid lost valid icmiss: $line"
+		pmcstat_errata_require_op_context "$opline"
+		if ! pmcstat_errata_line_has_token "$line" icmiss; then
+			atf_fail "unaffected CPUID $cpuid lost valid icmiss: $line"
 		fi
 	done
 }
-zen4_fetch_icmiss_preserved_cleanup()
+unaffected_fetch_icmiss_preserved_cleanup()
 {
-	rm -f mk_ibs_pmclog mk_ibs_pmclog.c AuthenticAMD-25-*.pmc \
-	    AuthenticAMD-25-*.out AuthenticAMD-25-*.out.err
+	rm -f mk_ibs_pmclog mk_ibs_pmclog.c mk_ibs_pmclog.cc.err \
+	    AuthenticAMD-25-*.pmc \
+	    AuthenticAMD-25-*.out AuthenticAMD-25-*.out.err \
+	    AuthenticAMD-26-*.pmc AuthenticAMD-26-*.out AuthenticAMD-26-*.out.err
 }
 
 atf_init_test_cases()
 {
 	atf_add_test_case zen3_b0_fetch_icmiss_suppressed
-	atf_add_test_case zen4_fetch_icmiss_preserved
+	atf_add_test_case unaffected_fetch_icmiss_preserved
 }
