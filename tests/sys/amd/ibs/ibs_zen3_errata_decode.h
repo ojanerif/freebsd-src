@@ -7,9 +7,9 @@
  *
  * Pure software model for validating pmcstat's AMD Zen 3 IBS errata decode
  * policy.  This header intentionally has no hardware I/O and never consults
- * the live host CPU.  A Zen 4 host can force the Zen 3 path by passing a
- * synthetic hwpmc CPUID string, which validates only the software decode path;
- * it does not reproduce the original Zen 3 hardware errata.
+ * the live host CPU.  A Zen 4 or newer host can force the Zen 3 path by
+ * passing a synthetic hwpmc CPUID string, which validates only the software
+ * decode path; it does not reproduce the original Zen 3 hardware errata.
  */
 
 #ifndef _IBS_ZEN3_ERRATA_DECODE_H_

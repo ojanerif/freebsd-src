@@ -8,9 +8,9 @@
  * [TC-UNIT-ZEN3ERR] — Software-only AMD Zen 3 IBS errata decode tests.
  *
  * These tests validate the pmcstat consumer-side errata policy with synthetic
- * hwpmc CPUID strings and synthetic IBS payload words.  They are safe on Zen 4
- * because they do not read or write MSRs, load hwpmc, use firmware knobs, or
- * reproduce the original Zen 3 hardware behavior.
+ * hwpmc CPUID strings and synthetic IBS payload words.  They are safe on
+ * Zen 4 and newer machines because they do not read or write MSRs, load hwpmc,
+ * use firmware knobs, or reproduce the original Zen 3 hardware behavior.
  */
 
 #include <atf-c.h>
@@ -101,7 +101,7 @@ ATF_TC_BODY(ibs_unit_zen3_errata_sanitizes_op_data3_swpf, tc)
 	ATF_CHECK((data3 & IBS_SW_PF) != 0);
 }
 
-/* TC-UNIT-ZEN3ERR-05: Zen 4 synthetic CPUID is unaffected. */
+/* TC-UNIT-ZEN3ERR-05: Zen 4+ synthetic CPUIDs are unaffected. */
 ATF_TC_WITHOUT_HEAD(ibs_unit_zen4_unaffected_not_sanitized);
 ATF_TC_BODY(ibs_unit_zen4_unaffected_not_sanitized, tc)
 {
