@@ -24,7 +24,7 @@ freebsd-ci-actions/
 └── tests/
     └── sys/
         └── amd/
-            ├── ibs/          # IBS ATF test suite (35 programs)
+            ├── ibs/          # IBS ATF test suite (36 programs)
             ├── umcdf/        # UMC / Data Fabric ATF test suite (10 programs)
             ├── pmc/          # hwpmc / pmcstat ATF test suite (5 programs)
             ├── l3/           # L3 cache PMU ATF test suite (3 programs)
@@ -37,7 +37,8 @@ freebsd-ci-actions/
 
 ### IBS — Instruction-Based Sampling (`tests/sys/amd/ibs/`)
 
-35 test programs covering AMD IBS hardware via `cpuctl.ko` and `hwpmc.ko`.
+36 test programs covering AMD IBS hardware via `cpuctl.ko` and `hwpmc.ko`,
+plus pure software decode helpers that require no hardware access.
 
 | Program | Cat | Description |
 |---|---|---|
@@ -72,12 +73,13 @@ freebsd-ci-actions/
 | `ibs_unit_op_data_fields_test` | TC-UNIT | IBS Op Data 1–3 field bit layout and extraction unit tests |
 | `ibs_unit_msr_range_test` | TC-UNIT | IBS MSR address range, offsets, and uniqueness unit tests |
 | `ibs_unit_ldlat_test` | TC-UNIT | Load latency threshold field encoding and overlap unit tests |
+| `ibs_unit_zen3_errata_test` | TC-UNIT | Zen 3 IBS errata decode policy model unit tests (no hardware) |
 | `ibs_stress_test` | TC-STR | IBS rapid enable/disable, period changes, concurrent MSR access, long-running |
 | `ibs_cpu_stress_test` | TC-STR | IBS MSR stability under CPU pipeline saturation and context switches |
 | `ibs_mem_stress_test` | TC-MEMIBS | IBS coherence under L2/L3/DRAM bandwidth and cache-thrash stress |
 | `ibs_nmi_stress_test` | TC-NMISTR | NMI delivery stability and AMD Erratum #420 drain under 192-CPU load |
 
-**Shared headers:** `ibs_utils.h` (MSR I/O, hardware accessors), `ibs_decode.h` (pure field helpers, no I/O).
+**Shared headers:** `ibs_utils.h` (MSR I/O, hardware accessors), `ibs_decode.h` and `ibs_zen3_errata_decode.h` (pure field/policy helpers, no I/O).
 
 ---
 
@@ -207,12 +209,16 @@ Tests *within* each batch still run in parallel:
 
 ## Requirements
 
-- FreeBSD on AMD CPU with IBS support (Family 10h / K10 or newer)
-- Kernel modules: `cpuctl.ko` (loaded by default on amd64), `hwpmc.ko`
-- ATF (Automated Test Framework) — included in FreeBSD base system
-- Root privileges (MSR access, PMC driver)
+- FreeBSD amd64 with ATF (Automated Test Framework; included in FreeBSD base)
+- Hardware IBS/MSR tests: AMD CPU with IBS support, `cpuctl.ko`, and root
+  privileges for MSR access
+- hwpmc/libpmc runtime tests: `hwpmc.ko` and root privileges when the test
+  allocates or samples real PMCs
+- Offline decode and pure unit tests: no live IBS MSR access and no AMD target
+  CPU requirement; they operate on synthetic CPUID or pmclog data
 
-Zen 4+ tests require AMD Family 19h. Some tests skip gracefully on older hardware.
+Zen 4+ runtime tests require the matching AMD family/model and skip gracefully
+on older hardware.
 
 ---
 

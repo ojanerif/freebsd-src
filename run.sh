@@ -561,6 +561,23 @@ test_in_categories() {
     return 1
 }
 
+# Print categories from $1 that are also present in $2.
+category_intersection() {
+    _left="$1"
+    _right="$2"
+    _out=""
+
+    for _lc in $_left; do
+        for _rc in $_right; do
+            if [ "$_lc" = "$_rc" ]; then
+                _out="$_out $_lc"
+                break
+            fi
+        done
+    done
+    printf '%s' "$_out"
+}
+
 # Build a filtered Kyuafile containing only tests from the selected categories.
 # The filtered file is written inside $1 (the install dir) so kyua can resolve
 # test program names as relative paths from that directory.
@@ -2743,6 +2760,12 @@ run_all_tests() {
         _NONSTRESS_CATS="TC-DET TC-MSR TC-INT TC-DATA TC-SMP TC-HWPMC TC-DRV \
 TC-CONC TC-SEC TC-API TC-UNIT TC-UMCDET TC-UMCPMC TC-UMCUNIT \
 TC-PMCAPI TC-PMCSTAT"
+        if [ -n "$_ph_orig_cats" ]; then
+            _ph_cats=$(category_intersection \
+                "$_ph_orig_cats" "$_NONSTRESS_CATS")
+        else
+            _ph_cats="$_NONSTRESS_CATS"
+        fi
 
         # ── Phase 1: non-stress tests ──
         {
@@ -2755,8 +2778,8 @@ TC-PMCAPI TC-PMCSTAT"
             case "$_s" in
                 STRESS) continue ;;  # STRESS suite contains only stress tests
             esac
-            if _suite_has_batch_tests "$_s" "$_NONSTRESS_CATS"; then
-                CATEGORIES="$_NONSTRESS_CATS"
+            if [ -n "$_ph_cats" ] && _suite_has_batch_tests "$_s" "$_ph_cats"; then
+                CATEGORIES="$_ph_cats"
                 _run_suite_once "$_s" || TEST_EXIT_CODE=1
             fi
         done
