@@ -26,7 +26,7 @@ freebsd-ci-actions/
         └── amd/
             ├── ibs/          # IBS ATF test suite (35 programs)
             ├── umcdf/        # UMC / Data Fabric ATF test suite (10 programs)
-            ├── pmc/          # hwpmc / pmcstat ATF test suite (4 programs)
+            ├── pmc/          # hwpmc / pmcstat ATF test suite (5 programs)
             ├── l3/           # L3 cache PMU ATF test suite (3 programs)
             └── stress/       # Stress ATF test suite (6 programs + 4 stressor binaries)
 ```
@@ -104,14 +104,16 @@ freebsd-ci-actions/
 
 ### PMC — hwpmc / pmcstat (`tests/sys/amd/pmc/`)
 
-4 test programs covering AMD core PMC negative-path error handling and grouping.
+5 test programs covering AMD core PMC negative-path error handling, grouping,
+and pmcstat(8) offline decode behavior.
 
 | Program | Cat | Description |
 |---|---|---|
-| `hwpmc_exterr_test` | — | Extended error text for PMC_OP_PMCALLOCATE / PMCATTACH / PMCRW failures (14 cases) |
-| `hwpmc_grouping_test` | — | hwpmc(4) event grouping behavior for Zen core PMCs via libpmc |
-| `pmcstat_grouping_test` | — | pmcstat(8) grouped system-wide counting output validation (shell) |
-| `pmcstat_tsc_test` | — | pmcstat TSC column presence and frequency integration smoke test (shell) |
+| `hwpmc_exterr_test` | TC-PMCAPI | Extended error text for PMC_OP_PMCALLOCATE / PMCATTACH / PMCRW failures (14 cases) |
+| `hwpmc_grouping_test` | TC-PMCAPI | hwpmc(4) event grouping behavior for Zen core PMCs via libpmc |
+| `pmcstat_grouping_test` | TC-PMCSTAT | pmcstat(8) grouped system-wide counting output validation (shell) |
+| `pmcstat_ibs_errata_test` | TC-PMCSTAT | pmcstat(8) offline IBS Fetch erratum #1238 decode validation using synthetic pmclog input |
+| `pmcstat_tsc_test` | TC-PMCSTAT | pmcstat TSC column presence and frequency integration smoke test (shell) |
 
 ---
 
@@ -177,6 +179,8 @@ plain C programs spawned as background load by the IBS stress tests.
 | TC-UMCDET | UMCDF | Unit | UMC/DF CPU detection |
 | TC-UMCPMC | UMCDF | Integration | UMC/DF PMC lifecycle |
 | TC-UMCUNIT | UMCDF | Unit | UMC/DF pure decode helpers |
+| TC-PMCAPI | PMC | Integration | hwpmc API and error-path validation |
+| TC-PMCSTAT | PMC | Integration | pmcstat command and pmclog decode paths |
 
 ---
 
@@ -186,7 +190,8 @@ plain C programs spawned as background load by the IBS stress tests.
 
 **Phase 1 — Non-stress tests** run at full parallelism (`nproc` workers by default).
 All TC-DET, TC-MSR, TC-INT, TC-API, TC-DATA, TC-SMP, TC-HWPMC, TC-DRV,
-TC-CONC, TC-SEC, TC-UNIT, TC-UMCDET, TC-UMCPMC, and TC-UMCUNIT tests run here.
+TC-CONC, TC-SEC, TC-UNIT, TC-UMCDET, TC-UMCPMC, TC-UMCUNIT, TC-PMCAPI,
+and TC-PMCSTAT tests run here.
 
 **Phase 2 — Stress tests** run in four sequential resource-isolated batches.
 Tests *within* each batch still run in parallel:
@@ -220,6 +225,9 @@ cd tests/sys/amd/ibs && make
 # UMCDF suite
 cd tests/sys/amd/umcdf && make
 
+# PMC suite
+cd tests/sys/amd/pmc && make
+
 # Stress suite
 cd tests/sys/amd/stress && make
 ```
@@ -240,6 +248,9 @@ sudo ./run.sh --run-all --suite ALL --force
 
 # Run a single suite
 sudo ./run.sh --run-all --suite IBS --force
+
+# Run pmcstat decode tests
+sudo ./run.sh --run-all --suite PMC --category TC-PMCSTAT --force
 
 # Run a specific category only
 sudo ./run.sh --run-all --suite IBS --category TC-UNIT --force

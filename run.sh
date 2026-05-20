@@ -94,6 +94,12 @@ get_test_meta() {
         ibs_unit_op_data_fields_test)    printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_op_ext_maxcnt_test)     printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_zen3_errata_test)       printf "TC-UNIT:Unit Tests:MEDIUM" ;;
+        # PMC suite tests
+        hwpmc_exterr_test)               printf "TC-PMCAPI:hwpmc API:HIGH" ;;
+        hwpmc_grouping_test)             printf "TC-PMCAPI:hwpmc API:HIGH" ;;
+        pmcstat_grouping_test)           printf "TC-PMCSTAT:pmcstat Integration:MEDIUM" ;;
+        pmcstat_ibs_errata_test)         printf "TC-PMCSTAT:pmcstat Decode:HIGH" ;;
+        pmcstat_tsc_test)                printf "TC-PMCSTAT:pmcstat Decode:HIGH" ;;
         # UMCDF tests
         umcdf_cpuid_test)                printf "TC-UMCDET:UMC/DF Detection:CRITICAL" ;;
         umcdf_df_test)                   printf "TC-UMCPMC:DF PMC:HIGH" ;;
@@ -1293,6 +1299,10 @@ ${YELLOW}CATEGORY SELECTION${NC}
       TC-UMCDET  UMC/DF Detection  CPUID-based UMC and DF feature detection [CRITICAL]
       TC-UMCPMC  UMC/DF PMC       UMC and DF counter read/write paths       [HIGH]
       TC-UMCUNIT UMCDF Unit       Software unit tests for decode/map logic  [MEDIUM]
+
+    PMC categories:
+      TC-PMCAPI   hwpmc API       General hwpmc API and error paths         [HIGH]
+      TC-PMCSTAT  pmcstat Decode  pmcstat command and pmclog decode paths   [HIGH/MEDIUM]
 
     STRESS categories:
       TC-CSTR  CPU Stress     Per-CPU compute, context-switch, FPU load     [MEDIUM]
@@ -2728,10 +2738,11 @@ run_all_tests() {
         TEST_EXIT_CODE=0
         _ph_orig_cats="$CATEGORIES"
 
-        # Non-stress categories for IBS and UMCDF suites.
+        # Non-stress categories for IBS, UMCDF, and PMC suites.
         # TC-NMISTR and TC-MEMIBS are stress; TC-STR is stress — all excluded here.
         _NONSTRESS_CATS="TC-DET TC-MSR TC-INT TC-DATA TC-SMP TC-HWPMC TC-DRV \
-TC-CONC TC-SEC TC-API TC-UNIT TC-UMCDET TC-UMCPMC TC-UMCUNIT"
+TC-CONC TC-SEC TC-API TC-UNIT TC-UMCDET TC-UMCPMC TC-UMCUNIT \
+TC-PMCAPI TC-PMCSTAT"
 
         # ── Phase 1: non-stress tests ──
         {
@@ -3846,4 +3857,3 @@ case $COMMAND in
         fi
         ;;
 esac
-
