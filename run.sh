@@ -191,7 +191,8 @@ VERBOSE=0
 DRY_RUN=0
 FORCE=0
 PARALLELISM="${PARALLELISM:-$(sysctl -n hw.ncpu 2>/dev/null || echo 1)}"
-RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/work/results-$(date +%Y-%m-%d_%H-%M-%S)}"
+HTML_DIR="${HTML_DIR:-/usr/local/www/darkhttpd}"
+RESULTS_DIR="${RESULTS_DIR:-$HTML_DIR/results-$(date +%Y-%m-%d_%H-%M-%S)}"
 TEST_RESULTS=""
 TOTAL_TESTS=0
 PASSED_TESTS=0
@@ -1087,8 +1088,8 @@ show_last_test() {
     # 2. Most recent results directory
     echo ""
     _latest_results=""
-    if [ -d "${SCRIPT_DIR}/work" ]; then
-        _latest_results=$(ls -dt "${SCRIPT_DIR}/work/results-"* 2>/dev/null | head -1)
+    if [ -d "$HTML_DIR" ]; then
+        _latest_results=$(ls -dt "$HTML_DIR/results-"* 2>/dev/null | head -1)
     fi
     if [ -n "$_latest_results" ]; then
         printf 'Most recent results dir: %s\n' "$_latest_results"
@@ -1097,7 +1098,7 @@ show_last_test() {
         [ -f "${_latest_results}/report.xml" ] && \
             printf '  report.xml : %s/report.xml\n' "$_latest_results"
     else
-        printf '  No results directory found under %s/work/\n' "$SCRIPT_DIR"
+        printf '  No results directory found under %s\n' "$HTML_DIR"
     fi
 
     # 3. Live run log — last 60 lines (most useful for panic triage)
@@ -1178,7 +1179,7 @@ ${YELLOW}COMMANDS${NC}
         CONDITIONAL   -CRITICAL/HIGH passed but MEDIUM < 80 %
         NOT APPROVED  -any CRITICAL failed, or HIGH < 95 %
       A plain-text report and a JUnit XML report are saved to
-      \$RESULTS_DIR (default: work/results-<pid>/).
+      \$RESULTS_DIR (default: \$HTML_DIR/results-<timestamp>/).
       Combine with --category to run only a subset of tests.
       Requires root.
 
@@ -1377,7 +1378,7 @@ ${YELLOW}OPTIONS${NC}
     --parallelism N     Number of parallel kyua workers (default: hw.ncpu).
                         Set to 1 to serialize test execution.
     --results-dir DIR   Directory where reports are saved after --run-all.
-                        Default: \$SCRIPT_DIR/work/results-<pid>
+                        Default: \$HTML_DIR/results-<timestamp>
     -h, --help          Show this help and exit.
 
 ${YELLOW}EXAMPLES${NC}
@@ -1450,7 +1451,7 @@ ${YELLOW}FILES${NC}
 ${YELLOW}SOURCES${NC}
     GitHub fork : $REPO_URL  (branch: $BRANCH)
     sos-git     : ssh://git@sos-git.amd.com/freebsd-src.git  (branch: $SOS_BRANCH)
-    Work dir    : $SCRIPT_DIR/work/
+    HTML dir    : $HTML_DIR
 
 ${YELLOW}REQUIREMENTS${NC}
     - Root privileges (MSR access, module loading, test execution)
@@ -2148,13 +2149,13 @@ HTMLEOF
 }
 
 generate_html_index() {
-    _idx_file="$SCRIPT_DIR/work/index.html"
+    _idx_file="$HTML_DIR/index.html"
     _hostname=$(hostname)
     _now=$(date)
 
     # Scan all results dirs, newest first by name (datetime names sort correctly)
     _rows=""
-    for _d in $(ls -dt "$SCRIPT_DIR/work/results-"* 2>/dev/null); do
+    for _d in $(ls -dt "$HTML_DIR/results-"* 2>/dev/null); do
         _n=$(basename "$_d")
         _rpt="$_d/report.txt"
         [ -f "$_rpt" ] || continue
@@ -2284,7 +2285,7 @@ generate_html_skipped_report() {
     _sk_commit="${1:-unknown}"
     _sk_branch="${2:-unknown}"
     _sk_ts=$(date +%Y-%m-%d_%H-%M-%S)
-    _sk_dir="$SCRIPT_DIR/work/results-${_sk_ts}-skipped"
+    _sk_dir="$HTML_DIR/results-${_sk_ts}-skipped"
     _sk_txt="$_sk_dir/report.txt"
     _sk_html="$_sk_dir/report.html"
     _sk_date=$(date)
@@ -3463,8 +3464,8 @@ clean_artifacts() {
         fi
     fi
 
-    if [ -d "$SCRIPT_DIR/work" ] && [ $DRY_RUN -eq 0 ]; then
-        log_info "Work directory preserved: $SCRIPT_DIR/work/ (remove manually if needed)"
+    if [ -d "$HTML_DIR" ] && [ $DRY_RUN -eq 0 ]; then
+        log_info "HTML dir preserved: $HTML_DIR (remove results manually if needed)"
     fi
 }
 
