@@ -111,6 +111,40 @@ release_process_counting_pmc(pmc_id_t *pmcid)
 	*pmcid = PMC_ID_INVALID;
 }
 
+static void
+require_distinct_thread_rows(pmc_id_t pmc0, const char *name0, pmc_id_t pmc1,
+    const char *name1)
+{
+	enum pmc_disp disp0, disp1;
+	unsigned int row0, row1;
+	int error0, error1;
+
+	disp0 = disp1 = PMC_DISP_UNKNOWN;
+	row0 = PMC_ID_TO_ROWINDEX(pmc0);
+	row1 = PMC_ID_TO_ROWINDEX(pmc1);
+	error0 = read_row_disposition(pmc0, &disp0);
+	error1 = read_row_disposition(pmc1, &disp1);
+
+	ATF_CHECK_MSG(row0 != row1,
+	    "%s and %s PMCs used the same row %u", name0, name1, row0);
+	ATF_CHECK_MSG(error0 == 0,
+	    "%s row %u disposition read failed: %s", name0, row0,
+	    strerror(error0));
+	ATF_CHECK_MSG(error1 == 0,
+	    "%s row %u disposition read failed: %s", name1, row1,
+	    strerror(error1));
+	if (error0 == 0)
+		ATF_CHECK_MSG(disp0 == PMC_DISP_THREAD,
+		    "%s row %u disposition is %s, expected %s", name0, row0,
+		    pmc_name_of_disposition(disp0),
+		    pmc_name_of_disposition(PMC_DISP_THREAD));
+	if (error1 == 0)
+		ATF_CHECK_MSG(disp1 == PMC_DISP_THREAD,
+		    "%s row %u disposition is %s, expected %s", name1, row1,
+		    pmc_name_of_disposition(disp1),
+		    pmc_name_of_disposition(PMC_DISP_THREAD));
+}
+
 ATF_TC(row_disposition_tracks_process_and_system_pmc);
 ATF_TC_HEAD(row_disposition_tracks_process_and_system_pmc, tc)
 {
@@ -156,16 +190,11 @@ ATF_TC_BODY(amd_pmu_core_events_allocate_concurrently, tc)
 {
 	struct pmc_op_pmcallocate cycles_cfg;
 	struct amd_umcdf_cpu cpu;
-	enum pmc_disp cycles0_disp, cycles1_disp;
 	pmc_id_t cycles0_pmc, cycles1_pmc;
-	unsigned int cycles0_row, cycles1_row;
-	int cycles0_disp_error, cycles1_disp_error, error;
+	int error;
 
 	cycles0_pmc = PMC_ID_INVALID;
 	cycles1_pmc = PMC_ID_INVALID;
-	cycles0_disp = cycles1_disp = PMC_DISP_FREE;
-	cycles0_disp_error = cycles1_disp_error = 0;
-	cycles0_row = cycles1_row = 0;
 
 	amd_umcdf_skip_unless_known_zen(&cpu);
 	amd_umcdf_skip_unless_pmu_events();
@@ -190,30 +219,61 @@ ATF_TC_BODY(amd_pmu_core_events_allocate_concurrently, tc)
 	ATF_REQUIRE_MSG(error == 0,
 	    "second pmc_allocate(unhalted-cycles) failed: %s", strerror(error));
 
-	cycles0_row = PMC_ID_TO_ROWINDEX(cycles0_pmc);
-	cycles1_row = PMC_ID_TO_ROWINDEX(cycles1_pmc);
-	cycles0_disp_error = read_row_disposition(cycles0_pmc, &cycles0_disp);
-	cycles1_disp_error = read_row_disposition(cycles1_pmc, &cycles1_disp);
+	require_distinct_thread_rows(cycles0_pmc, "first unhalted-cycles",
+	    cycles1_pmc, "second unhalted-cycles");
 
 	release_process_counting_pmc(&cycles1_pmc);
 	release_process_counting_pmc(&cycles0_pmc);
+}
 
-	ATF_CHECK_MSG(cycles0_row != cycles1_row,
-	    "grouped unhalted-cycles PMCs used the same row");
-	ATF_REQUIRE_MSG(cycles0_disp_error == 0,
-	    "first unhalted-cycles row %u disposition read failed: %s",
-	    cycles0_row, strerror(cycles0_disp_error));
-	ATF_REQUIRE_MSG(cycles1_disp_error == 0,
-	    "second unhalted-cycles row %u disposition read failed: %s",
-	    cycles1_row, strerror(cycles1_disp_error));
-	ATF_CHECK_MSG(cycles0_disp == PMC_DISP_THREAD,
-	    "first unhalted-cycles row %u disposition is %s, expected %s",
-	    cycles0_row, pmc_name_of_disposition(cycles0_disp),
-	    pmc_name_of_disposition(PMC_DISP_THREAD));
-	ATF_CHECK_MSG(cycles1_disp == PMC_DISP_THREAD,
-	    "second unhalted-cycles row %u disposition is %s, expected %s",
-	    cycles1_row, pmc_name_of_disposition(cycles1_disp),
-	    pmc_name_of_disposition(PMC_DISP_THREAD));
+ATF_TC(amd_pmu_mixed_core_events_allocate_concurrently);
+ATF_TC_HEAD(amd_pmu_mixed_core_events_allocate_concurrently, tc)
+{
+	atf_tc_set_md_var(tc, "descr",
+	    "Verify mixed portable AMD Zen core PMU events allocate as distinct "
+	    "process-counting hwpmc rows without starting runtime counters.");
+	atf_tc_set_md_var(tc, "require.user", "root");
+}
+
+ATF_TC_BODY(amd_pmu_mixed_core_events_allocate_concurrently, tc)
+{
+	struct pmc_op_pmcallocate cycles_cfg, instr_cfg;
+	struct amd_umcdf_cpu cpu;
+	pmc_id_t cycles_pmc, instr_pmc;
+	int error;
+
+	cycles_pmc = PMC_ID_INVALID;
+	instr_pmc = PMC_ID_INVALID;
+
+	amd_umcdf_skip_unless_known_zen(&cpu);
+	amd_umcdf_skip_unless_pmu_events();
+
+	require_pmu_core_event("unhalted-cycles", &cycles_cfg);
+	require_pmu_core_event("instructions", &instr_cfg);
+
+	error = allocate_process_counting_pmc("unhalted-cycles", &cycles_pmc);
+	if (error != 0 && pmc_allocate_error_is_skip(error))
+		atf_tc_skip("pmc_allocate(unhalted-cycles) failed: %s",
+		    strerror(error));
+	ATF_REQUIRE_MSG(error == 0,
+	    "pmc_allocate(unhalted-cycles) failed: %s", strerror(error));
+
+	error = allocate_process_counting_pmc("instructions", &instr_pmc);
+	if (error != 0 && pmc_allocate_error_is_skip(error)) {
+		release_process_counting_pmc(&cycles_pmc);
+		atf_tc_skip("pmc_allocate(instructions) failed: %s",
+		    strerror(error));
+	}
+	if (error != 0)
+		release_process_counting_pmc(&cycles_pmc);
+	ATF_REQUIRE_MSG(error == 0,
+	    "pmc_allocate(instructions) failed: %s", strerror(error));
+
+	require_distinct_thread_rows(cycles_pmc, "unhalted-cycles", instr_pmc,
+	    "instructions");
+
+	release_process_counting_pmc(&instr_pmc);
+	release_process_counting_pmc(&cycles_pmc);
 }
 
 ATF_TC(system_sampling_requires_logfile_before_start);
@@ -256,6 +316,7 @@ ATF_TP_ADD_TCS(tp)
 {
 	ATF_TP_ADD_TC(tp, row_disposition_tracks_process_and_system_pmc);
 	ATF_TP_ADD_TC(tp, amd_pmu_core_events_allocate_concurrently);
+	ATF_TP_ADD_TC(tp, amd_pmu_mixed_core_events_allocate_concurrently);
 	ATF_TP_ADD_TC(tp, system_sampling_requires_logfile_before_start);
 	return (atf_no_error());
 }
