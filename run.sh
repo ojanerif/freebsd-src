@@ -1975,7 +1975,7 @@ $([ -n "$_daction" ] && [ "$_daction" != "" ] && printf '    <tr><th>Action</th>
     done < "$TMP_MATRIX"
 
     _gen_date=$(_he "$(date)")
-    _sys_esc=$(_he "$(uname -srm)")
+    _sys_esc=$(_he "$(uname -a)")
 
     cat > "$_hr_file" << HTMLEOF
 <!DOCTYPE html>
@@ -2069,7 +2069,8 @@ td.phase{font-size:11px;white-space:nowrap;font-family:monospace}
 <body>
 <header>
   <h1>AMD IBS CI &mdash; Test Run Report</h1>
-  <div class="meta">Run: ${_run_name} &nbsp;&bull;&nbsp; Generated: ${_gen_date} &nbsp;&bull;&nbsp; ${_sys_esc}</div>
+  <div class="meta">Run: ${_run_name} &nbsp;&bull;&nbsp; Generated: ${_gen_date}</div>
+  <div class="meta">${_sys_esc}</div>
 </header>
 <div class="container">
 
@@ -2183,12 +2184,18 @@ generate_html_index() {
         [ -z "$_brkn"  ] && _brkn="—"
         [ -n "$_pct" ] && _pct_disp="${_pct}%" || _pct_disp="—"
 
+        # Extract kernel string: "FreeBSD 16.0-CURRENT #N branch-slug" (strip hostname+release dupe, cut at build date)
+        _kver=$(grep "^System     :" "$_rpt" 2>/dev/null | head -1 | sed 's/System     : FreeBSD [^ ]* [^ ]* //' | awk -F': ' '{print $1}' | cut -c1-60)
+        [ -z "$_kver" ] && _kver="—"
+        _kver_esc=$(_he "$_kver")
+
         _has_html=""; [ -f "$_d/report.html" ] && _has_html=" <a href=\"${_n}/report.html\">html</a>"
 
         _rows="${_rows}<tr>
 <td><a href=\"${_n}/report.html\">${_n}</a></td>
 <td class=\"dt\">${_date}</td>
 <td><span class=\"vbadge ${_vc}\">${_verdict_short}</span></td>
+<td class=\"kver\" title=\"${_kver_esc}\">${_kver_esc}</td>
 <td class=\"num\">${_pct_disp}</td>
 <td class=\"num\">${_total}</td>
 <td class=\"num c-pass\">${_pass}</td>
@@ -2222,6 +2229,7 @@ th{background:#21262d;padding:10px 12px;text-align:left;font-size:11px;color:#8b
 td{padding:9px 12px;border-top:1px solid #21262d;font-size:13px}
 td.dt{font-family:monospace;font-size:12px;color:#8b949e;white-space:nowrap}
 td.num{text-align:right;font-family:monospace;font-weight:600}
+td.kver{font-family:monospace;font-size:12px;color:#8b949e;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
 td.links{font-size:12px;white-space:nowrap}
 td.c-pass{color:#3fb950}
 td.c-fail{color:#f85149}
@@ -2246,7 +2254,7 @@ footer{background:#161b22;border-top:1px solid #30363d;padding:14px 32px;color:#
 <table>
 <thead>
 <tr>
-  <th>Run</th><th>Date / Time</th><th>Verdict</th>
+  <th>Run</th><th>Date / Time</th><th>Verdict</th><th>Kernel</th>
   <th style="text-align:right">Pass%</th>
   <th style="text-align:right">Total</th>
   <th style="text-align:right">Pass</th>
@@ -3803,6 +3811,9 @@ while [ $# -gt 0 ]; do
         --last-test)
             COMMAND="last-test"
             ;;
+        --reindex)
+            COMMAND="reindex"
+            ;;
         -h|--help)
             show_usage
             exit 0
@@ -3873,6 +3884,9 @@ case $COMMAND in
         ;;
     last-test)
         show_last_test
+        ;;
+    reindex)
+        generate_html_index
         ;;
     *)
         if [ -z "$COMMAND" ]; then
