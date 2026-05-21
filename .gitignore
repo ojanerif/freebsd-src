@@ -4,8 +4,6 @@ freebsd-src
 # Local dev checkouts (kernel source, etc.) — never committed
 dev/
 
-# Local dev docs (never committed)
-dev-docs/
 
 # Build working directory (artifacts, kyua output, logs)
 work/
