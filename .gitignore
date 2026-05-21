@@ -72,6 +72,10 @@ report-*.txt
 report-*.md
 *.patch
 hwpmc_exterr_test_output.txt
+pmu-skew-data/
+
+# Python bytecode caches
+__pycache__/
 
 # AI agent rule files — local only, never committed
 AGENTS.md
