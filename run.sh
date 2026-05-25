@@ -94,6 +94,11 @@ get_test_meta() {
         ibs_unit_op_data_fields_test)    printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_op_ext_maxcnt_test)     printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_zen3_errata_test)       printf "TC-UNIT:Unit Tests:MEDIUM" ;;
+        # TSC suite tests
+        tsc_detect_test)                 printf "TC-TSC-DET:TSC Detection:CRITICAL" ;;
+        tsc_drift_test)                  printf "TC-TSC-DRF:TSC Drift:HIGH" ;;
+        tsc_invariant_test)              printf "TC-TSC-INV:TSC Invariant:HIGH" ;;
+        tsc_stress_test)                 printf "TC-TSCSTR:TSC Stress:HIGH" ;;
         # PMC suite tests
         hwpmc_exterr_test)               printf "TC-PMCAPI:hwpmc API:HIGH" ;;
         hwpmc_grouping_test)             printf "TC-PMCAPI:hwpmc API:HIGH" ;;
@@ -258,6 +263,7 @@ suite_src_dir() {
         IBS)    printf '%s' "${SCRIPT_DIR}/tests/sys/amd/ibs" ;;
         UMCDF)  printf '%s' "${SCRIPT_DIR}/tests/sys/amd/umcdf" ;;
         PMC)    printf '%s' "${SCRIPT_DIR}/tests/sys/amd/pmc" ;;
+        TSC)    printf '%s' "${SCRIPT_DIR}/tests/sys/amd/tsc" ;;
         STRESS) printf '%s' "${SCRIPT_DIR}/tests/sys/amd/stress" ;;
         *)      printf '%s' "${SCRIPT_DIR}/tests/sys/amd/ibs" ;;
     esac
@@ -269,6 +275,7 @@ suite_install_dir() {
         IBS)    printf '/usr/tests/sys/amd/ibs' ;;
         UMCDF)  printf '/usr/tests/sys/amd/umcdf' ;;
         PMC)    printf '/usr/tests/sys/amd/pmc' ;;
+        TSC)    printf '/usr/tests/sys/amd/tsc' ;;
         STRESS) printf '/usr/tests/sys/amd/stress' ;;
         *)      printf '/usr/tests/sys/amd/ibs' ;;
     esac
@@ -277,8 +284,8 @@ suite_install_dir() {
 # Expand a SUITE selector to a space-separated list of individual suites.
 expand_suite_list() {
     case "$1" in
-        IBS|UMCDF|PMC|STRESS) printf '%s' "$1" ;;
-        ALL)     printf 'IBS UMCDF PMC STRESS' ;;
+        IBS|UMCDF|PMC|TSC|STRESS) printf '%s' "$1" ;;
+        ALL)     printf 'IBS UMCDF PMC TSC STRESS' ;;
         *)       printf 'IBS UMCDF PMC' ;;
     esac
 }
@@ -2605,17 +2612,19 @@ _run_stress_batches() {
     _srb_orig_cats="$CATEGORIES"
 
     # Which suites can carry stress tests
-    _srb_ibs_active=0; _srb_str_active=0
+    _srb_ibs_active=0; _srb_str_active=0; _srb_tsc_active=0
     for _srb_s in $SUITE_LIST; do
         case "$_srb_s" in IBS|ALL)    _srb_ibs_active=1 ;; esac
         case "$_srb_s" in STRESS|ALL) _srb_str_active=1 ;; esac
+        case "$_srb_s" in TSC|ALL)    _srb_tsc_active=1 ;; esac
     done
 
     # ── Batch 1 — CPU stress ─────────────────────────────────────────────
     # Tests: cpu_stress_test, ibs_op_stress_test, ibs_fetch_stress_test (STRESS suite)
     #        ibs_stress_test, ibs_cpu_stress_test (TC-STR, IBS suite)
     #        ibs_nmi_stress_test (TC-NMISTR, IBS suite)
-    _srb_b1_cats="TC-CSTR TC-ISTR TC-FSTR TC-STR TC-NMISTR"
+    #        tsc_stress_test (TC-TSCSTR, TSC suite)
+    _srb_b1_cats="TC-CSTR TC-ISTR TC-FSTR TC-STR TC-NMISTR TC-TSCSTR"
     _srb_b1_run=0
     {
         printf '\n=================================================================\n'
@@ -2632,6 +2641,12 @@ _run_stress_batches() {
         log_info "Stress Batch 1/4 — CPU: IBS suite"
         CATEGORIES="$_srb_b1_cats"
         _run_suite_once IBS || TEST_EXIT_CODE=1
+        _srb_b1_run=1
+    fi
+    if [ "$_srb_tsc_active" -eq 1 ] && _suite_has_batch_tests TSC "$_srb_b1_cats"; then
+        log_info "Stress Batch 1/4 — CPU: TSC suite"
+        CATEGORIES="$_srb_b1_cats"
+        _run_suite_once TSC || TEST_EXIT_CODE=1
         _srb_b1_run=1
     fi
     [ "$_srb_b1_run" -eq 0 ] && printf '  (no tests for active suite selection)\n' >> "$REPORT_TXT"

@@ -1,0 +1,13 @@
+# Build artefacts
+*.pieo
+*.bco
+*.llo
+*.full
+*.debug
+*.bc
+*.ll
+.depend.*
+tsc_detect_test
+tsc_drift_test
+tsc_invariant_test
+tsc_stress_test
