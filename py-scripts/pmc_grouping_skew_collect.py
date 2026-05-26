@@ -48,6 +48,8 @@ import signal
 import shutil
 import shlex
 import statistics
+import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -99,6 +101,8 @@ STOP_REQUESTED = False
 SHUTDOWN_REASON: Optional[str] = None
 TERMINAL = Terminal("pmc-skew")
 COMMAND_RUNNER = CommandRunner(TERMINAL)
+ACTIVE_DASHBOARD: Optional["LiveDashboard"] = None
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 
 def log_info(message: str) -> None:
@@ -378,6 +382,7 @@ def run_probe(
     raw_dir: Path,
     run_id: str,
     timeout_hint: float,
+    progress_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     output_file = raw_dir / f"{run_id}-{phase}-{iteration:04d}.out"
     tmp_out = output_file if args.dry_run else unique_tmp_path(output_file, "out")
@@ -398,7 +403,7 @@ def run_probe(
         command,
         args,
         timeout_seconds=timeout_seconds,
-        progress_label=f"{phase} {iteration}/{args.calibration_n if phase == 'calibration' else args.measurement_n}",
+        progress_label=progress_label,
     )
     returncode = result.get("returncode")
 
@@ -456,15 +461,31 @@ def run_phase(
     raw_dir: Path,
     run_id: str,
     timeout_hint: float,
+    dashboard: Optional[LiveDashboard] = None,
+    baseline_signed_offset: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
+    if dashboard is not None:
+        dashboard.suspend_for_log()
     log_info(f"{phase}: workload={shlex.join(workload)} iterations={iterations}")
     for iteration in range(1, iterations + 1):
         if STOP_REQUESTED:
             break
         if not enough_time(args, timeout_hint + args.command_timeout_overhead):
+            if dashboard is not None:
+                dashboard.suspend_for_log()
             log_warn(f"{phase}: stopping before iteration {iteration}; deadline too close")
             break
+        if dashboard is not None:
+            dashboard.start_probe(
+                phase=phase,
+                records=records,
+                requested=iterations,
+                iteration=iteration,
+                baseline_signed_offset=baseline_signed_offset,
+            )
+            if args.dry_run:
+                dashboard.suspend_for_log()
         record = run_probe(
             args,
             phase=phase,
@@ -473,8 +494,18 @@ def run_phase(
             raw_dir=raw_dir,
             run_id=run_id,
             timeout_hint=timeout_hint,
+            progress_label=None if args.quiet or (dashboard is not None and dashboard.enabled) else f"{phase} {iteration}/{iterations}",
         )
         records.append(record)
+        if baseline_signed_offset is not None:
+            apply_record_correction(record, baseline_signed_offset)
+        if dashboard is not None:
+            dashboard.finish_probe(
+                records=records,
+                baseline_signed_offset=baseline_signed_offset,
+            )
+        if dashboard is not None and dashboard.enabled:
+            continue
         if record["valid"]:
             direction = "b>a" if record["b_gt_a"] else ("a>b" if record["a_gt_b"] else "eq")
             log_verbose(
@@ -538,31 +569,38 @@ def phase_complete(records: Sequence[Dict[str, Any]], requested: int) -> bool:
     return len(records) >= requested
 
 
-def apply_correction(
-    cal_records: Sequence[Dict[str, Any]],
-    meas_records: List[Dict[str, Any]],
-) -> Tuple[float, float]:
+def calibration_offsets(cal_records: Sequence[Dict[str, Any]]) -> Tuple[float, float]:
     calibration = valid_records(cal_records)
     abs_offsets = [record["delta_abs"] for record in calibration if record.get("delta_abs") is not None]
     signed_offsets = [record["signed_delta"] for record in calibration if record.get("signed_delta") is not None]
     baseline_abs_offset = statistics.median(abs_offsets) if abs_offsets else 0.0
     baseline_signed_offset = statistics.median(signed_offsets) if signed_offsets else 0.0
-
-    for record in meas_records:
-        if not record.get("valid"):
-            continue
-        signed_delta = record.get("signed_delta")
-        max_count = record.get("max_count")
-        if signed_delta is None or not max_count:
-            continue
-        corrected_signed = float(signed_delta) - float(baseline_signed_offset)
-        corrected_delta = abs(corrected_signed)
-        record["baseline_signed_offset"] = baseline_signed_offset
-        record["corrected_signed_delta"] = corrected_signed
-        record["corrected_delta"] = corrected_delta
-        record["corrected_permille"] = corrected_delta * 1000.0 / float(max_count)
-
     return float(baseline_abs_offset), float(baseline_signed_offset)
+
+
+def apply_record_correction(record: Dict[str, Any], baseline_signed_offset: float) -> None:
+    if not record.get("valid"):
+        return
+    signed_delta = record.get("signed_delta")
+    max_count = record.get("max_count")
+    if signed_delta is None or not max_count:
+        return
+    corrected_signed = float(signed_delta) - float(baseline_signed_offset)
+    corrected_delta = abs(corrected_signed)
+    record["baseline_signed_offset"] = baseline_signed_offset
+    record["corrected_signed_delta"] = corrected_signed
+    record["corrected_delta"] = corrected_delta
+    record["corrected_permille"] = corrected_delta * 1000.0 / float(max_count)
+
+
+def apply_correction(
+    cal_records: Sequence[Dict[str, Any]],
+    meas_records: List[Dict[str, Any]],
+) -> Tuple[float, float]:
+    baseline_abs_offset, baseline_signed_offset = calibration_offsets(cal_records)
+    for record in meas_records:
+        apply_record_correction(record, baseline_signed_offset)
+    return baseline_abs_offset, baseline_signed_offset
 
 
 def corrected_stats(meas_records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -717,6 +755,273 @@ def fmt(value: Any, digits: int = 3) -> str:
     if isinstance(value, float):
         return f"{value:.{digits}f}"
     return str(value)
+
+
+def fmt_count(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number >= 1_000_000_000:
+        return f"{number / 1_000_000_000:.2f}G"
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.2f}M"
+    if number >= 1_000:
+        return f"{number / 1_000:.1f}K"
+    return f"{number:.0f}"
+
+
+def fmt_signed_count(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    sign = "+" if number >= 0 else "-"
+    return f"{sign}{fmt_count(abs(number))}"
+
+
+def fmt_duration(seconds: Optional[float]) -> str:
+    if seconds is None or not math.isfinite(float(seconds)):
+        return "--:--"
+    seconds = max(0, int(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def progress_bar(done: int, total: int, width: int = 30) -> str:
+    if total <= 0:
+        return "-" * width
+    filled = int(width * min(done, total) / total)
+    return "█" * filled + "░" * (width - filled)
+
+
+def sparkline(values: Sequence[float], width: int = 38) -> str:
+    clean = [float(value) for value in values if value is not None and math.isfinite(float(value))]
+    if not clean:
+        return "·" * width
+    clean = clean[-width:]
+    lo = min(clean)
+    hi = max(clean)
+    if hi == lo:
+        return SPARK_CHARS[0] * len(clean)
+    scale = (len(SPARK_CHARS) - 1) / (hi - lo)
+    return "".join(SPARK_CHARS[int((value - lo) * scale)] for value in clean)
+
+
+def skew_meter(value: Optional[float], tolerance: float, width: int = 34) -> str:
+    if value is None or not math.isfinite(float(value)) or tolerance <= 0:
+        return "░" * width
+    scale_max = max(tolerance * 2.0, float(value), 0.000001)
+    filled = min(width - 1, int((float(value) / scale_max) * (width - 1)))
+    marker = min(width - 1, int((tolerance / scale_max) * (width - 1)))
+    cells = ["░"] * width
+    for index in range(filled + 1):
+        cells[index] = "█"
+    cells[marker] = "│"
+    return "".join(cells)
+
+
+def pad_colored(text: str, width: int, *, color: Optional[str] = None) -> str:
+    padded = text[:width].ljust(width)
+    return TERMINAL.colorize(padded, color) if color else padded
+
+
+class LiveDashboard:
+    """Animated ANSI dashboard for PMC progress without command-line spam."""
+
+    SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    MIN_WIDTH = 100
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        terminal_width = shutil.get_terminal_size((120, 24)).columns
+        self.enabled = bool(
+            TERMINAL.live_graph_enabled
+            and not args.quiet
+            and terminal_width >= self.MIN_WIDTH
+        )
+        self.tolerance = float(args.corrected_tol)
+        self.lock = threading.Lock()
+        self.output_lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.lines = 0
+        self.cursor_hidden = False
+        self.phase = "idle"
+        self.records: Sequence[Dict[str, Any]] = []
+        self.requested = 0
+        self.iteration = 0
+        self.baseline_signed_offset: Optional[float] = None
+        self.phase_started_mono = time.monotonic()
+        self.probe_started_mono: Optional[float] = None
+        self.frame = 0
+
+    def clear(self) -> None:
+        with self.output_lock:
+            if not self.enabled or self.lines == 0:
+                return
+            sys.stderr.write(f"\033[{self.lines}F\033[J")
+            sys.stderr.flush()
+            self.lines = 0
+
+    def hide_cursor(self) -> None:
+        with self.output_lock:
+            if self.enabled and not self.cursor_hidden:
+                sys.stderr.write("\033[?25l")
+                sys.stderr.flush()
+                self.cursor_hidden = True
+
+    def show_cursor(self) -> None:
+        with self.output_lock:
+            if self.cursor_hidden:
+                sys.stderr.write("\033[?25h")
+                sys.stderr.flush()
+                self.cursor_hidden = False
+
+    def suspend_for_log(self) -> None:
+        self.clear()
+
+    def start_probe(
+        self,
+        *,
+        phase: str,
+        records: Sequence[Dict[str, Any]],
+        requested: int,
+        iteration: int,
+        baseline_signed_offset: Optional[float] = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        self.hide_cursor()
+        with self.lock:
+            if self.phase != phase:
+                self.phase_started_mono = time.monotonic()
+            self.phase = phase
+            self.records = records
+            self.requested = requested
+            self.iteration = iteration
+            self.baseline_signed_offset = baseline_signed_offset
+            self.probe_started_mono = time.monotonic()
+            if self.thread is None or not self.thread.is_alive():
+                self.stop_event.clear()
+                self.thread = threading.Thread(target=self._animate, daemon=True)
+                self.thread.start()
+        self.render()
+
+    def finish_probe(
+        self,
+        *,
+        records: Sequence[Dict[str, Any]],
+        baseline_signed_offset: Optional[float] = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        with self.lock:
+            self.records = records
+            self.baseline_signed_offset = baseline_signed_offset
+            self.probe_started_mono = None
+        self.render()
+
+    def stop(self) -> None:
+        if not self.enabled:
+            return
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+            self.thread = None
+        self.clear()
+        self.show_cursor()
+
+    def _animate(self) -> None:
+        while not self.stop_event.wait(0.20):
+            self.render()
+
+    def render(self) -> None:
+        if not self.enabled:
+            return
+
+        with self.lock:
+            phase = self.phase
+            records = list(self.records)
+            requested = self.requested
+            iteration = self.iteration
+            baseline_signed_offset = self.baseline_signed_offset
+            probe_started_mono = self.probe_started_mono
+            phase_started_mono = self.phase_started_mono
+            spinner = self.SPINNER[self.frame % len(self.SPINNER)]
+            self.frame += 1
+
+        now = time.monotonic()
+        stats = phase_stats(records)
+        valid = valid_records(records)
+        latest = valid[-1] if valid else (records[-1] if records else {})
+        completed = len(records)
+        pct_done = (completed / requested * 100.0) if requested else 0.0
+        raw_values = [record["permille"] for record in valid if record.get("permille") is not None]
+        corrected_values = [
+            record["corrected_permille"] for record in valid
+            if record.get("corrected_permille") is not None
+        ]
+        signed = stats["signed_delta"]
+        direction = "b>a" if latest.get("b_gt_a") else "a>b" if latest.get("a_gt_b") else "eq"
+        metric_name = "corrected" if corrected_values else "raw"
+        metric_values = corrected_values or raw_values
+        latest_metric = latest.get("corrected_permille") if metric_name == "corrected" else latest.get("permille")
+        raw_stats = numeric_stats(raw_values)
+        metric_stats = numeric_stats(metric_values)
+        phase_elapsed = now - phase_started_mono
+        rate = (completed / phase_elapsed) if phase_elapsed > 0 and completed else 0.0
+        eta = ((requested - completed) / rate) if rate > 0 else None
+        active_elapsed = (now - probe_started_mono) if probe_started_mono is not None else 0.0
+        active_label = f"probe {iteration}/{requested}" if probe_started_mono is not None else "idle"
+        meter_color = "green"
+        if latest_metric is not None and self.tolerance > 0:
+            if float(latest_metric) > self.tolerance * 2.0:
+                meter_color = "red"
+            elif float(latest_metric) > self.tolerance:
+                meter_color = "yellow"
+
+        title = TERMINAL.colorize("PMC skew live", "cyan")
+        phase_name = pad_colored(phase.upper(), 16, color="bold")
+        bar = TERMINAL.colorize(progress_bar(len(records), requested), "green")
+        spin = TERMINAL.colorize(spinner, "cyan")
+        lines = [
+            f"╭─ {title} {spin} ─────────────────────────────────────────────────────────────╮",
+            f"│ phase {phase_name} samples {completed:>4}/{requested:<4} [{bar}] {pct_done:5.1f}% │",
+            f"│ active {active_label:<12} probe {fmt_duration(active_elapsed):>7}  phase {fmt_duration(phase_elapsed):>7}  eta {fmt_duration(eta):>7}  rate {rate:5.2f}/s │",
+            f"│ valid {stats['valid']:>4}/{stats['records']:<4}  dir {direction:<3}  signed {fmt_signed_count(latest.get('signed_delta')):>8} cyc  max {fmt_count(latest.get('max_count')):>8} │",
+            f"│ raw latest {fmt(latest.get('permille'), 6):>10}‰  median {fmt(raw_stats.get('median'), 6):>10}‰  p95 {fmt(raw_stats.get('p95'), 6):>10}‰ │",
+        ]
+        if baseline_signed_offset is None:
+            lines.append(
+                f"│ baseline forming: signed median {fmt(signed.get('median'), 0):>8} cyc  "
+                f"stdev {fmt(signed.get('stdev'), 0):>8} cyc  b>a {fmt(stats['pct_b_gt_a'], 1):>5}% │"
+            )
+        else:
+            corr = corrected_stats(records)["corrected_permille"]
+            lines.append(
+                f"│ baseline {baseline_signed_offset:>10.0f} cyc  corrected median {fmt(corr.get('median'), 6):>10}‰  p95 {fmt(corr.get('p95'), 6):>10}‰ │"
+            )
+        lines.extend([
+            f"│ skew meter [{TERMINAL.colorize(skew_meter(latest_metric, self.tolerance), meter_color)}] latest {metric_name:<9} {fmt(latest_metric, 6):>10}‰ │",
+            f"│ {metric_name:<9} spark {sparkline(metric_values):<38}  med {fmt(metric_stats.get('median'), 6):>9}‰ max {fmt(metric_stats.get('max'), 6):>9}‰ │",
+            f"│ legend: meter marker │ is tolerance {self.tolerance:.6f}‰; yellow>tol red>2×tol │",
+            "╰─────────────────────────────────────────────────────────────────────────────╯",
+        ])
+
+        with self.output_lock:
+            if self.lines:
+                sys.stderr.write(f"\033[{self.lines}F")
+            for line in lines:
+                sys.stderr.write(f"\r\033[K{line}\n")
+            sys.stderr.flush()
+            self.lines = len(lines)
 
 
 def print_results(
@@ -941,6 +1246,8 @@ def signal_handler(signum: int, _frame: Any) -> None:
     STOP_REQUESTED = True
     SHUTDOWN_REASON = f"signal {signum}"
     COMMAND_RUNNER.terminate_active(signal.SIGTERM)
+    if ACTIVE_DASHBOARD is not None:
+        ACTIVE_DASHBOARD.suspend_for_log()
     log_warn(f"received signal {signum}; stopping after the active probe")
 
 
@@ -1045,6 +1352,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    global ACTIVE_DASHBOARD
     args = build_parser().parse_args()
     configure_terminal(args)
     args.outdir = args.outdir.expanduser().resolve()
@@ -1099,28 +1407,42 @@ def main() -> int:
     log_info(f"calibration iterations: {args.calibration_n}")
     log_info(f"measurement iterations:  {args.measurement_n}")
     log_info(f"measurement workload:    dd if=/dev/zero of=/dev/null bs=4096 count={args.dd_count}")
+    dashboard = LiveDashboard(args)
+    ACTIVE_DASHBOARD = dashboard
 
-    cal_records = run_phase(
-        args,
-        phase="calibration",
-        iterations=args.calibration_n,
-        workload=[args.true_cmd],
-        raw_dir=raw_dir,
-        run_id=run_id,
-        timeout_hint=5.0,
-    )
-    meas_records = run_phase(
-        args,
-        phase="measurement",
-        iterations=args.measurement_n,
-        workload=[args.dd_cmd, "if=/dev/zero", "of=/dev/null", "bs=4096", f"count={args.dd_count}"],
-        raw_dir=raw_dir,
-        run_id=run_id,
-        timeout_hint=90.0,
-    )
-    baseline_abs_offset, baseline_signed_offset = apply_correction(cal_records, meas_records)
-    verdict = verdict_from_stats(cal_records, meas_records, baseline_signed_offset, args)
-    all_records = cal_records + meas_records
+    try:
+        cal_records = run_phase(
+            args,
+            phase="calibration",
+            iterations=args.calibration_n,
+            workload=[args.true_cmd],
+            raw_dir=raw_dir,
+            run_id=run_id,
+            timeout_hint=5.0,
+            dashboard=dashboard,
+        )
+        baseline_abs_offset, baseline_signed_offset = calibration_offsets(cal_records)
+        dashboard.finish_probe(
+            records=cal_records,
+            baseline_signed_offset=baseline_signed_offset,
+        )
+        meas_records = run_phase(
+            args,
+            phase="measurement",
+            iterations=args.measurement_n,
+            workload=[args.dd_cmd, "if=/dev/zero", "of=/dev/null", "bs=4096", f"count={args.dd_count}"],
+            raw_dir=raw_dir,
+            run_id=run_id,
+            timeout_hint=90.0,
+            dashboard=dashboard,
+            baseline_signed_offset=baseline_signed_offset,
+        )
+        baseline_abs_offset, baseline_signed_offset = apply_correction(cal_records, meas_records)
+        verdict = verdict_from_stats(cal_records, meas_records, baseline_signed_offset, args)
+        all_records = cal_records + meas_records
+    finally:
+        dashboard.stop()
+        ACTIVE_DASHBOARD = None
 
     print_results(
         cal_records,
