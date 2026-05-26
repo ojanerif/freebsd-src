@@ -5,6 +5,8 @@
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # Author: Davi Chaves Azevedo
+# Special thanks: ojanerif@amd.com for identifying deterministic
+# sequential-grouping behavior in the PMC skew measurements.
 #
 # Purpose:
 #   Canonical AMD duplicate-core-PMC skew collector for FreeBSD hwpmc(4).
