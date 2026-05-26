@@ -102,7 +102,6 @@ SHUTDOWN_REASON: Optional[str] = None
 TERMINAL = Terminal("pmc-skew")
 COMMAND_RUNNER = CommandRunner(TERMINAL)
 ACTIVE_DASHBOARD: Optional["LiveDashboard"] = None
-SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 
 def log_info(message: str) -> None:
@@ -795,63 +794,42 @@ def fmt_duration(seconds: Optional[float]) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def progress_bar(done: int, total: int, width: int = 30) -> str:
+def progress_bar(done: int, total: int, width: int = 18) -> str:
     if total <= 0:
         return "-" * width
     filled = int(width * min(done, total) / total)
     return "█" * filled + "░" * (width - filled)
 
 
-def sparkline(values: Sequence[float], width: int = 38) -> str:
-    clean = [float(value) for value in values if value is not None and math.isfinite(float(value))]
-    if not clean:
-        return "·" * width
-    clean = clean[-width:]
-    lo = min(clean)
-    hi = max(clean)
-    if hi == lo:
-        return SPARK_CHARS[0] * len(clean)
-    scale = (len(SPARK_CHARS) - 1) / (hi - lo)
-    return "".join(SPARK_CHARS[int((value - lo) * scale)] for value in clean)
-
-
-def skew_meter(value: Optional[float], tolerance: float, width: int = 34) -> str:
-    if value is None or not math.isfinite(float(value)) or tolerance <= 0:
-        return "░" * width
-    scale_max = max(tolerance * 2.0, float(value), 0.000001)
-    filled = min(width - 1, int((float(value) / scale_max) * (width - 1)))
-    marker = min(width - 1, int((tolerance / scale_max) * (width - 1)))
-    cells = ["░"] * width
-    for index in range(filled + 1):
-        cells[index] = "█"
-    cells[marker] = "│"
-    return "".join(cells)
-
-
-def pad_colored(text: str, width: int, *, color: Optional[str] = None) -> str:
-    padded = text[:width].ljust(width)
-    return TERMINAL.colorize(padded, color) if color else padded
-
-
 class LiveDashboard:
-    """Animated ANSI dashboard for PMC progress without command-line spam."""
+    """Single-line PMC progress on stderr plus permanent checkpoint INFO logs.
+
+    Status line is rewritten in place with CR+EL (no alternate screen, no
+    cursor-up math, no flashing).  Permanent checkpoints emit through the
+    normal logger so scroll-back keeps history that survives the run.
+    """
 
     SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    MIN_WIDTH = 100
+    MIN_WIDTH = 80
+    TICK_SECONDS = 0.5
+    TREND_WINDOW = 10
+    WARMUP_VALID = 20
+    TREND_RELATIVE = 0.05
 
     def __init__(self, args: argparse.Namespace) -> None:
-        terminal_width = shutil.get_terminal_size((120, 24)).columns
+        cols = shutil.get_terminal_size((120, 24)).columns
         self.enabled = bool(
             TERMINAL.live_graph_enabled
             and not args.quiet
-            and terminal_width >= self.MIN_WIDTH
+            and cols >= self.MIN_WIDTH
         )
         self.tolerance = float(args.corrected_tol)
+        self.deadline_mono: Optional[float] = getattr(args, "deadline", None)
         self.lock = threading.Lock()
         self.output_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
-        self.screen_active = False
+        self.has_line = False
         self.cursor_hidden = False
         self.phase = "idle"
         self.records: Sequence[Dict[str, Any]] = []
@@ -860,34 +838,31 @@ class LiveDashboard:
         self.baseline_signed_offset: Optional[float] = None
         self.phase_started_mono = time.monotonic()
         self.probe_started_mono: Optional[float] = None
+        self.last_probe_seconds: Optional[float] = None
         self.frame = 0
+        self.last_checkpoint_count = 0
 
-    def enter_screen_locked(self) -> None:
-        if self.enabled and not self.screen_active:
-            sys.stderr.write("\033[?1049h\033[H\033[2J")
-            sys.stderr.flush()
-            self.screen_active = True
+    def _hide_cursor_locked(self) -> None:
+        if self.enabled and not self.cursor_hidden:
+            sys.stderr.write("\033[?25l")
+            self.cursor_hidden = True
 
-    def leave_screen_locked(self) -> None:
-        if self.screen_active:
-            sys.stderr.write("\033[H\033[2J\033[?1049l")
-            sys.stderr.flush()
-            self.screen_active = False
+    def _show_cursor_locked(self) -> None:
+        if self.cursor_hidden:
+            sys.stderr.write("\033[?25h")
+            self.cursor_hidden = False
 
-    def leave_screen(self) -> None:
-        with self.output_lock:
-            self.leave_screen_locked()
-
-    def show_cursor(self) -> None:
-        with self.output_lock:
-            if self.cursor_hidden:
-                sys.stderr.write("\033[?25h")
-                sys.stderr.flush()
-                self.cursor_hidden = False
+    def _clear_line_locked(self) -> None:
+        if self.has_line:
+            sys.stderr.write("\r\033[2K")
+            self.has_line = False
 
     def suspend_for_log(self) -> None:
-        self.leave_screen()
-        self.show_cursor()
+        if not self.enabled:
+            return
+        with self.output_lock:
+            self._clear_line_locked()
+            sys.stderr.flush()
 
     def start_probe(
         self,
@@ -901,14 +876,13 @@ class LiveDashboard:
         if not self.enabled:
             return
         with self.output_lock:
-            self.enter_screen_locked()
-            if not self.cursor_hidden:
-                sys.stderr.write("\033[?25l")
-                sys.stderr.flush()
-                self.cursor_hidden = True
+            self._hide_cursor_locked()
+            sys.stderr.flush()
         with self.lock:
             if self.phase != phase:
                 self.phase_started_mono = time.monotonic()
+                self.last_checkpoint_count = 0
+                self.last_probe_seconds = None
             self.phase = phase
             self.records = records
             self.requested = requested
@@ -917,9 +891,9 @@ class LiveDashboard:
             self.probe_started_mono = time.monotonic()
             if self.thread is None or not self.thread.is_alive():
                 self.stop_event.clear()
-                self.thread = threading.Thread(target=self._animate, daemon=True)
+                self.thread = threading.Thread(target=self._tick, daemon=True)
                 self.thread.start()
-        self.render()
+        self._render()
 
     def finish_probe(
         self,
@@ -929,11 +903,15 @@ class LiveDashboard:
     ) -> None:
         if not self.enabled:
             return
+        now = time.monotonic()
         with self.lock:
             self.records = records
             self.baseline_signed_offset = baseline_signed_offset
+            if self.probe_started_mono is not None:
+                self.last_probe_seconds = now - self.probe_started_mono
             self.probe_started_mono = None
-        self.render()
+        self._maybe_emit_checkpoint()
+        self._render()
 
     def stop(self) -> None:
         if not self.enabled:
@@ -942,92 +920,235 @@ class LiveDashboard:
         if self.thread is not None:
             self.thread.join(timeout=1.0)
             self.thread = None
-        self.leave_screen()
-        self.show_cursor()
+        with self.output_lock:
+            self._clear_line_locked()
+            self._show_cursor_locked()
+            sys.stderr.flush()
 
-    def _animate(self) -> None:
-        while not self.stop_event.wait(0.20):
-            self.render()
+    def _tick(self) -> None:
+        while not self.stop_event.wait(self.TICK_SECONDS):
+            self._render()
 
-    def render(self) -> None:
-        if not self.enabled:
-            return
+    def _trend(self, values: Sequence[float]) -> str:
+        window = self.TREND_WINDOW
+        if len(values) < window * 2:
+            return "→"
+        recent = statistics.median(values[-window:])
+        prior = statistics.median(values[-2 * window:-window])
+        if prior == 0:
+            return "→"
+        delta = (recent - prior) / abs(prior)
+        if delta > self.TREND_RELATIVE:
+            return "↑"
+        if delta < -self.TREND_RELATIVE:
+            return "↓"
+        return "→"
 
+    def _pace(self, p95: Optional[float], valid_n: int) -> Tuple[str, str]:
+        if valid_n < self.WARMUP_VALID or p95 is None or self.tolerance <= 0:
+            return "WARMUP", "dim"
+        if p95 <= self.tolerance:
+            return "PASS", "green"
+        if p95 <= self.tolerance * 2.0:
+            return "MARGIN", "yellow"
+        return "FAIL", "red"
+
+    def _budget_remaining(self) -> Optional[float]:
+        if self.deadline_mono is None:
+            return None
+        return max(0.0, self.deadline_mono - time.monotonic())
+
+    def _snapshot(self) -> Dict[str, Any]:
         with self.lock:
-            phase = self.phase
-            records = list(self.records)
-            requested = self.requested
-            iteration = self.iteration
-            baseline_signed_offset = self.baseline_signed_offset
-            probe_started_mono = self.probe_started_mono
-            phase_started_mono = self.phase_started_mono
-            spinner = self.SPINNER[self.frame % len(self.SPINNER)]
             self.frame += 1
+            snap = {
+                "phase": self.phase,
+                "records": list(self.records),
+                "requested": self.requested,
+                "iteration": self.iteration,
+                "baseline": self.baseline_signed_offset,
+                "probe_started": self.probe_started_mono,
+                "phase_started": self.phase_started_mono,
+                "last_probe": self.last_probe_seconds,
+                "spinner": self.SPINNER[self.frame % len(self.SPINNER)],
+            }
+        return snap
 
-        now = time.monotonic()
-        stats = phase_stats(records)
-        valid = valid_records(records)
-        latest = valid[-1] if valid else (records[-1] if records else {})
-        completed = len(records)
-        pct_done = (completed / requested * 100.0) if requested else 0.0
-        raw_values = [record["permille"] for record in valid if record.get("permille") is not None]
-        corrected_values = [
-            record["corrected_permille"] for record in valid
+    def _phase_tail(
+        self,
+        snap: Dict[str, Any],
+        valid: Sequence[Dict[str, Any]],
+    ) -> Tuple[str, str, str]:
+        if snap["phase"] == "calibration" or snap["baseline"] is None:
+            signed_values = [
+                float(record["signed_delta"]) for record in valid
+                if record.get("signed_delta") is not None
+            ]
+            if signed_values:
+                median = statistics.median(signed_values)
+                stdev = (
+                    statistics.pstdev(signed_values)
+                    if len(signed_values) > 1
+                    else 0.0
+                )
+                if median:
+                    stable = stdev / abs(median) * 100.0
+                    stable_text = f"{stable:5.1f}%"
+                else:
+                    stable_text = "  n/a"
+                tail = (
+                    f"baseline={median:+.0f}c "
+                    f"stdev={stdev:.0f}c "
+                    f"stable={stable_text}"
+                )
+            else:
+                tail = "baseline=forming"
+            return tail, "", "cyan"
+
+        corrected = [
+            float(record["corrected_permille"]) for record in valid
             if record.get("corrected_permille") is not None
         ]
-        signed = stats["signed_delta"]
-        direction = "b>a" if latest.get("b_gt_a") else "a>b" if latest.get("a_gt_b") else "eq"
-        metric_name = "corrected" if corrected_values else "raw"
-        metric_values = corrected_values or raw_values
-        latest_metric = latest.get("corrected_permille") if metric_name == "corrected" else latest.get("permille")
-        raw_stats = numeric_stats(raw_values)
-        metric_stats = numeric_stats(metric_values)
-        phase_elapsed = now - phase_started_mono
-        rate = (completed / phase_elapsed) if phase_elapsed > 0 and completed else 0.0
+        if corrected:
+            p95 = percentile(corrected, 0.95)
+            med = statistics.median(corrected)
+            trend = self._trend(corrected)
+            pace, pace_color = self._pace(p95, len(corrected))
+            tail = (
+                f"p95={p95:.3f}‰/{self.tolerance:.3f}‰ "
+                f"med={med:.3f}‰ trend={trend}"
+            )
+            return tail, f" PACE: {pace}", pace_color
+
+        return "corrected=n/a", "", "dim"
+
+    def _compose(self, snap: Dict[str, Any]) -> Tuple[str, str]:
+        now = time.monotonic()
+        valid = valid_records(snap["records"])
+        completed = len(snap["records"])
+        requested = snap["requested"]
+        pct = (completed / requested * 100.0) if requested else 0.0
+        elapsed = now - snap["phase_started"]
+        rate = (completed / elapsed) if elapsed > 0 and completed else 0.0
         eta = ((requested - completed) / rate) if rate > 0 else None
-        active_elapsed = (now - probe_started_mono) if probe_started_mono is not None else 0.0
-        active_label = f"probe {iteration}/{requested}" if probe_started_mono is not None else "idle"
-        meter_color = "green"
-        if latest_metric is not None and self.tolerance > 0:
-            if float(latest_metric) > self.tolerance * 2.0:
-                meter_color = "red"
-            elif float(latest_metric) > self.tolerance:
-                meter_color = "yellow"
+        budget = self._budget_remaining()
 
-        title = TERMINAL.colorize("PMC skew live", "cyan")
-        phase_name = pad_colored(phase.upper(), 16, color="bold")
-        bar = TERMINAL.colorize(progress_bar(len(records), requested), "green")
-        spin = TERMINAL.colorize(spinner, "cyan")
-        lines = [
-            f"╭─ {title} {spin} ─────────────────────────────────────────────────────────────╮",
-            f"│ phase {phase_name} samples {completed:>4}/{requested:<4} [{bar}] {pct_done:5.1f}% │",
-            f"│ active {active_label:<12} probe {fmt_duration(active_elapsed):>7}  phase {fmt_duration(phase_elapsed):>7}  eta {fmt_duration(eta):>7}  rate {rate:5.2f}/s │",
-            f"│ valid {stats['valid']:>4}/{stats['records']:<4}  dir {direction:<3}  signed {fmt_signed_count(latest.get('signed_delta')):>8} cyc  max {fmt_count(latest.get('max_count')):>8} │",
-            f"│ raw latest {fmt(latest.get('permille'), 6):>10}‰  median {fmt(raw_stats.get('median'), 6):>10}‰  p95 {fmt(raw_stats.get('p95'), 6):>10}‰ │",
-        ]
-        if baseline_signed_offset is None:
-            lines.append(
-                f"│ baseline forming: signed median {fmt(signed.get('median'), 0):>8} cyc  "
-                f"stdev {fmt(signed.get('stdev'), 0):>8} cyc  b>a {fmt(stats['pct_b_gt_a'], 1):>5}% │"
-            )
+        probe_active = snap["probe_started"] is not None
+        if probe_active:
+            probe_age = now - snap["probe_started"]
         else:
-            corr = corrected_stats(records)["corrected_permille"]
-            lines.append(
-                f"│ baseline {baseline_signed_offset:>10.0f} cyc  corrected median {fmt(corr.get('median'), 6):>10}‰  p95 {fmt(corr.get('p95'), 6):>10}‰ │"
-            )
-        lines.extend([
-            f"│ skew meter [{TERMINAL.colorize(skew_meter(latest_metric, self.tolerance), meter_color)}] latest {metric_name:<9} {fmt(latest_metric, 6):>10}‰ │",
-            f"│ {metric_name:<9} spark {sparkline(metric_values):<38}  med {fmt(metric_stats.get('median'), 6):>9}‰ max {fmt(metric_stats.get('max'), 6):>9}‰ │",
-            f"│ legend: meter marker │ is tolerance {self.tolerance:.6f}‰; yellow>tol red>2×tol │",
-            "╰─────────────────────────────────────────────────────────────────────────────╯",
-        ])
+            probe_age = snap["last_probe"]
+        probe_status = "run " if probe_active else "idle"
+        probe_dur = fmt_duration(probe_age) if probe_age is not None else "--:--"
 
+        tag = f"[{snap['phase'].upper()[:4]:<4}]"
+        bar = progress_bar(completed, requested)
+        head = (
+            f"{tag} {completed:>5}/{requested:<5} "
+            f"[{bar}] {pct:5.1f}% "
+            f"elapsed {fmt_duration(elapsed)} "
+            f"eta {fmt_duration(eta)} "
+            f"budget {fmt_duration(budget)}"
+        )
+
+        tail, pace_text, pace_color = self._phase_tail(snap, valid)
+        valid_text = f"valid {len(valid):>3}/{completed:<3}"
+        suffix = f"{valid_text} probe={probe_status} {probe_dur} {snap['spinner']}"
+
+        plain = f"{head} │ {tail}{pace_text} │ {suffix}"
+        ansi = (
+            f"{TERMINAL.colorize(tag, 'bold')} "
+            f"{completed:>5}/{requested:<5} "
+            f"[{TERMINAL.colorize(bar, 'cyan')}] {pct:5.1f}% "
+            f"elapsed {fmt_duration(elapsed)} "
+            f"eta {fmt_duration(eta)} "
+            f"budget {fmt_duration(budget)} "
+            f"│ {tail}"
+            f"{TERMINAL.colorize(pace_text, pace_color) if pace_text else ''}"
+            f" │ {valid_text} probe={probe_status} {probe_dur} "
+            f"{TERMINAL.colorize(snap['spinner'], 'cyan')}"
+        )
+        return plain, ansi
+
+    def _render(self) -> None:
+        if not self.enabled:
+            return
+        snap = self._snapshot()
+        plain, ansi = self._compose(snap)
+        cols = shutil.get_terminal_size((120, 24)).columns
+        if len(plain) >= cols:
+            ansi = plain[: cols - 1]
         with self.output_lock:
-            self.enter_screen_locked()
-            sys.stderr.write("\033[H\033[2J")
-            for line in lines:
-                sys.stderr.write(f"{line}\n")
+            self._hide_cursor_locked()
+            sys.stderr.write("\r\033[2K" + ansi)
             sys.stderr.flush()
+            self.has_line = True
+
+    def _maybe_emit_checkpoint(self) -> None:
+        with self.lock:
+            requested = self.requested
+            phase = self.phase
+            records = list(self.records)
+            baseline = self.baseline_signed_offset
+            completed = len(records)
+            previous = self.last_checkpoint_count
+        if requested <= 0:
+            return
+        interval = max(20, requested // 20)
+        if completed - previous < interval and completed != requested:
+            return
+        with self.lock:
+            self.last_checkpoint_count = completed
+        valid = valid_records(records)
+        if phase == "calibration" or baseline is None:
+            signed_values = [
+                float(record["signed_delta"]) for record in valid
+                if record.get("signed_delta") is not None
+            ]
+            if signed_values:
+                median = statistics.median(signed_values)
+                stdev = (
+                    statistics.pstdev(signed_values)
+                    if len(signed_values) > 1
+                    else 0.0
+                )
+                stable_text = (
+                    f"{stdev / abs(median) * 100.0:.1f}%" if median else "n/a"
+                )
+                message = (
+                    f"CHK cal {completed}/{requested} "
+                    f"valid={len(valid)}/{completed} "
+                    f"baseline={median:+.0f}c stdev={stdev:.0f}c "
+                    f"stable={stable_text}"
+                )
+            else:
+                message = (
+                    f"CHK cal {completed}/{requested} "
+                    f"valid={len(valid)}/{completed} baseline=forming"
+                )
+        else:
+            corrected = [
+                float(record["corrected_permille"]) for record in valid
+                if record.get("corrected_permille") is not None
+            ]
+            if corrected:
+                p95 = percentile(corrected, 0.95)
+                med = statistics.median(corrected)
+                pace, _ = self._pace(p95, len(corrected))
+                message = (
+                    f"CHK meas {completed}/{requested} "
+                    f"valid={len(valid)}/{completed} "
+                    f"p95={p95:.4f}‰ med={med:.4f}‰ pace={pace}"
+                )
+            else:
+                message = (
+                    f"CHK meas {completed}/{requested} "
+                    f"valid={len(valid)}/{completed} corrected=n/a"
+                )
+        with self.output_lock:
+            self._clear_line_locked()
+            sys.stderr.flush()
+        log_info(message)
 
 
 def print_results(
