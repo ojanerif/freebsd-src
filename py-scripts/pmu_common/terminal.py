@@ -16,7 +16,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 
 COLORS = {
@@ -40,6 +40,28 @@ class Terminal:
         self.color_enabled = False
         self.verbose_enabled = False
         self.live_graph_enabled = False
+        self._log_lock = threading.Lock()
+        self._suspend_hook: Optional[Callable[[], None]] = None
+        self._resume_hook: Optional[Callable[[], None]] = None
+
+    def set_dashboard_hooks(
+        self,
+        suspend: Optional[Callable[[], None]],
+        resume: Optional[Callable[[], None]],
+    ) -> None:
+        self._suspend_hook = suspend
+        self._resume_hook = resume
+
+    def has_dashboard(self) -> bool:
+        return self._suspend_hook is not None
+
+    def _emit(self, stream, line: str) -> None:
+        with self._log_lock:
+            if self._suspend_hook is not None:
+                self._suspend_hook()
+            print(line, file=stream, flush=True)
+            if self._resume_hook is not None:
+                self._resume_hook()
 
     def configure(
         self,
@@ -73,20 +95,23 @@ class Terminal:
 
     def info(self, message: str) -> None:
         label = self.colorize("INFO:", "blue")
-        print(f"[{self.prefix}] {label}  {message}", flush=True)
+        self._emit(sys.stdout, f"[{self.prefix}] {label}  {message}")
 
     def warn(self, message: str) -> None:
         label = self.colorize("WARN:", "yellow")
-        print(f"[{self.prefix}] {label}  {message}", file=sys.stderr, flush=True)
+        self._emit(sys.stderr, f"[{self.prefix}] {label}  {message}")
 
     def error(self, message: str) -> None:
         label = self.colorize("ERROR:", "red")
-        print(f"[{self.prefix}] {label} {message}", file=sys.stderr, flush=True)
+        self._emit(sys.stderr, f"[{self.prefix}] {label} {message}")
 
-    def verbose(self, message: str) -> None:
-        if self.verbose_enabled:
-            label = self.colorize("VERBOSE:", "purple")
-            print(f"[{self.prefix}] {label} {message}", flush=True)
+    def verbose(self, message: str, *, noisy: bool = False) -> None:
+        if not self.verbose_enabled:
+            return
+        if noisy and self.has_dashboard():
+            return
+        label = self.colorize("VERBOSE:", "purple")
+        self._emit(sys.stdout, f"[{self.prefix}] {label} {message}")
 
     @staticmethod
     def progress_bar(elapsed: float, timeout: Optional[float], width: int = 28) -> str:
@@ -132,7 +157,7 @@ class Terminal:
         started_mono: float,
         timeout: Optional[float],
     ) -> Tuple[Optional[threading.Event], Optional[threading.Thread]]:
-        if not label or not self.live_graph_enabled:
+        if not label or not self.live_graph_enabled or self.has_dashboard():
             return None, None
 
         stop = threading.Event()

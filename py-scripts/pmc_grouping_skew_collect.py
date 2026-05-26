@@ -841,6 +841,11 @@ class LiveDashboard:
         self.last_probe_seconds: Optional[float] = None
         self.frame = 0
         self.last_checkpoint_count = 0
+        if self.enabled:
+            TERMINAL.set_dashboard_hooks(self.suspend_for_log, self._resume_after_log)
+
+    def _resume_after_log(self) -> None:
+        self._render()
 
     def _hide_cursor_locked(self) -> None:
         if self.enabled and not self.cursor_hidden:
@@ -916,6 +921,7 @@ class LiveDashboard:
     def stop(self) -> None:
         if not self.enabled:
             return
+        TERMINAL.set_dashboard_hooks(None, None)
         self.stop_event.set()
         if self.thread is not None:
             self.thread.join(timeout=1.0)
@@ -1071,7 +1077,7 @@ class LiveDashboard:
         return plain, ansi
 
     def _render(self) -> None:
-        if not self.enabled:
+        if not self.enabled or self.requested == 0:
             return
         snap = self._snapshot()
         plain, ansi = self._compose(snap)
@@ -1145,9 +1151,6 @@ class LiveDashboard:
                     f"CHK meas {completed}/{requested} "
                     f"valid={len(valid)}/{completed} corrected=n/a"
                 )
-        with self.output_lock:
-            self._clear_line_locked()
-            sys.stderr.flush()
         log_info(message)
 
 

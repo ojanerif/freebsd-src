@@ -137,7 +137,7 @@ class CommandRunner:
         progress_stop = None
         progress_thread = None
         try:
-            self.terminal.verbose(f"exec: {result['command_text']}")
+            self.terminal.verbose(f"exec: {result['command_text']}", noisy=True)
             proc = subprocess.Popen(
                 argv_list,
                 cwd=str(cwd) if cwd is not None else None,
