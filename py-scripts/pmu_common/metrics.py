@@ -9,7 +9,7 @@
 # Purpose:
 #   Small statistical and display helpers for PMU skew summaries.
 
-"""PMU skew metric helpers."""
+"""Small numeric helpers for PMU collection summaries."""
 
 from __future__ import annotations
 
@@ -18,6 +18,14 @@ from typing import Optional, Sequence
 
 
 def percentile(values: Sequence[float], pct: float) -> Optional[float]:
+    """Return the interpolated percentile for a numeric sequence.
+
+    ``pct`` is a fraction in the inclusive range [0.0, 1.0].  ``None`` is
+    returned for an empty sequence so callers can distinguish no data from a
+    legitimate zero percentile.
+    """
+    if not math.isfinite(pct) or pct < 0.0 or pct > 1.0:
+        raise ValueError("pct must be in the range [0.0, 1.0]")
     if not values:
         return None
 
@@ -34,17 +42,3 @@ def percentile(values: Sequence[float], pct: float) -> Optional[float]:
         return ordered[int(pos)]
 
     return ordered[low] * (high - pos) + ordered[high] * (pos - low)
-
-
-def permille_to_percent(value: Optional[float]) -> Optional[float]:
-    if value is None:
-        return None
-
-    return value / 10.0
-
-
-def format_skew(value: Optional[float]) -> str:
-    if value is None:
-        return "n/a"
-
-    return f"{permille_to_percent(value):.3f}% ({value:.3f}‰)"

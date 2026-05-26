@@ -66,7 +66,7 @@ class Terminal:
             self.live_graph_enabled = sys.stderr.isatty() and not quiet
 
     def colorize(self, text: str, color: str) -> str:
-        if not self.color_enabled:
+        if not self.color_enabled or color not in COLORS:
             return text
 
         return f"{COLORS[color]}{text}{COLORS['reset']}"
@@ -154,4 +154,4 @@ class Terminal:
             stop.set()
 
         if thread is not None:
-            thread.join()
+            thread.join(timeout=1.0)

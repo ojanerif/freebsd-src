@@ -71,6 +71,7 @@ class SudoConfig:
     non_interactive: bool = True
 
     def apply(self, argv: Sequence[str]) -> list[str]:
+        """Return argv with sudo prepended when requested and not already root."""
         if not self.use_sudo or is_root():
             return [str(arg) for arg in argv]
 
@@ -99,6 +100,7 @@ class CommandRunner:
         timeout_seconds: Optional[float] = None,
         grace_seconds: float = 5,
         progress_label: Optional[str] = None,
+        inherit_stdin: bool = False,
     ) -> Dict[str, Any]:
         argv_list = [str(arg) for arg in argv]
         started_mono = time.monotonic()
@@ -120,6 +122,8 @@ class CommandRunner:
         }
 
         timeout_seconds = finite_timeout(timeout_seconds)
+        grace_seconds = finite_timeout(grace_seconds) or 0.0
+        result["timeout_seconds"] = timeout_seconds
 
         if dry_run:
             self.terminal.info(f"dry-run: {result['command_text']}")
@@ -138,7 +142,10 @@ class CommandRunner:
                 argv_list,
                 cwd=str(cwd) if cwd is not None else None,
                 env=dict(env) if env is not None else None,
-                text=True,
+                close_fds=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=None if inherit_stdin else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
@@ -217,7 +224,13 @@ def simple_command_value(
     sudo: bool = False,
     sudo_cmd: str = "sudo",
     sudo_non_interactive: bool = True,
+    timeout_seconds: Optional[float] = 10.0,
 ) -> str:
+    """Run a small command and return stripped stdout, or an empty string.
+
+    This helper is intentionally conservative: no shell, bounded by default,
+    stderr discarded, and failures collapsed to "" for sysctl-style probes.
+    """
     command = SudoConfig(
         use_sudo=sudo,
         sudo_cmd=sudo_cmd,
@@ -226,12 +239,15 @@ def simple_command_value(
     try:
         completed = subprocess.run(
             command,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
             check=False,
+            timeout=finite_timeout(timeout_seconds),
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return ""
 
     if completed.returncode != 0:

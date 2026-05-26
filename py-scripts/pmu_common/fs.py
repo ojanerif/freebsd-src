@@ -19,7 +19,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, TextIO
 
 
 def utc_now() -> str:
@@ -47,19 +47,39 @@ def fsync_directory(path: Path) -> None:
 
 def atomic_write_text(path: Path, data: str) -> None:
     """Atomically write text with file fsync and parent-directory fsync."""
+    atomic_write_file(path, lambda fp: fp.write(data))
+
+
+def atomic_write_file(path: Path, writer: Callable[[TextIO], object], suffix: str = "tmp") -> None:
+    """Atomically write a text file through a same-directory temporary file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = unique_tmp_path(path)
+    tmp = unique_tmp_path(path, suffix)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = None
     try:
-        with tmp.open("w", encoding="utf-8") as fp:
-            fp.write(data)
+        fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fd = None
+            writer(fp)
             fp.flush()
             os.fsync(fp.fileno())
         tmp.replace(path)
         fsync_directory(path.parent)
     except BaseException:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
         with contextlib.suppress(OSError):
             tmp.unlink()
         raise
+
+
+def unlink_suppress(path: Path) -> None:
+    """Remove a path if present, ignoring ordinary unlink failures."""
+    with contextlib.suppress(OSError):
+        path.unlink()
 
 
 def sha256_file(path: Optional[Path]) -> Optional[str]:
@@ -73,13 +93,6 @@ def sha256_file(path: Optional[Path]) -> Optional[str]:
             digest.update(chunk)
 
     return digest.hexdigest()
-
-
-def tail_text(text: str, limit: int = 4096) -> str:
-    if len(text) <= limit:
-        return text
-
-    return text[-limit:]
 
 
 def unique_tmp_path(path: Path, suffix: str = "tmp") -> Path:

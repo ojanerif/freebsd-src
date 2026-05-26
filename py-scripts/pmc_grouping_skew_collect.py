@@ -7,27 +7,45 @@
 # Author: Davi Chaves Azevedo
 #
 # Purpose:
-#   Collect repeated FreeBSD hwpmc(4) / pmcstat(8) AMD core PMC grouping
-#   skew measurements.  The collector runs the opt-in Kyua tolerance check and
-#   direct pmcstat process-counting probes, then records JSON and CSV data for
-#   variance, acceptance-rate, and terminal graph analysis.
+#   Canonical AMD duplicate-core-PMC skew collector for FreeBSD hwpmc(4).
+#
+#   The collector measures two process-scope pmcstat(8) rows programmed for the
+#   same AMD Zen core event, FreeBSD event name `ls_not_halted_cyc` (silicon:
+#   PMCx076, core cycles not in halt).  It first calibrates the deterministic
+#   signed offset introduced by sequential pmcstat/libpmc/hwpmc row handling,
+#   then subtracts that offset from a CPU-bound measurement workload.
+#
+#   This is intentionally the only pmc_grouping_skew_collect.py implementation:
+#   historical v1/v2/v3/v4 collectors were investigation scaffolding.  This file
+#   is the precise validation path.
+
+"""Collect calibrated FreeBSD AMD PMC grouping skew data.
+
+Silicon: AMD Zen PMCx076 counts core cycles not in halt.
+FreeBSD: pmcstat exposes that event as ``ls_not_halted_cyc``.
+Tooling: ``pmcstat -C -q -p EVENT -p EVENT -- workload`` starts two process
+counting rows sequentially, so raw duplicate counts include a fixed signed
+measurement-path offset.  The corrected metric below removes that offset:
+
+    corrected_delta = abs(measured_signed_delta - baseline_signed_offset)
+    corrected_permille = corrected_delta / max(last_a, last_b) * 1000
+
+No shell strings are executed; every command is argv-based.  Hardware-sensitive
+probes run serially by design.
+"""
 
 from __future__ import annotations
 
 import argparse
-import copy
 import csv
 import json
 import math
-import os
 import platform
-import queue
 import re
 import signal
-import statistics
 import shutil
-import sys
-import threading
+import shlex
+import statistics
 import time
 import uuid
 from pathlib import Path
@@ -44,56 +62,96 @@ from pmu_common.command import (
     simple_command_value,
 )
 from pmu_common.fs import (
+    atomic_write_file,
     atomic_write_text,
     fsync_directory,
     read_text_file,
     sha256_file,
-    tail_text,
+    unlink_suppress,
     unique_tmp_path,
     utc_now,
 )
-from pmu_common.metrics import format_skew, percentile, permille_to_percent
+from pmu_common.metrics import percentile
 from pmu_common.terminal import Terminal
 
 
-DEFAULT_TOLERANCE_PERMILLE = 100
-DEFAULT_SLEEP_SECONDS = 5
-DEFAULT_MINUTES = 10.0
-DEFAULT_KYUA_TIMEOUT_SECONDS = 120
-DEFAULT_KYUA_MIN_SECONDS = 15
-DEFAULT_COMMAND_GRACE_SECONDS = 5
-DEFAULT_MIN_CYCLE_COUNT = 1
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 PRODUCER = "pmc_grouping_skew_collect.py"
-KYUA_TEST_NAME = "pmcstat_grouping_test:repeated_process_cycles_have_bounded_skew"
+EVENT = "ls_not_halted_cyc"
+SILICON_EVENT = "PMCx076"
 
-PMSTAT_DUPLICATE_EVENT = "ls_not_halted_cyc"
-PMSTAT_INSTRUCTION_EVENT = "ex_ret_instr"
-PMSTAT_CACHE_EVENT = "l2_pf_miss_l2_l3.all"
-PMSTAT_CACHE_EVENT_CANDIDATES = (
-    "l2_pf_miss_l2_l3.all",
-    "l2_pf_miss_l2_l3",
-    "l2_pf_miss_l2_l3.l2_hwpf",
-)
-
-SKEW_RE = re.compile(
-    r"delta=(?P<delta>[0-9]+(?:\.[0-9]+)?)\s+"
-    r"max=(?P<max>[0-9]+(?:\.[0-9]+)?)\s+"
-    r"permille=(?P<permille>[0-9]+(?:\.[0-9]+)?)"
-)
+DEFAULT_CALIBRATION_ITERATIONS = 50
+DEFAULT_MEASUREMENT_ITERATIONS = 50
+DEFAULT_DD_COUNT = 500_000
+DEFAULT_MIN_VALID_SAMPLES = 5
+DEFAULT_MIN_MEASUREMENT_CYCLES = 1_000_000
+DEFAULT_MINUTES = 30.0
+DEFAULT_CORRECTED_TOL_PERMILLE = 1.0
+DEFAULT_VERDICT_PERCENTILE = 0.95
+DEFAULT_OFFSET_STABILITY_WARN_PCT = 30.0
+DEFAULT_PREFLIGHT_TIMEOUT = 30
+DEFAULT_COMMAND_TIMEOUT_OVERHEAD = 30
+DEFAULT_COMMAND_GRACE_SECONDS = 10
 
 STOP_REQUESTED = False
 SHUTDOWN_REASON: Optional[str] = None
-TERMINAL = Terminal("pmc-grouping-skew")
+TERMINAL = Terminal("pmc-skew")
 COMMAND_RUNNER = CommandRunner(TERMINAL)
 
 
-# ---------------------------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------------------------
+def log_info(message: str) -> None:
+    TERMINAL.info(message)
 
-def colorize(text: str, color: str) -> str:
-    return TERMINAL.colorize(text, color)
+
+def log_warn(message: str) -> None:
+    TERMINAL.warn(message)
+
+
+def log_error(message: str) -> None:
+    TERMINAL.error(message)
+
+
+def log_verbose(message: str) -> None:
+    TERMINAL.verbose(message)
+
+
+def die(message: str, exit_code: int = 1) -> None:
+    log_error(message)
+    raise SystemExit(exit_code)
+
+
+def parse_positive_int(value: str, name: str) -> int:
+    try:
+        number = int(value, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{name} must be an integer") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"{name} must be positive")
+    return number
+
+
+def parse_nonnegative_float(value: str, name: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{name} must be a number") from exc
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError(f"{name} must be non-negative")
+    return number
+
+
+def parse_positive_float(value: str, name: str) -> float:
+    number = parse_nonnegative_float(value, name)
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"{name} must be positive")
+    return number
+
+
+def parse_fraction(value: str, name: str) -> float:
+    number = parse_positive_float(value, name)
+    if number > 1.0:
+        raise argparse.ArgumentTypeError(f"{name} must be in the range (0, 1]")
+    return number
 
 
 def configure_terminal(args: argparse.Namespace) -> None:
@@ -105,1733 +163,987 @@ def configure_terminal(args: argparse.Namespace) -> None:
     )
 
 
-def log_info(message: str) -> None:
-    TERMINAL.info(message)
-
-
-def log_warn(message: str) -> None:
-    TERMINAL.warn(message)
-
-
-def log_err(message: str) -> None:
-    TERMINAL.error(message)
-
-
-def log_verbose(message: str) -> None:
-    TERMINAL.verbose(message)
-
-
-def die(message: str, exit_code: int = 1) -> None:
-    log_err(message)
-    raise SystemExit(exit_code)
-
-
-def parse_positive_int(value: str, name: str) -> int:
-    try:
-        number = int(value, 10)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"{name} must be an integer") from exc
-
-    if number <= 0:
-        raise argparse.ArgumentTypeError(f"{name} must be positive")
-
-    return number
-
-
-def parse_positive_float(value: str, name: str) -> float:
-    try:
-        number = float(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"{name} must be a number") from exc
-
-    if not math.isfinite(number) or number <= 0:
-        raise argparse.ArgumentTypeError(f"{name} must be positive")
-
-    return number
-
-
-# ---------------------------------------------------------------------------
-# Command execution and platform probing
-# ---------------------------------------------------------------------------
-
-def run_command(
-    argv: Sequence[str],
-    *,
-    cwd: Optional[Path] = None,
-    env: Optional[Dict[str, str]] = None,
-    dry_run: bool = False,
-    timeout_seconds: Optional[float] = None,
-    grace_seconds: float = DEFAULT_COMMAND_GRACE_SECONDS,
-    progress_label: Optional[str] = None,
-) -> Dict[str, Any]:
-    return COMMAND_RUNNER.run(
-        argv,
-        cwd=cwd,
-        env=env,
-        dry_run=dry_run,
-        timeout_seconds=timeout_seconds,
-        grace_seconds=grace_seconds,
-        progress_label=progress_label,
-    )
-
-
-def command_with_sudo(
-    argv: Sequence[str],
-    use_sudo: bool,
-    sudo_cmd: str,
-    sudo_non_interactive: bool = True,
-) -> List[str]:
-    return SudoConfig(
-        use_sudo=use_sudo,
-        sudo_cmd=sudo_cmd,
-        non_interactive=sudo_non_interactive,
-    ).apply(argv)
-
-
 def sysctl_value(name: str) -> str:
     return simple_command_value(["sysctl", "-n", name])
 
 
-def check_tool(name: str, *, required: bool = True) -> Optional[str]:
+def check_tool(name: str) -> Optional[str]:
     try:
-        return common_check_tool(name, required=required)
+        return common_check_tool(name, required=True)
     except FileNotFoundError:
         die(f"required tool not found in PATH: {name}")
 
 
+def resolve_tool_paths(args: argparse.Namespace) -> None:
+    """Resolve command paths once so privileged execution is PATH-stable."""
+    if args.dry_run:
+        paths = {
+            "pmcstat": "pmcstat",
+            "kldstat": "kldstat",
+            "kldload": "kldload",
+            "true": "true",
+            "dd": "dd",
+        }
+    else:
+        required = ["pmcstat", "true", "dd"]
+        if platform.system() == "FreeBSD" and not args.no_hwpmc_load:
+            required.extend(["kldstat", "kldload"])
+        paths = {name: check_tool(name) or name for name in required}
+        paths.setdefault("kldstat", "kldstat")
+        paths.setdefault("kldload", "kldload")
+
+    args.tool_paths = paths
+    args.pmcstat_cmd = paths["pmcstat"]
+    args.kldstat_cmd = paths["kldstat"]
+    args.kldload_cmd = paths["kldload"]
+    args.true_cmd = paths["true"]
+    args.dd_cmd = paths["dd"]
+
+
+def command_with_sudo(argv: Sequence[str], args: argparse.Namespace) -> List[str]:
+    return SudoConfig(
+        use_sudo=args.use_sudo,
+        sudo_cmd=args.sudo_cmd,
+        non_interactive=args.sudo_non_interactive,
+    ).apply(argv)
+
+
+def run_command(
+    argv: Sequence[str],
+    args: argparse.Namespace,
+    *,
+    timeout_seconds: Optional[float] = None,
+    progress_label: Optional[str] = None,
+    dry_run: Optional[bool] = None,
+) -> Dict[str, Any]:
+    return COMMAND_RUNNER.run(
+        command_with_sudo(argv, args),
+        dry_run=args.dry_run if dry_run is None else dry_run,
+        timeout_seconds=timeout_seconds,
+        grace_seconds=args.command_grace_seconds,
+        progress_label=progress_label,
+    )
+
+
+def enough_time(args: argparse.Namespace, needed_seconds: float) -> bool:
+    if args.dry_run:
+        return True
+    remaining = remaining_seconds(args.deadline)
+    return remaining is None or remaining > max(1.0, needed_seconds)
+
+
 def ensure_hwpmc_loaded(args: argparse.Namespace) -> Dict[str, Any]:
-    status = {
+    status: Dict[str, Any] = {
         "checked": False,
         "was_loaded": False,
         "load_attempted": False,
         "loaded_by_collector": False,
         "error": None,
     }
+
     if args.dry_run or args.no_hwpmc_load:
         return status
-
     if platform.system() != "FreeBSD":
         status["error"] = "not FreeBSD"
         return status
 
     status["checked"] = True
-
-    loaded = run_command(
-        ["kldstat", "-n", "hwpmc"],
+    loaded = COMMAND_RUNNER.run(
+        [args.kldstat_cmd, "-n", "hwpmc"],
         timeout_seconds=args.preflight_timeout,
         grace_seconds=args.command_grace_seconds,
     )
-    if loaded["returncode"] == 0:
+    if loaded.get("returncode") == 0:
         status["was_loaded"] = True
         return status
 
     status["load_attempted"] = True
     load = run_command(
-        command_with_sudo(
-            ["kldload", "hwpmc"],
-            args.use_sudo,
-            args.sudo_cmd,
-            args.sudo_non_interactive,
-        ),
+        [args.kldload_cmd, "hwpmc"],
+        args,
         timeout_seconds=args.preflight_timeout,
-        grace_seconds=args.command_grace_seconds,
     )
-    if load["returncode"] == 0:
+    if load.get("returncode") == 0:
         status["loaded_by_collector"] = True
     else:
-        status["error"] = load.get("stderr", "kldload hwpmc failed").strip()
-
+        status["error"] = (load.get("stderr") or "kldload hwpmc failed").strip()
     return status
 
 
 def collect_platform_info(args: argparse.Namespace) -> Dict[str, Any]:
-    cpuid = sysctl_value("kern.hwpmc.cpuid")
-    parsed_cpuid = parse_hwpmc_cpuid(cpuid) if cpuid else parse_hwpmc_cpuid("")
-    info = {
+    cpuid_raw = "" if args.dry_run else sysctl_value("kern.hwpmc.cpuid")
+    parsed_cpuid = parse_hwpmc_cpuid(cpuid_raw) if cpuid_raw else parse_hwpmc_cpuid("")
+    return {
         "collected_at": utc_now(),
         "system": platform.system(),
         "release": platform.release(),
         "machine": platform.machine(),
         "uname": " ".join(platform.uname()),
-        "hw_model": sysctl_value("hw.model"),
-        "hw_ncpu": sysctl_value("hw.ncpu"),
-        "hw_cpu_vendor": sysctl_value("hw.cpu_vendor"),
-        "kern_hwpmc_cpuid": cpuid,
+        "hostname": platform.node(),
+        "hw_model": "" if args.dry_run else sysctl_value("hw.model"),
+        "hw_ncpu": "" if args.dry_run else sysctl_value("hw.ncpu"),
+        "hw_cpu_vendor": "" if args.dry_run else sysctl_value("hw.cpu_vendor"),
+        "kern_hwpmc_cpuid": cpuid_raw,
         "parsed_cpuid": parsed_cpuid,
-        "pmcstat_path": shutil.which("pmcstat"),
-        "kyua_path": shutil.which("kyua"),
+        "tool_paths": getattr(args, "tool_paths", {}),
+        "pmcstat_path": getattr(args, "pmcstat_cmd", None) or shutil.which("pmcstat"),
     }
-    return info
 
 
 def validate_platform(info: Dict[str, Any], args: argparse.Namespace) -> None:
     if args.dry_run:
         return
 
-    if info["system"] != "FreeBSD" and not args.allow_non_freebsd:
-        die("this collector must run on FreeBSD; use --allow-non-freebsd only for dry inspection")
+    if info.get("system") != "FreeBSD" and not args.allow_non_freebsd:
+        die("this collector must run on FreeBSD")
 
-    cpuid = info["parsed_cpuid"]
+    cpuid = info.get("parsed_cpuid", {})
     if cpuid.get("vendor") != "AuthenticAMD" and not args.allow_non_amd:
         die("AMD core PMC collection requires AuthenticAMD CPU and kern.hwpmc.cpuid")
 
-    generation = cpuid.get("generation", "unknown")
-    if generation in ("unknown", "unknown AMD", "future AMD") and not args.allow_unknown_generation:
+    generation = str(cpuid.get("generation", "unknown"))
+    if (
+        (generation.startswith("unknown") or generation.startswith("future"))
+        and not args.allow_unknown_generation
+        and not args.allow_non_amd
+    ):
         die(
-            "unknown AMD generation; verify CPUID family/model/stepping and PPR, "
-            "or pass --allow-unknown-generation after confirming event semantics"
+            "unknown AMD family/model; verify the processor PPR and pass "
+            "--allow-unknown-generation only after confirming event semantics"
         )
-
-
-def resolve_kyua_dir(args: argparse.Namespace, repo_root: Path) -> Path:
-    if args.kyua_dir is not None:
-        return args.kyua_dir
-
-    installed = Path("/usr/tests/sys/amd/pmc")
-    if (installed / "Kyuafile").exists():
-        return installed
-
-    source = repo_root / "tests" / "sys" / "amd" / "pmc"
-    return source
 
 
 def collect_event_list(args: argparse.Namespace) -> List[str]:
     if args.dry_run:
         return []
-
     result = run_command(
-        command_with_sudo(
-            ["pmcstat", "-L"],
-            args.use_sudo,
-            args.sudo_cmd,
-            args.sudo_non_interactive,
-        ),
+        [args.pmcstat_cmd, "-L"],
+        args,
         timeout_seconds=args.preflight_timeout,
-        grace_seconds=args.command_grace_seconds,
     )
     if result.get("returncode") != 0:
-        args.event_list_error = result
+        log_warn(f"pmcstat -L failed: {(result.get('stderr') or '').strip()}")
         return []
-
-    output = result.get("stdout", "")
-    events = []
-
-    for line in output.splitlines():
-        fields = line.split()
-
-        if fields:
-            events.append(fields[0])
-
-    return events
+    return [line.split()[0] for line in result.get("stdout", "").splitlines() if line.split()]
 
 
-def check_event_availability(
-    events: Iterable[str],
-    required: Iterable[str],
-) -> Dict[str, bool]:
+def check_event_availability(events: Iterable[str], required: Iterable[str]) -> Dict[str, bool]:
     available = set(events)
     return {event: event in available for event in required}
 
 
-def choose_cache_event(events: Iterable[str], requested: str) -> Optional[str]:
-    available = set(events)
-
-    if requested in available:
-        return requested
-
-    for event in PMSTAT_CACHE_EVENT_CANDIDATES:
-        if event in available:
-            return event
-
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Output parsing and summary
-# ---------------------------------------------------------------------------
-
-def parse_skew_from_text(text: str) -> Dict[str, Any]:
-    matches = list(SKEW_RE.finditer(text))
-
-    if not matches:
-        return {}
-
-    match = matches[-1]
-    return {
-        "delta": float(match.group("delta")),
-        "max": float(match.group("max")),
-        "permille": float(match.group("permille")),
-    }
-
-
-def header_event_count(header: str, event: str) -> int:
-    count = 0
-
-    for token in header.split():
-        if token == event or token.endswith("/" + event):
-            count += 1
-
-    return count
-
-
-def find_matching_header(
-    headers: Sequence[str],
-    event_a: str,
-    event_b: str,
-) -> Optional[str]:
-    for header in headers:
-        if event_a in header and event_b in header:
-            return header
-
-    return None
-
-
-def parse_pmcstat_output(
-    text: str,
-    event_a: str,
-    event_b: str,
-    min_cycle_count: int = DEFAULT_MIN_CYCLE_COUNT,
-) -> Dict[str, Any]:
-    headers = [line for line in text.splitlines() if line.startswith("#")]
-    rows: List[Tuple[int, int]] = []
+def parse_pmcstat_two_counter(text: str) -> Optional[Dict[str, Any]]:
+    last_a: Optional[int] = None
+    last_b: Optional[int] = None
+    rows = 0
 
     for line in text.splitlines():
         if line.startswith("#"):
             continue
-
         fields = line.split()
-
-        if len(fields) < 2:
-            continue
-
-        if fields[0].isdigit() and fields[1].isdigit():
-            rows.append((int(fields[0]), int(fields[1])))
-
-    header = find_matching_header(headers, event_a, event_b)
-    event_a_count = header_event_count(header, event_a) if header is not None else 0
-    event_b_count = header_event_count(header, event_b) if header is not None else 0
-    if event_a == event_b:
-        header_valid = event_a_count >= 2
-    else:
-        header_valid = event_a_count >= 1 and event_b_count >= 1
-
-    parsed: Dict[str, Any] = {
-        "headers": headers,
-        "matching_header": header,
-        "event_a_count": event_a_count,
-        "event_b_count": event_b_count,
-        "header_valid": header_valid,
-        "rows": rows,
-        "row_count": len(rows),
-        "positive_a": sum(1 for a, _ in rows if a > 0),
-        "positive_b": sum(1 for _, b in rows if b > 0),
-        "positive_pairs": sum(1 for a, b in rows if a > 0 and b > 0),
-        "event_a": event_a,
-        "event_b": event_b,
-        "last_a": None,
-        "last_b": None,
-        "total_a": None,
-        "total_b": None,
-        "measurement_valid": False,
-    }
-
-    if rows:
-        last_a, last_b = rows[-1]
-        total_a = sum(a for a, _ in rows)
-        total_b = sum(b for _, b in rows)
-        parsed["last_a"] = last_a
-        parsed["last_b"] = last_b
-        parsed["total_a"] = total_a
-        parsed["total_b"] = total_b
-        minimum = min_cycle_count if event_a == event_b == PMSTAT_DUPLICATE_EVENT else 1
-        parsed["measurement_valid"] = bool(
-            header_valid and last_a >= minimum and last_b >= minimum
-        )
-
-        if event_a == event_b and max(last_a, last_b) > 0:
-            delta = abs(last_a - last_b)
-            maximum = max(last_a, last_b)
-            total_delta = abs(total_a - total_b)
-            total_maximum = max(total_a, total_b)
-            parsed["delta"] = delta
-            parsed["max"] = maximum
-            parsed["permille"] = (delta * 1000.0) / maximum
-            parsed["total_delta"] = total_delta
-            parsed["total_max"] = total_maximum
-            parsed["total_permille"] = (
-                (total_delta * 1000.0) / total_maximum if total_maximum > 0 else None
-            )
-        elif event_a == PMSTAT_DUPLICATE_EVENT and event_b == PMSTAT_INSTRUCTION_EVENT:
-            parsed["instructions_per_cycle"] = (last_b / last_a) if last_a > 0 else None
-            parsed["total_instructions_per_cycle"] = (
-                (total_b / total_a) if total_a > 0 else None
-            )
-        elif event_b == PMSTAT_DUPLICATE_EVENT:
-            parsed["a_per_million_cycles"] = (last_a * 1000000.0 / last_b) if last_b > 0 else None
-            parsed["total_a_per_million_cycles"] = (
-                (total_a * 1000000.0 / total_b) if total_b > 0 else None
-            )
-
-    return parsed
-
-
-def summarize_skew(
-    records: Sequence[Dict[str, Any]],
-    case: str,
-) -> Dict[str, Any]:
-    selected = [record for record in records if record.get("case") == case]
-    permilles = [
-        float(record["permille"])
-        for record in selected
-        if record.get("permille") is not None
-    ]
-    accepted = [record for record in selected if record.get("accepted") is True]
-    rejected = [record for record in selected if record.get("accepted") is False]
-    verdicts = len(accepted) + len(rejected)
-    status_counts = summarize_status_counts(selected)
-    tolerance_failures = [
-        record
-        for record in rejected
-        if record.get("tolerance_pass") is False and record.get("permille") is not None
-    ]
-    command_failures = [
-        record
-        for record in selected
-        if record.get("command_outcome") in ("timeout", "failed", "exec_error")
-        and record.get("status") != "interrupted"
-    ]
-    invalid_outputs = [record for record in selected if record.get("status") == "invalid_output"]
-    skipped = [record for record in selected if str(record.get("status", "")).startswith("skip_")]
-    interrupted = [record for record in selected if record.get("status") == "interrupted"]
-    dry_runs = [record for record in selected if record.get("status") == "dry_run"]
-
-    mean_permille = statistics.fmean(permilles) if permilles else None
-    stdev_permille = statistics.pstdev(permilles) if len(permilles) > 1 else 0.0
-    p50_permille = percentile(permilles, 0.50)
-    p90_permille = percentile(permilles, 0.90)
-    p95_permille = percentile(permilles, 0.95)
-    min_permille = min(permilles) if permilles else None
-    max_permille = max(permilles) if permilles else None
-
-    summary: Dict[str, Any] = {
-        "case": case,
-        "samples": len(selected),
-        "samples_with_permille": len(permilles),
-        "accepted": len(accepted),
-        "rejected": len(rejected),
-        "tolerance_failures": len(tolerance_failures),
-        "command_failures": len(command_failures),
-        "invalid_outputs": len(invalid_outputs),
-        "skipped": len(skipped),
-        "interrupted": len(interrupted),
-        "dry_runs": len(dry_runs),
-        "status_counts": status_counts,
-        "acceptance_rate": (len(accepted) / verdicts) if verdicts else None,
-        "min_permille": min_permille,
-        "max_permille": max_permille,
-        "mean_permille": mean_permille,
-        "variance_permille": (
-            statistics.pvariance(permilles) if len(permilles) > 1 else 0.0
-        ),
-        "stdev_permille": stdev_permille,
-        "p50_permille": p50_permille,
-        "p90_permille": p90_permille,
-        "p95_permille": p95_permille,
-        "min_percent": permille_to_percent(min_permille),
-        "max_percent": permille_to_percent(max_permille),
-        "mean_percent": permille_to_percent(mean_permille),
-        "stdev_percent": permille_to_percent(stdev_permille),
-        "p50_percent": permille_to_percent(p50_permille),
-        "p90_percent": permille_to_percent(p90_permille),
-        "p95_percent": permille_to_percent(p95_permille),
-    }
-    return summary
-
-
-def summarize_status_counts(records: Sequence[Dict[str, Any]]) -> Dict[str, int]:
-    summary: Dict[str, int] = {}
-
-    for record in records:
-        status = str(record.get("status", "unknown"))
-        summary[status] = summary.get(status, 0) + 1
-
-    return summary
-
-
-def numeric_record_values(records: Sequence[Dict[str, Any]], key: str) -> List[float]:
-    values: List[float] = []
-
-    for record in records:
-        value = record.get(key)
-        if value is None:
-            continue
-
-        number = float(value)
-        if math.isfinite(number):
-            values.append(number)
-
-    return values
-
-
-def summarize_metric_values(values: Sequence[float]) -> Dict[str, Optional[float]]:
-    return {
-        "samples": len(values),
-        "min": min(values) if values else None,
-        "max": max(values) if values else None,
-        "mean": statistics.fmean(values) if values else None,
-        "p50": percentile(values, 0.50),
-        "p90": percentile(values, 0.90),
-        "p95": percentile(values, 0.95),
-    }
-
-
-def comparison_metric_for_case(case: str) -> Tuple[Optional[str], Optional[str]]:
-    if case == "mixed_cycles_instructions":
-        return "instructions_per_cycle", "IPC"
-
-    if case == "mixed_cache_cycles":
-        return "a_per_million_cycles", "per_Mcycle"
-
-    return None, None
-
-
-def summarize_comparison(
-    records: Sequence[Dict[str, Any]],
-    case: str,
-) -> Dict[str, Any]:
-    selected = [record for record in records if record.get("case") == case]
-    accepted = [record for record in selected if record.get("accepted") is True]
-    rejected = [record for record in selected if record.get("accepted") is False]
-    skipped = [record for record in selected if str(record.get("status", "")).startswith("skip_")]
-    interrupted = [record for record in selected if record.get("status") == "interrupted"]
-    invalid_outputs = [record for record in selected if record.get("status") == "invalid_output"]
-    command_failures = [
-        record
-        for record in selected
-        if record.get("command_outcome") in ("timeout", "failed", "exec_error")
-        and record.get("status") != "interrupted"
-    ]
-    metric_key, metric_label = comparison_metric_for_case(case)
-    values = numeric_record_values(selected, metric_key) if metric_key is not None else []
-    total_values = numeric_record_values(selected, f"total_{metric_key}") if metric_key else []
-    latest = selected[-1] if selected else None
-
-    return {
-        "case": case,
-        "records": len(selected),
-        "accepted": len(accepted),
-        "rejected": len(rejected),
-        "skipped": len(skipped),
-        "interrupted": len(interrupted),
-        "invalid_outputs": len(invalid_outputs),
-        "command_failures": len(command_failures),
-        "status_counts": summarize_status_counts(selected),
-        "metric_key": metric_key,
-        "metric_label": metric_label,
-        "metric": summarize_metric_values(values),
-        "total_metric": summarize_metric_values(total_values),
-        "latest": {
-            "case": case,
-            "event_a": latest.get("event_a"),
-            "event_b": latest.get("event_b"),
-            "row_count": latest.get("row_count"),
-            "last_a": latest.get("last_a"),
-            "last_b": latest.get("last_b"),
-            "total_a": latest.get("total_a"),
-            "total_b": latest.get("total_b"),
-            "metric": latest.get(metric_key) if latest and metric_key else None,
-            "total_metric": latest.get(f"total_{metric_key}") if latest and metric_key else None,
-            metric_key: latest.get(metric_key) if latest and metric_key else None,
-            f"total_{metric_key}": latest.get(f"total_{metric_key}") if latest and metric_key else None,
-        } if latest else None,
-    }
-
-
-def build_summary(state: Dict[str, Any]) -> Dict[str, Any]:
-    records = state.get("records", [])
-    return {
-        "updated_at": utc_now(),
-        "schema_version": SCHEMA_VERSION,
-        "iterations_completed": state.get("iterations_completed", 0),
-        "records": len(records),
-        "skew_cases": {
-            "kyua_debug": summarize_skew(records, "kyua_debug"),
-            "duplicate_cycles": summarize_skew(records, "duplicate_cycles"),
-        },
-        "comparison_cases": {
-            "mixed_cycles_instructions": summarize_comparison(
-                records,
-                "mixed_cycles_instructions",
-            ),
-            "mixed_cache_cycles": summarize_comparison(records, "mixed_cache_cycles"),
-        },
-        "case_counts": summarize_case_counts(records),
-    }
-
-
-def summarize_case_counts(
-    records: Sequence[Dict[str, Any]],
-) -> Dict[str, Dict[str, int]]:
-    summary: Dict[str, Dict[str, int]] = {}
-
-    for record in records:
-        case = str(record.get("case", "unknown"))
-        status = str(record.get("status", "unknown"))
-        case_summary = summary.setdefault(case, {})
-        case_summary[status] = case_summary.get(status, 0) + 1
-
-    return summary
-
-
-# ---------------------------------------------------------------------------
-# JSON / CSV emission
-# ---------------------------------------------------------------------------
-
-CSV_COLUMNS = [
-    "run_id",
-    "iteration",
-    "case",
-    "started_at",
-    "ended_at",
-    "elapsed_seconds",
-    "returncode",
-    "terminated_by_signal",
-    "status",
-    "command_outcome",
-    "measurement_valid",
-    "tolerance_pass",
-    "accepted",
-    "tolerance_permille",
-    "event_a",
-    "event_b",
-    "row_count",
-    "positive_a",
-    "positive_b",
-    "positive_pairs",
-    "last_a",
-    "last_b",
-    "total_a",
-    "total_b",
-    "delta",
-    "max",
-    "permille",
-    "total_delta",
-    "total_max",
-    "total_permille",
-    "instructions_per_cycle",
-    "total_instructions_per_cycle",
-    "a_per_million_cycles",
-    "total_a_per_million_cycles",
-    "output_file",
-    "raw_sha256",
-    "command_text",
-]
-
-
-def record_to_csv_row(record: Dict[str, Any]) -> Dict[str, Any]:
-    return {column: record.get(column, "") for column in CSV_COLUMNS}
-
-
-def write_csv_records(path: Path, records: Sequence[Dict[str, Any]]) -> None:
-    tmp = unique_tmp_path(path)
-
-    try:
-        with tmp.open("w", newline="", encoding="utf-8") as fp:
-            writer = csv.DictWriter(fp, fieldnames=CSV_COLUMNS)
-            writer.writeheader()
-
-            for record in records:
-                writer.writerow(record_to_csv_row(record))
-
-            fp.flush()
-            os.fsync(fp.fileno())
-
-        tmp.replace(path)
-        fsync_directory(path.parent)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-
-        raise
-
-
-def write_state(state: Dict[str, Any], json_path: Path, csv_path: Path) -> None:
-    state["summary"] = build_summary(state)
-    atomic_write_text(json_path, json.dumps(state, indent=2, sort_keys=True) + "\n")
-    write_csv_records(csv_path, state.get("records", []))
-
-
-class CheckpointWriter:
-    def __init__(self, json_path: Path, csv_path: Path, threaded: bool) -> None:
-        self.json_path = json_path
-        self.csv_path = csv_path
-        self.threaded = threaded
-        self._queue: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue(maxsize=2)
-        self._thread: Optional[threading.Thread] = None
-        self._error: Optional[BaseException] = None
-
-    def start(self) -> None:
-        if not self.threaded:
-            return
-
-        self._thread = threading.Thread(
-            target=self._worker,
-            name="pmc-skew-checkpoint-writer",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def write(self, state: Dict[str, Any]) -> None:
-        self.raise_if_failed()
-        snapshot = copy.deepcopy(state)
-
-        if not self.threaded:
-            write_state(snapshot, self.json_path, self.csv_path)
-            return
-
-        while True:
-            try:
-                self._queue.put(snapshot, timeout=0.25)
-                return
-            except queue.Full:
-                self.raise_if_failed()
-
-    def close(self) -> None:
-        if not self.threaded:
-            self.raise_if_failed()
-            return
-
-        while True:
-            try:
-                self._queue.put(None, timeout=0.25)
-                break
-            except queue.Full:
-                self.raise_if_failed()
-
-        if self._thread is not None:
-            self._thread.join()
-        self.raise_if_failed()
-
-    def raise_if_failed(self) -> None:
-        if self._error is not None:
-            raise RuntimeError("checkpoint writer failed") from self._error
-
-    def _worker(self) -> None:
-        latest: Optional[Dict[str, Any]] = None
-        try:
-            while True:
-                item = self._queue.get()
-                if item is None:
-                    if latest is not None:
-                        write_state(latest, self.json_path, self.csv_path)
-
-                    return
-
-                latest = item
-
-                while True:
-                    try:
-                        extra = self._queue.get_nowait()
-                    except queue.Empty:
-                        break
-
-                    if extra is None:
-                        write_state(latest, self.json_path, self.csv_path)
-                        return
-
-                    latest = extra
-
-                write_state(latest, self.json_path, self.csv_path)
-                latest = None
-        except BaseException as exc:
-            self._error = exc
-
-
-# ---------------------------------------------------------------------------
-# Terminal graph output
-# ---------------------------------------------------------------------------
-
-def graph_bar(value: Optional[float], tolerance: int, width: int = 40) -> str:
-    if value is None:
-        return "?" * min(width, 8)
-
-    if tolerance <= 0:
-        tolerance = 1
-
-    ratio = min(value / tolerance, 2.0)
-    fill = int(round((ratio / 2.0) * width))
-    fill = max(0, min(width, fill))
-    chars = ["-"] * width
-    threshold = max(0, min(width - 1, width // 2))
-    chars[threshold] = "|"
-
-    for index in range(fill):
-        chars[index] = "#"
-
-    return "".join(chars)
-
-
-def color_status(status: str) -> str:
-    if status == "PASS":
-        return colorize(status, "green")
-
-    if status == "FAIL":
-        return colorize(status, "red")
-
-    if status in ("SKIP", "STOP"):
-        return colorize(status, "yellow")
-
-    return colorize(status, "cyan")
-
-
-def format_count(value: Any) -> str:
-    if value is None:
-        return "n/a"
-
-    return f"{int(value):,}"
-
-
-def format_ratio(value: Any, precision: int = 3) -> str:
-    if value is None:
-        return "n/a"
-
-    return f"{float(value):.{precision}f}"
-
-
-def record_display_status(record: Dict[str, Any]) -> str:
-    status = str(record.get("status", ""))
-    accepted = record.get("accepted")
-
-    if accepted is True:
-        return "PASS"
-
-    if status.startswith("skip_"):
-        return "SKIP"
-
-    if status == "interrupted":
-        return "STOP"
-
-    if status == "dry_run":
-        return "DRY"
-
-    if accepted is False:
-        return "FAIL"
-
-    return "INFO"
-
-
-def record_comparison_detail(record: Dict[str, Any]) -> str:
-    row_count = record.get("row_count")
-    last_a = record.get("last_a")
-    last_b = record.get("last_b")
+        if len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit():
+            rows += 1
+            last_a, last_b = int(fields[0]), int(fields[1])
 
     if last_a is None or last_b is None:
-        return ""
+        return None
 
-    case = record.get("case")
-    total_a = record.get("total_a")
-    total_b = record.get("total_b")
-    row_text = f"rows={row_count}"
+    max_count = max(last_a, last_b)
+    delta_abs = abs(last_a - last_b)
+    signed_delta = last_b - last_a
+    permille = (delta_abs * 1000.0 / max_count) if max_count > 0 else 0.0
 
-    if case in ("kyua_debug", "duplicate_cycles"):
-        detail = (
-            f"{row_text} last={format_count(last_a)}/{format_count(last_b)} "
-            f"delta={format_count(record.get('delta'))}"
-        )
-        if total_a is not None and total_b is not None and row_count and int(row_count) > 1:
-            detail += (
-                f" total={format_count(total_a)}/{format_count(total_b)} "
-                f"total_skew={format_skew(record.get('total_permille'))}"
-            )
-        return detail
-
-    if case == "mixed_cycles_instructions":
-        detail = (
-            f"{row_text} cycles={format_count(last_a)} "
-            f"instructions={format_count(last_b)} "
-            f"IPC={format_ratio(record.get('instructions_per_cycle'))}"
-        )
-        if total_a is not None and total_b is not None and row_count and int(row_count) > 1:
-            detail += (
-                f" total_cycles={format_count(total_a)} "
-                f"total_instructions={format_count(total_b)} "
-                f"total_IPC={format_ratio(record.get('total_instructions_per_cycle'))}"
-            )
-        return detail
-
-    if case == "mixed_cache_cycles":
-        event_a = record.get("event_a") or "event_a"
-        detail = (
-            f"{row_text} {event_a}={format_count(last_a)} "
-            f"cycles={format_count(last_b)} "
-            f"per_Mcycle={format_ratio(record.get('a_per_million_cycles'))}"
-        )
-        if total_a is not None and total_b is not None and row_count and int(row_count) > 1:
-            detail += (
-                f" total_{event_a}={format_count(total_a)} "
-                f"total_cycles={format_count(total_b)} "
-                f"total_per_Mcycle={format_ratio(record.get('total_a_per_million_cycles'))}"
-            )
-        return detail
-
-    return f"{row_text} last={format_count(last_a)}/{format_count(last_b)}"
+    return {
+        "row_count": rows,
+        "last_a": last_a,
+        "last_b": last_b,
+        "max_count": max_count,
+        "delta_abs": delta_abs,
+        "signed_delta": signed_delta,
+        "permille": permille,
+        "b_gt_a": last_b > last_a,
+        "a_gt_b": last_a > last_b,
+        "equal": last_a == last_b,
+    }
 
 
-def behavior_insight(case: str, data: Dict[str, Any], tolerance: int) -> str:
-    samples_with_permille = int(data.get("samples_with_permille", 0) or 0)
-    command_failures = int(data.get("command_failures", 0) or 0)
-    invalid_outputs = int(data.get("invalid_outputs", 0) or 0)
-    interrupted = int(data.get("interrupted", 0) or 0)
-    skipped = int(data.get("skipped", 0) or 0)
-    tolerance_failures = int(data.get("tolerance_failures", 0) or 0)
-
-    if samples_with_permille == 0:
-        if interrupted:
-            return "run interrupted before a completed skew sample; partial output was checkpointed"
-        if command_failures or invalid_outputs:
-            return "no skew samples decoded; inspect command status and raw output"
-        if skipped:
-            return "no skew samples decoded; deadline guard skipped remaining probes"
-        return "no skew samples decoded; check raw output or run without --dry-run"
-
-    mean = data.get("mean_permille")
-    p95 = data.get("p95_permille")
-    maximum = data.get("max_permille")
-    stdev = data.get("stdev_permille")
-
-    reference = p95 if p95 is not None else maximum if maximum is not None else mean
-    tolerance_ratio = None
-    if reference is not None and tolerance > 0:
-        tolerance_ratio = reference / tolerance
-
-    if tolerance_failures > 0:
-        verdict = "skew exceeded tolerance; independent counter read/start timing is visible"
-    elif command_failures or invalid_outputs:
-        verdict = "completed skew samples are in range, but some probes failed before usable output"
-    elif interrupted:
-        verdict = "completed skew samples are in range before operator interrupt"
-    elif skipped:
-        verdict = "completed skew samples are in range; remaining probes were skipped by deadline guard"
-    elif tolerance_ratio is None:
-        verdict = "skew decoded, but tolerance comparison is unavailable"
-    elif tolerance_ratio < 0.25:
-        verdict = "stable; observed skew is comfortably below tolerance"
-    elif tolerance_ratio < 0.75:
-        verdict = "moderate; skew is inside tolerance but large enough to track across runs"
-    else:
-        verdict = "near limit; still passing, but scheduler/load noise is close to tolerance"
-
-    spread = ""
-    if mean is not None and stdev is not None:
-        if mean == 0:
-            spread = " no measurable spread around a zero mean."
-        elif stdev > mean:
-            spread = " high run-to-run spread; prefer longer sleeps or more iterations."
-        elif stdev > mean * 0.5:
-            spread = " noticeable run-to-run spread; compare p95/max, not only mean."
-        else:
-            spread = " low run-to-run spread."
-
-    if case == "duplicate_cycles":
-        context = (
-            " duplicate ls_not_halted_cyc counters should be close,"
-            " not bit-identical in FreeBSD pmcstat."
-        )
-    elif case == "kyua_debug":
-        context = " Kyua tolerance path reflects the installed pmcstat grouping regression case."
-    else:
-        context = ""
-
-    return f"{verdict}.{spread}{context}"
-
-
-def print_record_line(record: Dict[str, Any], tolerance: int) -> None:
-    case = record.get("case", "unknown")
-    permille = record.get("permille")
-    status = record_display_status(record)
-    detail = record_comparison_detail(record)
-
-    if permille is None:
-        raw_status = str(record.get("status", ""))
-        suffix = f" ({raw_status})" if raw_status and raw_status.lower() != status.lower() else ""
-        if detail:
-            suffix += f" {detail}"
-        log_info(f"iteration {record.get('iteration')} {case}: {color_status(status)}{suffix}")
-        return
-
-    bar = graph_bar(float(permille), tolerance)
-    bar_color = "green" if status == "PASS" else "red" if status == "FAIL" else "cyan"
-
-    log_info(
-        f"iteration {record.get('iteration')} {case}: {color_status(status)} "
-        f"permille={float(permille):.3f} tolerance={tolerance} "
-        f"[{colorize(bar, bar_color)}] {detail}"
+def run_probe(
+    args: argparse.Namespace,
+    *,
+    phase: str,
+    iteration: int,
+    workload: Sequence[str],
+    raw_dir: Path,
+    run_id: str,
+    timeout_hint: float,
+) -> Dict[str, Any]:
+    output_file = raw_dir / f"{run_id}-{phase}-{iteration:04d}.out"
+    tmp_out = output_file if args.dry_run else unique_tmp_path(output_file, "out")
+    command = [
+        args.pmcstat_cmd, "-C", "-q",
+        "-p", EVENT,
+        "-p", EVENT,
+        "-o", str(tmp_out),
+        "--",
+        *workload,
+    ]
+    timeout_seconds = bounded_timeout(
+        args.deadline,
+        timeout_hint + args.command_timeout_overhead,
     )
 
+    result = run_command(
+        command,
+        args,
+        timeout_seconds=timeout_seconds,
+        progress_label=f"{phase} {iteration}/{args.calibration_n if phase == 'calibration' else args.measurement_n}",
+    )
+    returncode = result.get("returncode")
 
-def print_final_summary(state: Dict[str, Any], json_path: Path, csv_path: Path) -> None:
-    summary = state.get("summary", build_summary(state))
-    if not summary:
-        summary = build_summary(state)
-    configuration = state.get("configuration", {})
-    tolerance = int(configuration.get("tolerance_permille", 0) or 0)
-    log_info("=== skew summary ===")
-    if state.get("shutdown_reason"):
-        log_info(f"shutdown: {state['shutdown_reason']}")
-    log_info(f"tolerance: {format_skew(float(tolerance))}")
+    if not args.dry_run and returncode == 0 and tmp_out.exists():
+        tmp_out.replace(output_file)
+        fsync_directory(output_file.parent)
+    elif not args.dry_run:
+        unlink_suppress(tmp_out)
 
-    for case, data in summary.get("skew_cases", {}).items():
-        records = data.get("samples", 0)
-        measurements = data.get("samples_with_permille", 0)
-
-        if records == 0:
-            log_info(f"{case}: no samples")
-            continue
-
-        rate = data.get("acceptance_rate")
-        rate_s = "n/a" if rate is None else f"{rate * 100.0:.2f}%"
-        mean = data.get("mean_permille")
-        p95 = data.get("p95_permille")
-        maximum = data.get("max_permille")
-        log_info(
-            f"{case}: records={records} measurements={measurements} "
-            f"accepted={data.get('accepted')} rejected={data.get('rejected')} "
-            f"skipped={data.get('skipped')} interrupted={data.get('interrupted')} "
-            f"cmdfail={data.get('command_failures')} invalid={data.get('invalid_outputs')} "
-            f"acceptance={rate_s} "
-            f"mean={format_skew(mean)} p95={format_skew(p95)} max={format_skew(maximum)}"
-        )
-        log_info(f"{case} insight: {behavior_insight(case, data, tolerance)}")
-
-    comparison_cases = summary.get("comparison_cases", {})
-    if comparison_cases:
-        log_info("=== direct pmcstat comparisons ===")
-
-    for case, data in comparison_cases.items():
-        records = data.get("records", 0)
-        if records == 0:
-            log_info(f"{case}: no samples")
-            continue
-
-        metric = data.get("metric", {})
-        total_metric = data.get("total_metric", {})
-        latest = data.get("latest") or {}
-        latest_text = record_comparison_detail(latest) if latest else ""
-        latest_suffix = f" latest: {latest_text}" if latest_text else ""
-        label = data.get("metric_label") or "metric"
-        log_info(
-            f"{case}: records={records} accepted={data.get('accepted')} "
-            f"rejected={data.get('rejected')} skipped={data.get('skipped')} "
-            f"cmdfail={data.get('command_failures')} invalid={data.get('invalid_outputs')} "
-            f"{label}_mean={format_ratio(metric.get('mean'))} "
-            f"{label}_p95={format_ratio(metric.get('p95'))} "
-            f"total_{label}_mean={format_ratio(total_metric.get('mean'))}"
-            f"{latest_suffix}"
-        )
-
-    log_info(f"JSON: {json_path}")
-    log_info(f"CSV:  {csv_path}")
-
-
-# ---------------------------------------------------------------------------
-# Measurement cases
-# ---------------------------------------------------------------------------
-
-def flatten_case_record(
-    *,
-    run_id: str,
-    iteration: int,
-    case: str,
-    command_result: Dict[str, Any],
-    tolerance: int,
-    event_a: Optional[str] = None,
-    event_b: Optional[str] = None,
-    output_file: Optional[Path] = None,
-    parsed: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    parsed = parsed or {}
-    rc = command_result.get("returncode")
-    permille = parsed.get("permille")
-    command_ok = rc == 0 and command_result.get("outcome") in ("ok", "dry_run")
-    terminated_by_signal = command_result.get("terminated_by_signal")
-    interrupted = terminated_by_signal in (signal.SIGINT, signal.SIGTERM)
-    measurement_valid = bool(parsed.get("measurement_valid"))
-    tolerance_pass: Optional[bool] = None
-    accepted: Optional[bool]
-    status: str
-
-    if interrupted or (STOP_REQUESTED and not command_ok and not command_result.get("dry_run")):
-        accepted = None
-        status = "interrupted"
-    elif command_result.get("dry_run"):
-        accepted = None
-        status = "dry_run"
-    elif case in ("kyua_debug", "duplicate_cycles"):
-        valid_for_tolerance = measurement_valid or case == "kyua_debug"
-        tolerance_pass = bool(
-            command_ok
-            and valid_for_tolerance
-            and permille is not None
-            and float(permille) <= tolerance
-        )
-        accepted = tolerance_pass
-        if not command_ok:
-            status = str(command_result.get("outcome", "command_error"))
-        elif permille is None or not valid_for_tolerance:
-            status = "invalid_output"
-        else:
-            status = "pass" if tolerance_pass else "fail_tolerance"
-    elif command_ok:
-        rows = parsed.get("row_count")
-        positive_a = int(parsed.get("positive_a", 0) or 0)
-        positive_b = int(parsed.get("positive_b", 0) or 0)
-
-        if case == "mixed_cycles_instructions":
-            accepted = bool(parsed.get("header_valid", True) and positive_a and positive_b)
-        elif case == "mixed_cache_cycles":
-            accepted = bool(parsed.get("header_valid", True) and positive_b)
-        else:
-            accepted = bool(rows is None or rows > 0 and parsed.get("header_valid", True))
-
-        status = "pass" if accepted else "invalid_output"
-    else:
-        accepted = False
-        status = str(command_result.get("outcome", "command_error"))
+    output_text = "" if args.dry_run else read_text_file(output_file)
+    parsed = parse_pmcstat_two_counter(output_text) if output_text else None
+    valid = bool(parsed and returncode == 0)
 
     record: Dict[str, Any] = {
         "run_id": run_id,
+        "phase": phase,
         "iteration": iteration,
-        "case": case,
-        "started_at": command_result.get("started_at"),
-        "ended_at": command_result.get("ended_at"),
-        "elapsed_seconds": command_result.get("elapsed_seconds"),
-        "returncode": rc,
-        "terminated_by_signal": terminated_by_signal,
-        "status": status,
-        "command_outcome": command_result.get("outcome"),
-        "measurement_valid": measurement_valid,
-        "tolerance_pass": tolerance_pass,
-        "accepted": accepted,
-        "tolerance_permille": tolerance,
-        "event_a": event_a,
-        "event_b": event_b,
-        "row_count": parsed.get("row_count"),
-        "positive_a": parsed.get("positive_a"),
-        "positive_b": parsed.get("positive_b"),
-        "positive_pairs": parsed.get("positive_pairs"),
-        "last_a": parsed.get("last_a"),
-        "last_b": parsed.get("last_b"),
-        "total_a": parsed.get("total_a"),
-        "total_b": parsed.get("total_b"),
-        "delta": parsed.get("delta"),
-        "max": parsed.get("max"),
-        "permille": permille,
-        "total_delta": parsed.get("total_delta"),
-        "total_max": parsed.get("total_max"),
-        "total_permille": parsed.get("total_permille"),
-        "instructions_per_cycle": parsed.get("instructions_per_cycle"),
-        "total_instructions_per_cycle": parsed.get("total_instructions_per_cycle"),
-        "a_per_million_cycles": parsed.get("a_per_million_cycles"),
-        "total_a_per_million_cycles": parsed.get("total_a_per_million_cycles"),
-        "output_file": str(output_file) if output_file is not None else None,
-        "raw_sha256": sha256_file(output_file) if output_file is not None else None,
-        "command_text": command_result.get("command_text"),
-        "stdout_tail": tail_text(command_result.get("stdout", "")),
-        "stderr_tail": tail_text(command_result.get("stderr", "")),
-        "parsed": parsed,
-        "command": command_result,
+        "workload": list(workload),
+        "command": result.get("command"),
+        "started_at": result.get("started_at"),
+        "ended_at": result.get("ended_at"),
+        "elapsed_seconds": result.get("elapsed_seconds"),
+        "returncode": returncode,
+        "command_outcome": result.get("outcome"),
+        "timed_out": result.get("timed_out"),
+        "terminated_by_signal": result.get("terminated_by_signal"),
+        "valid": valid,
+        "row_count": parsed.get("row_count") if parsed else None,
+        "last_a": parsed.get("last_a") if parsed else None,
+        "last_b": parsed.get("last_b") if parsed else None,
+        "max_count": parsed.get("max_count") if parsed else None,
+        "delta_abs": parsed.get("delta_abs") if parsed else None,
+        "signed_delta": parsed.get("signed_delta") if parsed else None,
+        "permille": parsed.get("permille") if parsed else None,
+        "b_gt_a": parsed.get("b_gt_a") if parsed else None,
+        "a_gt_b": parsed.get("a_gt_b") if parsed else None,
+        "equal": parsed.get("equal") if parsed else None,
+        "baseline_signed_offset": None,
+        "corrected_signed_delta": None,
+        "corrected_delta": None,
+        "corrected_permille": None,
+        "output_file": str(output_file) if not args.dry_run else None,
+        "raw_sha256": sha256_file(output_file) if (not args.dry_run and output_file.exists()) else None,
+        "stderr_tail": (result.get("stderr") or "")[-400:],
     }
     return record
 
 
-def run_kyua_debug_case(
+def run_phase(
     args: argparse.Namespace,
     *,
-    run_id: str,
-    iteration: int,
-    kyua_dir: Path,
-) -> Dict[str, Any]:
-    command = [
-        "kyua",
-        "-v",
-        "test_suites.FreeBSD.amd.pmc.grouping.runtime=true",
-        "-v",
-        (
-            "test_suites.FreeBSD.amd.pmc.grouping."
-            f"cycle_tolerance_permille={args.tolerance_permille}"
-        ),
-        "debug",
-        KYUA_TEST_NAME,
-    ]
-    result = run_command(
-        command_with_sudo(
-            command,
-            args.use_sudo,
-            args.sudo_cmd,
-            args.sudo_non_interactive,
-        ),
-        cwd=kyua_dir,
-        dry_run=args.dry_run,
-        timeout_seconds=bounded_timeout(args.deadline, args.kyua_timeout),
-        grace_seconds=args.command_grace_seconds,
-        progress_label=f"kyua debug iteration {iteration}",
-    )
-    combined = f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
-    parsed = parse_skew_from_text(combined)
-    return flatten_case_record(
-        run_id=run_id,
-        iteration=iteration,
-        case="kyua_debug",
-        command_result=result,
-        tolerance=args.tolerance_permille,
-        event_a=PMSTAT_DUPLICATE_EVENT,
-        event_b=PMSTAT_DUPLICATE_EVENT,
-        parsed=parsed,
-    )
-
-
-def run_pmcstat_pair_case(
-    args: argparse.Namespace,
-    *,
-    run_id: str,
-    iteration: int,
-    case: str,
-    event_a: str,
-    event_b: str,
+    phase: str,
+    iterations: int,
+    workload: Sequence[str],
     raw_dir: Path,
-) -> Dict[str, Any]:
-    output_file = raw_dir / f"{iteration:05d}-{case}.out"
-    tmp_output_file = output_file if args.dry_run else unique_tmp_path(output_file, "out")
-    command = [
-        "pmcstat",
-        "-C",
-        "-q",
-        "-p",
-        event_a,
-        "-p",
-        event_b,
-        "-o",
-        str(tmp_output_file),
-        "--",
-        "sleep",
-        str(args.sleep_seconds),
-    ]
-    result = run_command(
-        command_with_sudo(
-            command,
-            args.use_sudo,
-            args.sudo_cmd,
-            args.sudo_non_interactive,
-        ),
-        dry_run=args.dry_run,
-        timeout_seconds=bounded_timeout(
-            args.deadline,
-            args.sleep_seconds + args.command_timeout_overhead,
-        ),
-        grace_seconds=args.command_grace_seconds,
-        progress_label=f"{case} iteration {iteration}",
-    )
-
-    if tmp_output_file.exists() and result.get("returncode") == 0:
-        tmp_output_file.replace(output_file)
-        fsync_directory(output_file.parent)
-    elif not args.dry_run:
-        for stale in (tmp_output_file, output_file):
-            try:
-                stale.unlink()
-            except OSError:
-                pass
-
-    output_text = "" if args.dry_run else read_text_file(output_file)
-    parsed = parse_pmcstat_output(
-        output_text,
-        event_a,
-        event_b,
-        args.min_cycle_count,
-    )
-
-    record = flatten_case_record(
-        run_id=run_id,
-        iteration=iteration,
-        case=case,
-        command_result=result,
-        tolerance=args.tolerance_permille,
-        event_a=event_a,
-        event_b=event_b,
-        output_file=None if args.dry_run else output_file,
-        parsed=parsed,
-    )
-
-    if args.embed_raw_output:
-        record["pmcstat_output"] = output_text
-
-    return record
-
-
-def run_iteration(
-    args: argparse.Namespace,
-    *,
     run_id: str,
-    iteration: int,
-    kyua_dir: Path,
-    raw_dir: Path,
+    timeout_hint: float,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
-
-    if not args.skip_kyua and can_run_kyua(args):
-        log_info(f"iteration {iteration}: kyua debug tolerance check")
-        records.append(
-            run_kyua_debug_case(
-                args,
-                run_id=run_id,
-                iteration=iteration,
-                kyua_dir=kyua_dir,
-            )
-        )
-    elif not args.skip_kyua:
-        records.append(
-            make_skip_record(
-                run_id,
-                iteration,
-                "kyua_debug",
-                PMSTAT_DUPLICATE_EVENT,
-                PMSTAT_DUPLICATE_EVENT,
-                "skip_deadline",
-            )
-        )
-
-    for case, event_a, event_b in direct_pmcstat_cases(args):
+    log_info(f"{phase}: workload={shlex.join(workload)} iterations={iterations}")
+    for iteration in range(1, iterations + 1):
         if STOP_REQUESTED:
             break
-        if not can_run_direct_case(args):
-            records.append(
-                make_skip_record(
-                    run_id,
-                    iteration,
-                    case,
-                    event_a,
-                    event_b,
-                    "skip_deadline",
-                )
-            )
-            continue
-        if not case_events_available(args, event_a, event_b):
-            records.append(
-                make_skip_record(
-                    run_id,
-                    iteration,
-                    case,
-                    event_a,
-                    event_b,
-                    "skip_missing_event",
-                )
-            )
-            continue
-        log_info(f"iteration {iteration}: pmcstat {event_a},{event_b}")
-        records.append(
-            run_pmcstat_pair_case(
-                args,
-                run_id=run_id,
-                iteration=iteration,
-                case=case,
-                event_a=event_a,
-                event_b=event_b,
-                raw_dir=raw_dir,
-            )
+        if not enough_time(args, timeout_hint + args.command_timeout_overhead):
+            log_warn(f"{phase}: stopping before iteration {iteration}; deadline too close")
+            break
+        record = run_probe(
+            args,
+            phase=phase,
+            iteration=iteration,
+            workload=workload,
+            raw_dir=raw_dir,
+            run_id=run_id,
+            timeout_hint=timeout_hint,
         )
-
+        records.append(record)
+        if record["valid"]:
+            direction = "b>a" if record["b_gt_a"] else ("a>b" if record["a_gt_b"] else "eq")
+            log_verbose(
+                f"{phase} iter={iteration}: delta={record['delta_abs']} "
+                f"signed={record['signed_delta']} raw={record['permille']:.4f}‰ {direction}"
+            )
+        else:
+            log_verbose(f"{phase} iter={iteration}: invalid outcome={record['command_outcome']}")
     return records
 
 
-def direct_pmcstat_cases(args: argparse.Namespace) -> List[Tuple[str, str, str]]:
-    return [
-        ("duplicate_cycles", PMSTAT_DUPLICATE_EVENT, PMSTAT_DUPLICATE_EVENT),
-        (
-            "mixed_cycles_instructions",
-            PMSTAT_DUPLICATE_EVENT,
-            PMSTAT_INSTRUCTION_EVENT,
-        ),
-        ("mixed_cache_cycles", args.cache_event, PMSTAT_DUPLICATE_EVENT),
-    ]
+def valid_records(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [record for record in records if record.get("valid")]
 
 
-def kyua_needed_seconds(args: argparse.Namespace) -> float:
-    return min(float(args.kyua_min_seconds), float(args.kyua_timeout))
-
-
-def direct_needed_seconds(args: argparse.Namespace) -> float:
-    return float(args.sleep_seconds + args.command_timeout_overhead)
-
-
-def can_run_kyua(args: argparse.Namespace) -> bool:
-    return args.dry_run or enough_time_remains(args, kyua_needed_seconds(args))
-
-
-def can_run_direct_case(args: argparse.Namespace) -> bool:
-    return args.dry_run or enough_time_remains(args, direct_needed_seconds(args))
-
-
-def can_start_iteration(args: argparse.Namespace) -> bool:
-    if args.dry_run:
-        return True
-
-    if not args.skip_kyua and can_run_kyua(args):
-        return True
-
-    if not can_run_direct_case(args):
-        return False
-
-    return any(
-        case_events_available(args, event_a, event_b)
-        for _, event_a, event_b in direct_pmcstat_cases(args)
-    )
-
-
-def enough_time_remains(args: argparse.Namespace, needed: float) -> bool:
-    remaining = remaining_seconds(args.deadline)
-    if remaining is None:
-        return True
-
-    return remaining > max(1.0, needed)
-
-
-def case_events_available(args: argparse.Namespace, event_a: str, event_b: str) -> bool:
-    if args.dry_run:
-        return True
-
-    availability = getattr(args, "event_availability", {})
-
-    if not availability:
-        return True
-
-    return bool(availability.get(event_a, False) and availability.get(event_b, False))
-
-
-def make_skip_record(
-    run_id: str,
-    iteration: int,
-    case: str,
-    event_a: str,
-    event_b: str,
-    status: str,
-) -> Dict[str, Any]:
-    now = utc_now()
+def numeric_stats(values: Sequence[float]) -> Dict[str, Any]:
+    clean = [float(value) for value in values if value is not None and math.isfinite(float(value))]
+    if not clean:
+        return {"n": 0}
     return {
-        "run_id": run_id,
-        "iteration": iteration,
-        "case": case,
-        "started_at": now,
-        "ended_at": now,
-        "elapsed_seconds": 0.0,
-        "returncode": None,
-        "status": status,
-        "command_outcome": status,
-        "measurement_valid": False,
-        "tolerance_pass": None,
-        "accepted": None,
-        "event_a": event_a,
-        "event_b": event_b,
-        "command_text": "",
+        "n": len(clean),
+        "min": min(clean),
+        "mean": statistics.fmean(clean),
+        "median": statistics.median(clean),
+        "p90": percentile(clean, 0.90),
+        "p95": percentile(clean, 0.95),
+        "max": max(clean),
+        "stdev": statistics.pstdev(clean) if len(clean) > 1 else 0.0,
     }
 
 
-# ---------------------------------------------------------------------------
-# Argument parsing and main loop
-# ---------------------------------------------------------------------------
+def phase_stats(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    valid = valid_records(records)
+    total = len(records)
+    n = len(valid)
+    b_gt = sum(1 for record in valid if record.get("b_gt_a"))
+    a_gt = sum(1 for record in valid if record.get("a_gt_b"))
+    equal = sum(1 for record in valid if record.get("equal"))
+
+    def field(name: str) -> Dict[str, Any]:
+        return numeric_stats([record[name] for record in valid if record.get(name) is not None])
+
+    return {
+        "records": total,
+        "valid": n,
+        "invalid": total - n,
+        "b_gt_a": b_gt,
+        "a_gt_b": a_gt,
+        "equal": equal,
+        "pct_b_gt_a": (b_gt / n * 100.0) if n else None,
+        "last_a": field("last_a"),
+        "last_b": field("last_b"),
+        "max_count": field("max_count"),
+        "delta_abs": field("delta_abs"),
+        "signed_delta": field("signed_delta"),
+        "permille": field("permille"),
+    }
+
+
+def phase_complete(records: Sequence[Dict[str, Any]], requested: int) -> bool:
+    return len(records) >= requested
+
+
+def apply_correction(
+    cal_records: Sequence[Dict[str, Any]],
+    meas_records: List[Dict[str, Any]],
+) -> Tuple[float, float]:
+    calibration = valid_records(cal_records)
+    abs_offsets = [record["delta_abs"] for record in calibration if record.get("delta_abs") is not None]
+    signed_offsets = [record["signed_delta"] for record in calibration if record.get("signed_delta") is not None]
+    baseline_abs_offset = statistics.median(abs_offsets) if abs_offsets else 0.0
+    baseline_signed_offset = statistics.median(signed_offsets) if signed_offsets else 0.0
+
+    for record in meas_records:
+        if not record.get("valid"):
+            continue
+        signed_delta = record.get("signed_delta")
+        max_count = record.get("max_count")
+        if signed_delta is None or not max_count:
+            continue
+        corrected_signed = float(signed_delta) - float(baseline_signed_offset)
+        corrected_delta = abs(corrected_signed)
+        record["baseline_signed_offset"] = baseline_signed_offset
+        record["corrected_signed_delta"] = corrected_signed
+        record["corrected_delta"] = corrected_delta
+        record["corrected_permille"] = corrected_delta * 1000.0 / float(max_count)
+
+    return float(baseline_abs_offset), float(baseline_signed_offset)
+
+
+def corrected_stats(meas_records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    valid = [record for record in valid_records(meas_records) if record.get("corrected_permille") is not None]
+    return {
+        "corrected_signed_delta": numeric_stats([
+            record["corrected_signed_delta"] for record in valid
+            if record.get("corrected_signed_delta") is not None
+        ]),
+        "corrected_delta": numeric_stats([
+            record["corrected_delta"] for record in valid
+            if record.get("corrected_delta") is not None
+        ]),
+        "corrected_permille": numeric_stats([
+            record["corrected_permille"] for record in valid
+            if record.get("corrected_permille") is not None
+        ]),
+    }
+
+
+def verdict_from_stats(
+    cal_records: Sequence[Dict[str, Any]],
+    meas_records: Sequence[Dict[str, Any]],
+    baseline_signed_offset: float,
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    if args.dry_run:
+        return {
+            "pass": None,
+            "status": "dry_run",
+            "metric": f"corrected_permille_p{args.verdict_percentile * 100:.0f}",
+            "metric_value": None,
+            "tolerance_permille": args.corrected_tol,
+            "calibration_valid_samples": 0,
+            "measurement_valid_samples": 0,
+            "offset_stability_pct": None,
+            "offset_stability_warning": False,
+            "calibration_requested_samples": args.calibration_n,
+            "measurement_requested_samples": args.measurement_n,
+            "calibration_completed_samples": len(cal_records),
+            "measurement_completed_samples": len(meas_records),
+            "partial": False,
+            "shutdown_reason": SHUTDOWN_REASON,
+            "min_measurement_cycles": args.min_measurement_cycles,
+            "reasons": ["dry-run: commands were printed but PMCs were not executed"],
+        }
+
+    cal_valid = len(valid_records(cal_records))
+    meas_valid = len(valid_records(meas_records))
+    corrected_values = [
+        float(record["corrected_permille"])
+        for record in valid_records(meas_records)
+        if record.get("corrected_permille") is not None
+    ]
+    corrected_quantile = percentile(corrected_values, args.verdict_percentile)
+    measurement_counts = [
+        float(record["max_count"])
+        for record in valid_records(meas_records)
+        if record.get("max_count") is not None
+    ]
+    measurement_max_count_median = statistics.median(measurement_counts) if measurement_counts else None
+
+    cal_signed = [
+        float(record["signed_delta"])
+        for record in valid_records(cal_records)
+        if record.get("signed_delta") is not None
+    ]
+    cal_signed_stdev = statistics.pstdev(cal_signed) if len(cal_signed) > 1 else 0.0
+    offset_stability_pct = (
+        abs(cal_signed_stdev / baseline_signed_offset) * 100.0
+        if baseline_signed_offset else None
+    )
+
+    reasons: List[str] = []
+    pass_verdict = True
+    calibration_complete = phase_complete(cal_records, args.calibration_n)
+    measurement_complete = phase_complete(meas_records, args.measurement_n)
+    partial = bool(SHUTDOWN_REASON or not calibration_complete or not measurement_complete)
+    if not calibration_complete:
+        pass_verdict = False
+        reasons.append(
+            f"calibration completed {len(cal_records)}/{args.calibration_n} requested samples"
+        )
+    if not measurement_complete:
+        pass_verdict = False
+        reasons.append(
+            f"measurement completed {len(meas_records)}/{args.measurement_n} requested samples"
+        )
+    if SHUTDOWN_REASON:
+        pass_verdict = False
+        reasons.append(f"run stopped before a complete verdict: {SHUTDOWN_REASON}")
+    if cal_valid < args.min_valid_samples:
+        pass_verdict = False
+        reasons.append(f"calibration has {cal_valid} valid samples; need {args.min_valid_samples}")
+    if meas_valid < args.min_valid_samples:
+        pass_verdict = False
+        reasons.append(f"measurement has {meas_valid} valid samples; need {args.min_valid_samples}")
+    if corrected_quantile is None:
+        pass_verdict = False
+        reasons.append("no corrected measurement samples")
+    if measurement_max_count_median is None:
+        pass_verdict = False
+        reasons.append("no valid measurement max_count samples")
+    elif measurement_max_count_median < args.min_measurement_cycles:
+        pass_verdict = False
+        reasons.append(
+            f"measurement median max_count {measurement_max_count_median:.0f} cycles "
+            f"< minimum {args.min_measurement_cycles} cycles"
+        )
+    if corrected_quantile is not None and corrected_quantile > args.corrected_tol:
+        pass_verdict = False
+        reasons.append(
+            f"corrected p{args.verdict_percentile * 100:.0f}={corrected_quantile:.6f}‰ "
+            f"> tolerance {args.corrected_tol:.6f}‰"
+        )
+
+    stability_warning = bool(
+        offset_stability_pct is not None
+        and offset_stability_pct >= args.offset_stability_warn_pct
+    )
+    if stability_warning:
+        reasons.append(
+            f"calibration signed-offset stdev is {offset_stability_pct:.2f}% of median "
+            f"(warning threshold {args.offset_stability_warn_pct:.2f}%)"
+        )
+
+    return {
+        "pass": pass_verdict,
+        "status": "pass" if pass_verdict else "fail",
+        "metric": f"corrected_permille_p{args.verdict_percentile * 100:.0f}",
+        "metric_value": corrected_quantile,
+        "tolerance_permille": args.corrected_tol,
+        "calibration_valid_samples": cal_valid,
+        "measurement_valid_samples": meas_valid,
+        "calibration_requested_samples": args.calibration_n,
+        "measurement_requested_samples": args.measurement_n,
+        "calibration_completed_samples": len(cal_records),
+        "measurement_completed_samples": len(meas_records),
+        "partial": partial,
+        "shutdown_reason": SHUTDOWN_REASON,
+        "min_measurement_cycles": args.min_measurement_cycles,
+        "measurement_max_count_median": measurement_max_count_median,
+        "offset_stability_pct": offset_stability_pct,
+        "offset_stability_warning": stability_warning,
+        "reasons": reasons,
+    }
+
+
+def fmt(value: Any, digits: int = 3) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:.{digits}f}"
+    return str(value)
+
+
+def print_results(
+    cal_records: Sequence[Dict[str, Any]],
+    meas_records: Sequence[Dict[str, Any]],
+    baseline_abs_offset: float,
+    baseline_signed_offset: float,
+    verdict: Dict[str, Any],
+    args: argparse.Namespace,
+) -> None:
+    cal = phase_stats(cal_records)
+    meas = phase_stats(meas_records)
+    corr = corrected_stats(meas_records)
+
+    log_info("=" * 72)
+    log_info("Canonical calibrated AMD PMC grouping skew results")
+    log_info("=" * 72)
+    log_info(f"event: FreeBSD={EVENT} silicon={SILICON_EVENT}")
+    log_info(
+        "correction: abs(measured_signed_delta - baseline_signed_offset) / "
+        "max(last_a,last_b) * 1000"
+    )
+
+    log_info("")
+    log_info("--- Phase 1: calibration (workload: true) ---")
+    log_info(
+        f"valid={cal['valid']}/{cal['records']} "
+        f"b>a={cal['b_gt_a']} ({fmt(cal['pct_b_gt_a'], 1)}%)"
+    )
+    if cal["delta_abs"].get("n"):
+        delta = cal["delta_abs"]
+        signed = cal["signed_delta"]
+        log_info(
+            f"delta_abs cycles: min={delta['min']:.0f} mean={delta['mean']:.0f} "
+            f"median={delta['median']:.0f} p95={delta['p95']:.0f} max={delta['max']:.0f}"
+        )
+        log_info(
+            f"signed_delta cycles: median={signed['median']:.0f} "
+            f"stdev={signed['stdev']:.0f}"
+        )
+    log_info(f"baseline_abs_offset:    {baseline_abs_offset:.0f} cycles")
+    log_info(f"baseline_signed_offset: {baseline_signed_offset:.0f} cycles")
+
+    log_info("")
+    log_info(f"--- Phase 2: measurement (workload: dd count={args.dd_count:,}) ---")
+    log_info(
+        f"valid={meas['valid']}/{meas['records']} "
+        f"b>a={meas['b_gt_a']} ({fmt(meas['pct_b_gt_a'], 1)}%)"
+    )
+    if meas["max_count"].get("n"):
+        cycles = meas["max_count"]
+        log_info(
+            f"max_count cycles: median={cycles['median']:.0f} "
+            f"({cycles['median'] / 1_000_000:.1f} M)"
+        )
+    if meas["permille"].get("n"):
+        raw = meas["permille"]
+        log_info(
+            f"raw_permille: median={raw['median']:.6f}‰ "
+            f"p95={raw['p95']:.6f}‰ max={raw['max']:.6f}‰"
+        )
+
+    log_info("")
+    log_info("--- Phase 3: corrected metrics ---")
+    corrected_delta = corr["corrected_delta"]
+    corrected_permille = corr["corrected_permille"]
+    corrected_signed = corr["corrected_signed_delta"]
+    if corrected_delta.get("n"):
+        log_info(
+            f"corrected_delta cycles: median={corrected_delta['median']:.1f} "
+            f"p95={corrected_delta['p95']:.1f} max={corrected_delta['max']:.1f}"
+        )
+    if corrected_permille.get("n"):
+        log_info(
+            f"corrected_permille: median={corrected_permille['median']:.6f}‰ "
+            f"p95={corrected_permille['p95']:.6f}‰ max={corrected_permille['max']:.6f}‰"
+        )
+    if corrected_signed.get("n") and meas["max_count"].get("median"):
+        noise_permille = corrected_signed["stdev"] / meas["max_count"]["median"] * 1000.0
+        log_info(
+            f"signed residual stdev: {corrected_signed['stdev']:.1f} cycles "
+            f"({noise_permille:.6f}‰ of median max_count)"
+        )
+
+    log_info("")
+    log_info("--- Verdict ---")
+    metric_value = verdict.get("metric_value")
+    if verdict.get("status") == "dry_run":
+        log_info("DRY-RUN: commands were printed; no PMC samples were collected")
+    elif verdict["pass"]:
+        log_info(
+            f"PASS: {verdict['metric']}={fmt(metric_value, 6)}‰ <= "
+            f"{args.corrected_tol:.6f}‰"
+        )
+        log_info("duplicate PMCs agree after deterministic signed-offset calibration")
+    else:
+        log_warn(
+            f"FAIL: {verdict['metric']}={fmt(metric_value, 6)}‰; "
+            f"tolerance={args.corrected_tol:.6f}‰"
+        )
+    for reason in verdict.get("reasons", []):
+        if verdict.get("status") == "dry_run":
+            log_info(reason)
+        elif not verdict["pass"] or "warning" in reason:
+            log_warn(reason)
+        else:
+            log_info(reason)
+
+
+def build_summary(
+    *,
+    run_id: str,
+    started_at: str,
+    platform_info: Dict[str, Any],
+    hwpmc_status: Dict[str, Any],
+    event_availability: Dict[str, bool],
+    cal_records: Sequence[Dict[str, Any]],
+    meas_records: Sequence[Dict[str, Any]],
+    baseline_abs_offset: float,
+    baseline_signed_offset: float,
+    verdict: Dict[str, Any],
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "producer": PRODUCER,
+        "run_id": run_id,
+        "started_at": started_at,
+        "ended_at": utc_now(),
+        "event": {
+            "freebsd_name": EVENT,
+            "silicon_event": SILICON_EVENT,
+            "description": "AMD core cycles not in halt",
+        },
+        "configuration": {
+            "calibration_n": args.calibration_n,
+            "measurement_n": args.measurement_n,
+            "dd_count": args.dd_count,
+            "min_valid_samples": args.min_valid_samples,
+            "min_measurement_cycles": args.min_measurement_cycles,
+            "corrected_tol_permille": args.corrected_tol,
+            "verdict_percentile": args.verdict_percentile,
+            "offset_stability_warn_pct": args.offset_stability_warn_pct,
+            "minutes": args.minutes,
+            "use_sudo": args.use_sudo,
+            "sudo_non_interactive": args.sudo_non_interactive,
+            "dry_run": args.dry_run,
+        },
+        "platform": platform_info,
+        "hwpmc": hwpmc_status,
+        "event_availability": event_availability,
+        "shutdown_reason": SHUTDOWN_REASON,
+        "partial": bool(
+            SHUTDOWN_REASON
+            or len(cal_records) < args.calibration_n
+            or len(meas_records) < args.measurement_n
+        ),
+        "requested_samples": {
+            "calibration": args.calibration_n,
+            "measurement": args.measurement_n,
+        },
+        "completed_samples": {
+            "calibration": len(cal_records),
+            "measurement": len(meas_records),
+        },
+        "correction": {
+            "method": "signed median calibration",
+            "formula": "abs(measured_signed_delta - baseline_signed_offset) / max(last_a,last_b) * 1000",
+            "baseline_abs_offset_cycles": baseline_abs_offset,
+            "baseline_signed_offset_cycles": baseline_signed_offset,
+        },
+        "calibration": phase_stats(cal_records),
+        "measurement": phase_stats(meas_records),
+        "corrected": corrected_stats(meas_records),
+        "verdict": verdict,
+    }
+
+
+CSV_FIELDS = [
+    "run_id", "phase", "iteration", "workload", "started_at", "ended_at",
+    "elapsed_seconds", "returncode", "command_outcome", "timed_out",
+    "terminated_by_signal", "valid", "row_count", "last_a", "last_b",
+    "max_count", "delta_abs", "signed_delta", "permille",
+    "baseline_signed_offset", "corrected_signed_delta", "corrected_delta",
+    "corrected_permille", "b_gt_a", "a_gt_b", "equal", "output_file",
+    "raw_sha256", "stderr_tail",
+]
+
+
+def write_csv_atomic(path: Path, records: Sequence[Dict[str, Any]]) -> None:
+    def write_rows(fp: Any) -> None:
+        writer = csv.DictWriter(fp, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for record in records:
+            row = {field: record.get(field) for field in CSV_FIELDS}
+            row["workload"] = shlex.join(record.get("workload") or [])
+            writer.writerow(row)
+
+    atomic_write_file(path, write_rows, suffix="csv")
+
+
+def write_outputs(
+    outdir: Path,
+    summary: Dict[str, Any],
+    records: Sequence[Dict[str, Any]],
+) -> None:
+    json_path = outdir / "pmc-grouping-skew.json"
+    csv_path = outdir / "pmc-grouping-skew.csv"
+    payload = {
+        **summary,
+        "records_total": len(records),
+        "records": list(records),
+    }
+    atomic_write_text(json_path, json.dumps(payload, indent=2, sort_keys=True, default=str))
+    write_csv_atomic(csv_path, records)
+    log_info(f"JSON: {json_path}")
+    log_info(f"CSV:  {csv_path}")
+
 
 def signal_handler(signum: int, _frame: Any) -> None:
     global SHUTDOWN_REASON, STOP_REQUESTED
     STOP_REQUESTED = True
     SHUTDOWN_REASON = f"signal {signum}"
     COMMAND_RUNNER.terminate_active(signal.SIGTERM)
-    log_warn(
-        f"received signal {signum}; current command will finish, then the run stops"
-    )
+    log_warn(f"received signal {signum}; stopping after the active probe")
 
 
 def shutdown_exit_code() -> int:
     if SHUTDOWN_REASON is None:
         return 0
-
     match = re.fullmatch(r"signal (\d+)", SHUTDOWN_REASON)
-    if match is None:
-        return 0
-
-    return 128 + int(match.group(1))
+    return 128 + int(match.group(1)) if match else 0
 
 
-def build_arg_parser(repo_root: Path) -> argparse.ArgumentParser:
-    default_outdir = Path.cwd() / "pmu-skew-data"
-
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Collect FreeBSD AMD pmcstat grouping skew data into JSON/CSV.",
+        description="Collect calibrated FreeBSD AMD pmcstat duplicate-PMC skew data.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
             "  sudo python3 py-scripts/pmc_grouping_skew_collect.py --minutes 30\n"
-            "  sudo python3 py-scripts/pmc_grouping_skew_collect.py --once --tolerance-permille 100\n"
+            "  sudo python3 py-scripts/pmc_grouping_skew_collect.py --calibration-n 30 --measurement-n 30\n"
             "  python3 py-scripts/pmc_grouping_skew_collect.py --dry-run --once\n"
         ),
     )
-
-    parser.add_argument("--minutes", type=lambda v: parse_positive_float(v, "minutes"),
+    parser.add_argument("--calibration-n", metavar="N",
+        type=lambda value: parse_positive_int(value, "calibration-n"),
+        default=DEFAULT_CALIBRATION_ITERATIONS,
+        help="number of true-workload calibration probes")
+    parser.add_argument("--measurement-n", metavar="N",
+        type=lambda value: parse_positive_int(value, "measurement-n"),
+        default=DEFAULT_MEASUREMENT_ITERATIONS,
+        help="number of CPU-bound measurement probes")
+    parser.add_argument("--dd-count", metavar="N",
+        type=lambda value: parse_positive_int(value, "dd-count"),
+        default=DEFAULT_DD_COUNT,
+        help="dd count= value for the measurement workload")
+    parser.add_argument("--min-valid-samples", metavar="N",
+        type=lambda value: parse_positive_int(value, "min-valid-samples"),
+        default=DEFAULT_MIN_VALID_SAMPLES,
+        help="minimum valid samples required per phase for a pass verdict")
+    parser.add_argument("--min-measurement-cycles", metavar="N",
+        type=lambda value: parse_positive_int(value, "min-measurement-cycles"),
+        default=DEFAULT_MIN_MEASUREMENT_CYCLES,
+        help="minimum median measurement max_count cycles required for PASS")
+    parser.add_argument("--corrected-tol", metavar="PERMILLE",
+        type=lambda value: parse_nonnegative_float(value, "corrected-tol"),
+        default=DEFAULT_CORRECTED_TOL_PERMILLE,
+        help="corrected permille tolerance for the verdict percentile")
+    parser.add_argument("--verdict-percentile", metavar="FRACTION",
+        type=lambda value: parse_fraction(value, "verdict-percentile"),
+        default=DEFAULT_VERDICT_PERCENTILE,
+        help="corrected_permille percentile used for PASS/FAIL")
+    parser.add_argument("--offset-stability-warn-pct", metavar="PCT",
+        type=lambda value: parse_nonnegative_float(value, "offset-stability-warn-pct"),
+        default=DEFAULT_OFFSET_STABILITY_WARN_PCT,
+        help="warn if calibration signed-offset stdev exceeds this percentage of median")
+    parser.add_argument("--outdir", type=Path, default=Path.cwd() / "pmu-skew-data",
+        help="output directory for JSON, CSV, and raw pmcstat files")
+    parser.add_argument("--minutes", metavar="M",
+        type=lambda value: parse_nonnegative_float(value, "minutes"),
         default=DEFAULT_MINUTES,
-        help=f"collection window in minutes (default: {DEFAULT_MINUTES})")
-    parser.add_argument("--iterations", type=lambda v: parse_positive_int(v, "iterations"),
-        default=None, help="optional maximum number of complete iterations")
+        help="time budget in minutes; 0 means no deadline")
     parser.add_argument("--once", action="store_true",
-        help="run exactly one complete iteration")
+        help="compatibility flag; this canonical collector always runs one calibrated pass")
 
-    parser.add_argument("--sleep-seconds", type=lambda v: parse_positive_int(v, "sleep-seconds"),
-        default=DEFAULT_SLEEP_SECONDS,
-        help=f"sleep workload duration for direct pmcstat commands (default: {DEFAULT_SLEEP_SECONDS})")
-    parser.add_argument("--tolerance-permille", type=lambda v: parse_positive_int(v, "tolerance-permille"),
-        default=DEFAULT_TOLERANCE_PERMILLE,
-        help=f"duplicate-cycle acceptance tolerance (default: {DEFAULT_TOLERANCE_PERMILLE})")
-    parser.add_argument("--min-cycle-count", type=lambda v: parse_positive_int(v, "min-cycle-count"),
-        default=DEFAULT_MIN_CYCLE_COUNT,
-        help=f"minimum duplicate-cycle denominator for valid samples (default: {DEFAULT_MIN_CYCLE_COUNT})")
-    parser.add_argument("--cache-event", default=PMSTAT_CACHE_EVENT,
-        help=f"cache-side event paired with cycles (default: {PMSTAT_CACHE_EVENT})")
-    parser.add_argument("--no-cache-event-fallback", action="store_true",
-        help="use only --cache-event instead of the shell-test fallback event list")
-
-    parser.add_argument("--outdir", type=Path, default=default_outdir,
-        help="directory for JSON, CSV, and raw pmcstat outputs (default: ./pmu-skew-data)")
-    parser.add_argument("--kyua-dir", type=Path, default=None,
-        help="directory containing pmcstat_grouping_test Kyuafile")
-    parser.add_argument("--skip-kyua", action="store_true",
-        help="skip the Kyua debug command and collect only direct pmcstat samples")
-
-    parser.add_argument("--sudo-cmd", default="sudo",
-        help="sudo command used when not running as root (default: sudo)")
+    parser.add_argument("--sudo-cmd", default="sudo", help="sudo binary")
     parser.add_argument("--sudo-interactive", dest="sudo_non_interactive",
         action="store_false", help="allow interactive sudo prompts")
     parser.add_argument("--no-sudo", dest="use_sudo", action="store_false",
-        help="do not prefix commands with sudo when not root")
+        help="do not prefix privileged commands with sudo when not root")
     parser.set_defaults(use_sudo=True, sudo_non_interactive=True)
 
-    parser.add_argument("--kyua-timeout", type=lambda v: parse_positive_int(v, "kyua-timeout"),
-        default=DEFAULT_KYUA_TIMEOUT_SECONDS,
-        help=f"maximum seconds for each Kyua debug command (default: {DEFAULT_KYUA_TIMEOUT_SECONDS})")
-    parser.add_argument("--kyua-min-seconds", type=lambda v: parse_positive_int(v, "kyua-min-seconds"),
-        default=DEFAULT_KYUA_MIN_SECONDS,
-        help=f"minimum remaining seconds before starting Kyua debug (default: {DEFAULT_KYUA_MIN_SECONDS})")
-    parser.add_argument("--preflight-timeout", type=lambda v: parse_positive_int(v, "preflight-timeout"),
-        default=30, help="maximum seconds for setup/probe commands (default: 30)")
-    parser.add_argument("--command-timeout-overhead", type=lambda v: parse_positive_int(v, "command-timeout-overhead"),
-        default=30, help="seconds added to each pmcstat workload timeout (default: 30)")
-    parser.add_argument("--command-grace-seconds", type=lambda v: parse_positive_int(v, "command-grace-seconds"),
+    parser.add_argument("--preflight-timeout", metavar="S",
+        type=lambda value: parse_positive_int(value, "preflight-timeout"),
+        default=DEFAULT_PREFLIGHT_TIMEOUT,
+        help="maximum seconds for setup/probe commands")
+    parser.add_argument("--command-timeout-overhead", metavar="S",
+        type=lambda value: parse_positive_int(value, "command-timeout-overhead"),
+        default=DEFAULT_COMMAND_TIMEOUT_OVERHEAD,
+        help="seconds added to each workload timeout")
+    parser.add_argument("--command-grace-seconds", metavar="S",
+        type=lambda value: parse_positive_int(value, "command-grace-seconds"),
         default=DEFAULT_COMMAND_GRACE_SECONDS,
-        help=f"SIGTERM grace period before SIGKILL (default: {DEFAULT_COMMAND_GRACE_SECONDS})")
-    parser.add_argument("--no-threaded-writer", dest="threaded_writer", action="store_false",
-        help="write JSON/CSV checkpoints synchronously")
-    parser.set_defaults(threaded_writer=True)
+        help="SIGTERM grace period before SIGKILL")
 
-    parser.add_argument("--embed-raw-output", action="store_true",
-        help="embed full raw pmcstat output text inside JSON records")
-    parser.add_argument("--color", choices=("auto", "always", "never"),
-        default="auto", help="ANSI color mode for terminal output (default: auto)")
-    parser.add_argument("--live-graph", choices=("auto", "always", "never"),
-        default="auto", help="live progress graph while Kyua/pmcstat commands run")
+    parser.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+        help="ANSI color mode")
+    parser.add_argument("--live-graph", choices=("auto", "always", "never"), default="auto",
+        help="show live progress for active pmcstat probes")
     parser.add_argument("-v", "--verbose", action="store_true",
-        help="print additional command and environment diagnostics")
+        help="print command and per-probe diagnostics")
     parser.add_argument("--quiet", action="store_true",
-        help="suppress per-case terminal graph lines")
+        help="suppress live progress when possible")
     parser.add_argument("--dry-run", action="store_true",
-        help="print commands and write an empty run skeleton without executing PMCs")
-
+        help="print command shapes and write empty output skeleton")
     parser.add_argument("--no-hwpmc-load", action="store_true",
         help="do not attempt to kldload hwpmc before collection")
     parser.add_argument("--allow-non-freebsd", action="store_true",
         help="allow execution on non-FreeBSD hosts for command-shape inspection")
     parser.add_argument("--allow-non-amd", action="store_true",
-        help="allow execution when kern.hwpmc.cpuid does not report AuthenticAMD")
+        help="allow execution when kern.hwpmc.cpuid is not AuthenticAMD")
     parser.add_argument("--allow-unknown-generation", action="store_true",
         help="allow unknown/future AMD generation after manual PPR verification")
-
     return parser
 
 
 def main() -> int:
-    script_path = Path(__file__).resolve()
-    repo_root = script_path.parent.parent
-    parser = build_arg_parser(repo_root)
-    args = parser.parse_args()
+    args = build_parser().parse_args()
     configure_terminal(args)
-    if args.once:
-        args.iterations = 1
-    if args.dry_run and args.iterations is None:
-        args.iterations = 1
     args.outdir = args.outdir.expanduser().resolve()
+    args.deadline = None if args.minutes == 0 else time.monotonic() + args.minutes * 60.0
+    resolve_tool_paths(args)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     if not args.dry_run:
         check_tool("pmcstat")
-
-        if not args.skip_kyua:
-            check_tool("kyua")
-
         if args.use_sudo and not is_root():
             check_tool(args.sudo_cmd)
-
-            if args.sudo_non_interactive:
-                sudo_check = run_command(
-                    [args.sudo_cmd, "-n", "true"],
-                    timeout_seconds=args.preflight_timeout,
-                    grace_seconds=args.command_grace_seconds,
-                )
-                if sudo_check.get("returncode") != 0:
-                    die("sudo -n true failed; run as root or use --sudo-interactive")
+            sudo_check = COMMAND_RUNNER.run(
+                [args.sudo_cmd, "-n", "true"] if args.sudo_non_interactive else [args.sudo_cmd, "true"],
+                timeout_seconds=args.preflight_timeout,
+                grace_seconds=args.command_grace_seconds,
+                inherit_stdin=not args.sudo_non_interactive,
+            )
+            if sudo_check.get("returncode") != 0:
+                die("sudo preflight failed; run as root or pass --sudo-interactive")
+        elif not is_root() and not args.use_sudo:
+            die("pmcstat requires root. Run as root or remove --no-sudo.")
 
     args.outdir.mkdir(parents=True, exist_ok=True)
     raw_dir = args.outdir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    json_path = args.outdir / "pmc-grouping-skew.json"
-    csv_path = args.outdir / "pmc-grouping-skew.csv"
 
+    started_at = utc_now()
+    run_id = uuid.uuid4().hex
     hwpmc_status = ensure_hwpmc_loaded(args)
-    if (
-        hwpmc_status.get("error")
-        and not args.dry_run
-        and platform.system() == "FreeBSD"
-    ):
+    if hwpmc_status.get("error") and not args.dry_run and platform.system() == "FreeBSD":
         die(f"hwpmc unavailable: {hwpmc_status['error']}")
+
     platform_info = collect_platform_info(args)
     validate_platform(platform_info, args)
-    kyua_dir = resolve_kyua_dir(args, repo_root)
-    if (
-        not args.skip_kyua
-        and not args.dry_run
-        and not (kyua_dir / "Kyuafile").exists()
-    ):
-        die(f"Kyuafile not found in Kyua directory: {kyua_dir}")
-
     cpuid = platform_info.get("parsed_cpuid", {})
+
+    events = collect_event_list(args)
+    event_availability = check_event_availability(events, [EVENT])
+    if not event_availability.get(EVENT, False) and not args.dry_run:
+        die(f"required pmcstat event not available: {EVENT}")
+
     log_info(
         "target CPU: "
-        f"{cpuid.get('generation')} family={cpuid.get('family_hex')} "
+        f"{cpuid.get('generation', 'unknown')} family={cpuid.get('family_hex')} "
         f"model={cpuid.get('model_hex')} stepping={cpuid.get('stepping')} "
         f"PPR={cpuid.get('ppr')}"
     )
-    if not args.skip_kyua:
-        log_info(f"kyua directory: {kyua_dir}")
+    log_info(f"event: FreeBSD={EVENT} silicon={SILICON_EVENT}")
+    log_info(f"output directory: {args.outdir}")
+    log_info(f"calibration iterations: {args.calibration_n}")
+    log_info(f"measurement iterations:  {args.measurement_n}")
+    log_info(f"measurement workload:    dd if=/dev/zero of=/dev/null bs=4096 count={args.dd_count}")
 
-    events = collect_event_list(args)
-    if events and not args.no_cache_event_fallback:
-        chosen_cache_event = choose_cache_event(events, args.cache_event)
-        if chosen_cache_event is not None:
-            args.cache_event = chosen_cache_event
-    required_events = [
-        PMSTAT_DUPLICATE_EVENT,
-        PMSTAT_INSTRUCTION_EVENT,
-        args.cache_event,
-    ]
-    event_availability = check_event_availability(events, required_events)
-    args.event_availability = event_availability
-    missing = [
-        event for event, available in event_availability.items()
-        if not available
-    ]
-    if missing and not args.dry_run:
-        log_warn(f"pmcstat -L does not list events: {', '.join(missing)}")
+    cal_records = run_phase(
+        args,
+        phase="calibration",
+        iterations=args.calibration_n,
+        workload=[args.true_cmd],
+        raw_dir=raw_dir,
+        run_id=run_id,
+        timeout_hint=5.0,
+    )
+    meas_records = run_phase(
+        args,
+        phase="measurement",
+        iterations=args.measurement_n,
+        workload=[args.dd_cmd, "if=/dev/zero", "of=/dev/null", "bs=4096", f"count={args.dd_count}"],
+        raw_dir=raw_dir,
+        run_id=run_id,
+        timeout_hint=90.0,
+    )
+    baseline_abs_offset, baseline_signed_offset = apply_correction(cal_records, meas_records)
+    verdict = verdict_from_stats(cal_records, meas_records, baseline_signed_offset, args)
+    all_records = cal_records + meas_records
 
-    run_id = uuid.uuid4().hex
-    state: Dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "producer": PRODUCER,
-        "run_id": run_id,
-        "repo_root": str(repo_root),
-        "started_at": utc_now(),
-        "ended_at": None,
-        "iterations_completed": 0,
-        "configuration": {
-            "minutes": args.minutes,
-            "iterations": args.iterations,
-            "sleep_seconds": args.sleep_seconds,
-            "tolerance_permille": args.tolerance_permille,
-            "min_cycle_count": args.min_cycle_count,
-            "cache_event": args.cache_event,
-            "cache_event_candidates": list(PMSTAT_CACHE_EVENT_CANDIDATES),
-            "kyua_dir": str(kyua_dir),
-            "skip_kyua": args.skip_kyua,
-            "use_sudo": args.use_sudo,
-            "sudo_cmd": args.sudo_cmd,
-            "sudo_non_interactive": args.sudo_non_interactive,
-            "kyua_timeout": args.kyua_timeout,
-            "kyua_min_seconds": args.kyua_min_seconds,
-            "command_timeout_overhead": args.command_timeout_overhead,
-            "threaded_writer": args.threaded_writer,
-            "color": args.color,
-            "live_graph": args.live_graph,
-            "verbose": args.verbose,
-            "dry_run": args.dry_run,
-        },
-        "platform": platform_info,
-        "hwpmc": hwpmc_status,
-        "event_availability": event_availability,
-        "event_list_error": getattr(args, "event_list_error", None),
-        "records": [],
-        "summary": {},
-    }
-    writer = CheckpointWriter(json_path, csv_path, args.threaded_writer)
-    writer.start()
-    writer.write(state)
+    print_results(
+        cal_records,
+        meas_records,
+        baseline_abs_offset,
+        baseline_signed_offset,
+        verdict,
+        args,
+    )
+    summary = build_summary(
+        run_id=run_id,
+        started_at=started_at,
+        platform_info=platform_info,
+        hwpmc_status=hwpmc_status,
+        event_availability=event_availability,
+        cal_records=cal_records,
+        meas_records=meas_records,
+        baseline_abs_offset=baseline_abs_offset,
+        baseline_signed_offset=baseline_signed_offset,
+        verdict=verdict,
+        args=args,
+    )
+    write_outputs(args.outdir, summary, all_records)
+    return shutdown_exit_code()
 
-    deadline = time.monotonic() + args.minutes * 60.0
-    args.deadline = deadline
-    iteration = 0
-    try:
-        while not STOP_REQUESTED:
-            if args.iterations is not None and iteration >= args.iterations:
-                break
-            if time.monotonic() >= deadline:
-                break
-            if not can_start_iteration(args):
-                log_verbose("stopping: insufficient time or runnable events for another probe")
-                break
-
-            iteration += 1
-            log_info(f"starting iteration {iteration}")
-            records = run_iteration(
-                args,
-                run_id=run_id,
-                iteration=iteration,
-                kyua_dir=kyua_dir,
-                raw_dir=raw_dir,
-            )
-            state["records"].extend(records)
-            state["iterations_completed"] = iteration
-            writer.write(state)
-
-            if not args.quiet:
-                for record in records:
-                    print_record_line(record, args.tolerance_permille)
-
-        state["ended_at"] = utc_now()
-        if SHUTDOWN_REASON is not None:
-            state["shutdown_reason"] = SHUTDOWN_REASON
-        writer.write(state)
-        writer.close()
-        print_final_summary(state, json_path, csv_path)
-        return shutdown_exit_code()
-    except KeyboardInterrupt:
-        state["ended_at"] = utc_now()
-        state["shutdown_reason"] = "keyboard interrupt"
-        writer.write(state)
-        writer.close()
-        print_final_summary(state, json_path, csv_path)
-        return 130
-    except BaseException:
-        state["ended_at"] = utc_now()
-        state["shutdown_reason"] = "exception"
-        writer.write(state)
-        writer.close()
-        raise
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
