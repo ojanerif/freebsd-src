@@ -851,7 +851,7 @@ class LiveDashboard:
         self.output_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
-        self.lines = 0
+        self.screen_active = False
         self.cursor_hidden = False
         self.phase = "idle"
         self.records: Sequence[Dict[str, Any]] = []
@@ -862,20 +862,21 @@ class LiveDashboard:
         self.probe_started_mono: Optional[float] = None
         self.frame = 0
 
-    def clear(self) -> None:
-        with self.output_lock:
-            if not self.enabled or self.lines == 0:
-                return
-            sys.stderr.write(f"\033[{self.lines}F\033[J")
+    def enter_screen_locked(self) -> None:
+        if self.enabled and not self.screen_active:
+            sys.stderr.write("\033[?1049h\033[H\033[2J")
             sys.stderr.flush()
-            self.lines = 0
+            self.screen_active = True
 
-    def hide_cursor(self) -> None:
+    def leave_screen_locked(self) -> None:
+        if self.screen_active:
+            sys.stderr.write("\033[H\033[2J\033[?1049l")
+            sys.stderr.flush()
+            self.screen_active = False
+
+    def leave_screen(self) -> None:
         with self.output_lock:
-            if self.enabled and not self.cursor_hidden:
-                sys.stderr.write("\033[?25l")
-                sys.stderr.flush()
-                self.cursor_hidden = True
+            self.leave_screen_locked()
 
     def show_cursor(self) -> None:
         with self.output_lock:
@@ -885,7 +886,8 @@ class LiveDashboard:
                 self.cursor_hidden = False
 
     def suspend_for_log(self) -> None:
-        self.clear()
+        self.leave_screen()
+        self.show_cursor()
 
     def start_probe(
         self,
@@ -898,7 +900,12 @@ class LiveDashboard:
     ) -> None:
         if not self.enabled:
             return
-        self.hide_cursor()
+        with self.output_lock:
+            self.enter_screen_locked()
+            if not self.cursor_hidden:
+                sys.stderr.write("\033[?25l")
+                sys.stderr.flush()
+                self.cursor_hidden = True
         with self.lock:
             if self.phase != phase:
                 self.phase_started_mono = time.monotonic()
@@ -935,7 +942,7 @@ class LiveDashboard:
         if self.thread is not None:
             self.thread.join(timeout=1.0)
             self.thread = None
-        self.clear()
+        self.leave_screen()
         self.show_cursor()
 
     def _animate(self) -> None:
@@ -1016,12 +1023,11 @@ class LiveDashboard:
         ])
 
         with self.output_lock:
-            if self.lines:
-                sys.stderr.write(f"\033[{self.lines}F")
+            self.enter_screen_locked()
+            sys.stderr.write("\033[H\033[2J")
             for line in lines:
-                sys.stderr.write(f"\r\033[K{line}\n")
+                sys.stderr.write(f"{line}\n")
             sys.stderr.flush()
-            self.lines = len(lines)
 
 
 def print_results(
