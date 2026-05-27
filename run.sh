@@ -232,6 +232,7 @@ SENDER_EMAIL="${SENDER_EMAIL:-freebsd-ci-actions@amd.com}"
 AUTO_KERNCONF="${AUTO_KERNCONF:-GENERIC}"
 AUTOTEST_SENTINEL="/var/db/ibs-autotest-sentinel"
 LAST_COMMIT_FILE="/var/db/ibs-autotest-last-commit"
+FORCE_REBUILD=0	# --force-rebuild: skip the "already tested" commit check in --auto
 RCD_SERVICE="/usr/local/etc/rc.d/ibs_autotest"
 
 # Panic-recovery / --last-test persistent files.
@@ -997,7 +998,9 @@ auto_mode() {
                       git -C "$SRC_DIR" rev-parse --verify HEAD 2>/dev/null || echo "")
 
     # Check if this commit was already built and tested
-    if [ -n "$_current_commit" ] && [ -f "$LAST_COMMIT_FILE" ]; then
+    if [ $FORCE_REBUILD -eq 1 ]; then
+        log_info "Skipping commit check (--force-rebuild): will build regardless of prior run"
+    elif [ -n "$_current_commit" ] && [ -f "$LAST_COMMIT_FILE" ]; then
         _last_commit=$(cat "$LAST_COMMIT_FILE")
         if [ "$_current_commit" = "$_last_commit" ]; then
             log_info "Kernel is up to date -commit ${_current_commit} already tested"
@@ -1373,6 +1376,9 @@ ${YELLOW}AUTO MODE OPTIONS${NC}
                         is explicitly given on the command line.
                         Default: freebsd-test@mailman-svr.amd.com,ojanerif@amd.com
                         Delivery uses the system MTA (dma → atlsmtp10.amd.com).
+    --force-rebuild     Skip the "already tested" commit check.  Forces --auto
+                        to proceed with build → reboot → test even when the
+                        source tree has not changed since the last run.
 
 ${YELLOW}OPTIONS${NC}
     -v, --verbose       Print additional diagnostic messages (git SHAs,
@@ -2166,6 +2172,7 @@ generate_html_index() {
         _n=$(basename "$_d")
         _rpt="$_d/report.txt"
         [ -f "$_rpt" ] || continue
+        [ -f "$_d/report.html" ] || continue
 
         _date=$(grep "^Generated  :" "$_rpt" 2>/dev/null | sed 's/Generated  : //' | head -1)
         [ -z "$_date" ] && _date="—"
@@ -3790,6 +3797,9 @@ while [ $# -gt 0 ]; do
             ;;
         -f|--force)
             FORCE=1
+            ;;
+        --force-rebuild)
+            FORCE_REBUILD=1
             ;;
         -n|--dry-run)
             DRY_RUN=1
