@@ -89,6 +89,7 @@ get_test_meta() {
         ibs_unit_fetch_ctl_fields_test)  printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_field_masks_test)       printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_helpers_test)           printf "TC-UNIT:Unit Tests:MEDIUM" ;;
+        ibs_unit_caps_test)              printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_ldlat_test)             printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_msr_range_test)         printf "TC-UNIT:Unit Tests:MEDIUM" ;;
         ibs_unit_op_data_fields_test)    printf "TC-UNIT:Unit Tests:MEDIUM" ;;
@@ -116,6 +117,10 @@ get_test_meta() {
         umcdf_unit_vendor_test)          printf "TC-UMCUNIT:UMCDF Unit:MEDIUM" ;;
         umcdf_unit_zen_map_test)         printf "TC-UMCUNIT:UMCDF Unit:MEDIUM" ;;
         umcdf_unit_zen_name_test)        printf "TC-UMCUNIT:UMCDF Unit:MEDIUM" ;;
+        # L3 suite tests
+        l3_detect_test)                  printf "TC-DET-L3:L3 Detection:CRITICAL" ;;
+        l3_hit_test)                     printf "TC-UNC-L3:L3 PMC:HIGH" ;;
+        l3_miss_test)                    printf "TC-UNC-L3:L3 PMC:HIGH" ;;
         # STRESS suite tests
         cpu_stress_test)                 printf "TC-CSTR:CPU Stress:MEDIUM" ;;
         mem_stress_test)                 printf "TC-MSTR:Memory Stress:MEDIUM" ;;
@@ -207,9 +212,9 @@ XFAIL_TESTS=0
 BROKEN_TESTS=0
 
 # Suite / category selection
-# SUITE: IBS | UMCDF | PMC | STRESS | ALL | DEFAULT
+# SUITE: IBS | UMCDF | PMC | TSC | L3 | STRESS | ALL | DEFAULT
 # DEFAULT (no --suite flag) expands to: IBS UMCDF PMC
-# ALL expands to: IBS UMCDF PMC STRESS
+# ALL expands to: IBS UMCDF PMC TSC L3 STRESS
 SUITE="${SUITE:-DEFAULT}"
 # CATEGORIES: space-separated list of TC-* codes; empty = all categories for the suite
 CATEGORIES=""
@@ -220,6 +225,7 @@ CATEGORIES=""
 WITH_STRESS=0
 SAFE_IBS_RATE=""	# if non-empty, written to dev.hwpmc.ibs.min_period before the run
 STRESS_PIDS=""		# PIDs of background stressor processes (space-separated)
+_STRESS_MON_PID=""	# PID of the in-process stress_monitor_loop (cleanup target)
 
 # --email: set to 1 when --email flag is given explicitly; --run-all sends a report only
 # when this is 1.  --auto always emails regardless.
@@ -248,11 +254,17 @@ _ibs_cleanup() {
         # shellcheck disable=SC2086
         kill -TERM $STRESS_PIDS 2>/dev/null || true
     fi
+    # Kill stress monitor loop if still alive (panic/SIGINT path).
+    if [ -n "${_STRESS_MON_PID:-}" ]; then
+        kill -TERM "$_STRESS_MON_PID" 2>/dev/null || true
+    fi
     rm -f /tmp/ibs_exit_$$.tmp /tmp/ibs_pass_$$.tmp /tmp/ibs_fail_$$.tmp \
           /tmp/ibs_skip_$$.tmp /tmp/ibs_xfail_$$.tmp /tmp/ibs_broken_$$.tmp \
           /tmp/ibs_crit_f_$$.tmp /tmp/ibs_high_p_$$.tmp /tmp/ibs_high_f_$$.tmp \
           /tmp/ibs_med_p_$$.tmp /tmp/ibs_med_f_$$.tmp /tmp/ibs_matrix_$$.tmp \
-          /tmp/ibs_kyuafile_$$.tmp 2>/dev/null || true
+          /tmp/ibs_kyuafile_$$.tmp /tmp/ibs_desc_$$.tmp \
+          /tmp/ibs_sm_done_$$.tmp /tmp/ibs_sm_last_$$.tmp \
+          /tmp/ibs_idx_$$.tmp /tmp/ibs_exit_$$_*.tmp 2>/dev/null || true
 }
 trap _ibs_cleanup EXIT INT TERM
 
@@ -261,33 +273,38 @@ trap _ibs_cleanup EXIT INT TERM
 # Return the source (build) directory for a suite
 suite_src_dir() {
     case "$1" in
+        DEFAULT) printf '%s' "${SCRIPT_DIR}/tests/sys/amd/ibs" ;;
         IBS)    printf '%s' "${SCRIPT_DIR}/tests/sys/amd/ibs" ;;
         UMCDF)  printf '%s' "${SCRIPT_DIR}/tests/sys/amd/umcdf" ;;
         PMC)    printf '%s' "${SCRIPT_DIR}/tests/sys/amd/pmc" ;;
         TSC)    printf '%s' "${SCRIPT_DIR}/tests/sys/amd/tsc" ;;
+        L3)     printf '%s' "${SCRIPT_DIR}/tests/sys/amd/l3" ;;
         STRESS) printf '%s' "${SCRIPT_DIR}/tests/sys/amd/stress" ;;
-        *)      printf '%s' "${SCRIPT_DIR}/tests/sys/amd/ibs" ;;
+        *)      return 1 ;;
     esac
 }
 
 # Return the install (kyua) directory for a suite
 suite_install_dir() {
     case "$1" in
+        DEFAULT) printf '/usr/tests/sys/amd/ibs' ;;
         IBS)    printf '/usr/tests/sys/amd/ibs' ;;
         UMCDF)  printf '/usr/tests/sys/amd/umcdf' ;;
         PMC)    printf '/usr/tests/sys/amd/pmc' ;;
         TSC)    printf '/usr/tests/sys/amd/tsc' ;;
+        L3)     printf '/usr/tests/sys/amd/l3' ;;
         STRESS) printf '/usr/tests/sys/amd/stress' ;;
-        *)      printf '/usr/tests/sys/amd/ibs' ;;
+        *)      return 1 ;;
     esac
 }
 
 # Expand a SUITE selector to a space-separated list of individual suites.
 expand_suite_list() {
     case "$1" in
-        IBS|UMCDF|PMC|TSC|STRESS) printf '%s' "$1" ;;
-        ALL)     printf 'IBS UMCDF PMC TSC STRESS' ;;
-        *)       printf 'IBS UMCDF PMC' ;;
+        IBS|UMCDF|PMC|TSC|L3|STRESS) printf '%s' "$1" ;;
+        ALL)     printf 'IBS UMCDF PMC TSC L3 STRESS' ;;
+        DEFAULT) printf 'IBS UMCDF PMC' ;;
+        *)       return 1 ;;
     esac
 }
 
@@ -777,6 +794,31 @@ install_kernel_to_boot() {
 
 # ── Auto-test sentinel and rc.d service ───────────────────────────────────
 
+# Print a POSIX shell single-quoted representation of $1.
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
+# Write NAME=VALUE to stdout using shell_quote() for VALUE.
+write_sentinel_var() {
+    printf '%s=' "$1"
+    shell_quote "$2"
+    printf '\n'
+}
+
+valid_category_token() {
+    case "$1" in
+        TC-?*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;;
+    esac
+    return 0
+}
+
 # Write the sentinel file that the rc.d service reads after reboot
 write_autotest_sentinel() {
     _email="${1:-$REPORT_EMAIL}"
@@ -787,19 +829,20 @@ write_autotest_sentinel() {
         return 0
     fi
     _sentinel_commit=$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
-    cat > "$AUTOTEST_SENTINEL" << EOF
-# ibs-autotest sentinel -written by run.sh --auto
-# Consumed and deleted by ${RCD_SERVICE} after tests complete.
-AUTOTEST_EMAIL=${_email}
-AUTOTEST_SUITE=${SUITE}
-AUTOTEST_SUITE_LIST=${SUITE_LIST}
-AUTOTEST_CATEGORIES=${CATEGORIES}
-AUTOTEST_SCRIPT_DIR=${SCRIPT_DIR}
-AUTOTEST_KERNCONF=${AUTO_KERNCONF}
-AUTOTEST_TRIGGER_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-AUTOTEST_SRC_COMMIT=${_sentinel_commit}
-AUTOTEST_WITH_STRESS=${WITH_STRESS}
-EOF
+    _trigger_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    {
+        printf '%s\n' '# ibs-autotest sentinel -written by run.sh --auto'
+        printf '# Consumed and deleted by %s after tests complete.\n' "$RCD_SERVICE"
+        write_sentinel_var AUTOTEST_EMAIL "$_email"
+        write_sentinel_var AUTOTEST_SUITE "$SUITE"
+        write_sentinel_var AUTOTEST_SUITE_LIST "$SUITE_LIST"
+        write_sentinel_var AUTOTEST_CATEGORIES "$CATEGORIES"
+        write_sentinel_var AUTOTEST_SCRIPT_DIR "$SCRIPT_DIR"
+        write_sentinel_var AUTOTEST_KERNCONF "$AUTO_KERNCONF"
+        write_sentinel_var AUTOTEST_TRIGGER_TIME "$_trigger_time"
+        write_sentinel_var AUTOTEST_SRC_COMMIT "$_sentinel_commit"
+        write_sentinel_var AUTOTEST_WITH_STRESS "$WITH_STRESS"
+    } > "$AUTOTEST_SENTINEL"
     chmod 600 "$AUTOTEST_SENTINEL"
     log_success "Sentinel written"
 }
@@ -837,7 +880,23 @@ ibs_autotest_run()
 
     [ -f "$SENTINEL" ] || return 0
 
-    # Read config from sentinel
+    # The sentinel is shell syntax.  Verify the file and parent directory before
+    # dot-sourcing so rc.d never executes a replaced or writable file at boot.
+    _sentinel_parent=${SENTINEL%/*}
+    _sentinel_ok=$(find "$SENTINEL" -prune -type f -user root \
+        ! -perm -020 ! -perm -002 2>/dev/null)
+    if [ "$_sentinel_ok" != "$SENTINEL" ]; then
+        echo "Invalid sentinel ownership, type, or mode: $SENTINEL" >> "$LOG"
+        return 1
+    fi
+    _parent_ok=$(find "$_sentinel_parent" -prune -type d -user root \
+        ! -perm -020 ! -perm -002 2>/dev/null)
+    if [ "$_parent_ok" != "$_sentinel_parent" ]; then
+        echo "Invalid sentinel parent ownership or mode: $_sentinel_parent" >> "$LOG"
+        return 1
+    fi
+
+    # Read config from sentinel after the trust boundary above.
     . "$SENTINEL"
     SCRIPT="${AUTOTEST_SCRIPT_DIR}/run.sh"
 
@@ -856,25 +915,62 @@ ibs_autotest_run()
     # Remove sentinel to prevent re-run
     rm -f "$SENTINEL"
 
-    # Build args ---force skips all confirm_cmd prompts (no tty in rc.d context)
-    _args="--run-all --force"
-    [ -n "$AUTOTEST_SUITE" ]         && _args="$_args --suite $AUTOTEST_SUITE"
-    [ "$AUTOTEST_WITH_STRESS" = "1" ] && _args="$_args --stress"
-    _cat_args=""
+    # Validate sourced sentinel values before using them as paths or argv.
+    case "$AUTOTEST_SUITE" in
+        ""|DEFAULT|IBS|UMCDF|PMC|TSC|L3|STRESS|ALL) ;;
+        *) echo "Invalid AUTOTEST_SUITE in sentinel: $AUTOTEST_SUITE" >> "$LOG"; return 1 ;;
+    esac
+    case "$AUTOTEST_WITH_STRESS" in
+        ""|0|1) ;;
+        *) echo "Invalid AUTOTEST_WITH_STRESS in sentinel: $AUTOTEST_WITH_STRESS" >> "$LOG"; return 1 ;;
+    esac
     for _c in $AUTOTEST_CATEGORIES; do
-        _cat_args="$_cat_args --category $_c"
+        case "$_c" in
+            TC-?*) ;;
+            *) echo "Invalid AUTOTEST_CATEGORIES token in sentinel: $_c" >> "$LOG"; return 1 ;;
+        esac
+        case "$_c" in
+            *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-]*)
+                echo "Invalid AUTOTEST_CATEGORIES token in sentinel: $_c" >> "$LOG"
+                return 1
+                ;;
+        esac
     done
 
-    # Compile test suite if not installed
-    if [ ! -d "/usr/tests/sys/amd/${AUTOTEST_SUITE:+$(echo "$AUTOTEST_SUITE" | tr '[:upper:]' '[:lower:]')}" ]; then
-        echo "=== Compiling test suite ===" >> "$LOG"
-        sh "$SCRIPT" --compile --suite "$AUTOTEST_SUITE" >> "$LOG" 2>&1 || true
-    fi
+    # Build argv with set --.  Do not concatenate shell argument strings here.
+    set -- --run-all --force
+    [ -n "$AUTOTEST_SUITE" ]          && set -- "$@" --suite "$AUTOTEST_SUITE"
+    [ "$AUTOTEST_WITH_STRESS" = "1" ] && set -- "$@" --stress
+    for _c in $AUTOTEST_CATEGORIES; do
+        set -- "$@" --category "$_c"
+    done
+
+    # Compile selected suites if their installed Kyuafile is missing.
+    _autotest_suites="$AUTOTEST_SUITE_LIST"
+    [ -z "$_autotest_suites" ] && _autotest_suites="$AUTOTEST_SUITE"
+    case "$_autotest_suites" in
+        ""|DEFAULT) _autotest_suites="IBS UMCDF PMC" ;;
+        ALL)        _autotest_suites="IBS UMCDF PMC TSC L3 STRESS" ;;
+    esac
+    for _suite in $_autotest_suites; do
+        case "$_suite" in
+            IBS|UMCDF|PMC|TSC|L3|STRESS) ;;
+            *) echo "Invalid suite token in sentinel: $_suite" >> "$LOG"; return 1 ;;
+        esac
+        _suite_lc=$(printf '%s' "$_suite" | tr '[:upper:]' '[:lower:]')
+        if [ ! -f "/usr/tests/sys/amd/${_suite_lc}/Kyuafile" ]; then
+            echo "=== Compiling $_suite test suite ===" >> "$LOG"
+            if ! sh "$SCRIPT" --compile --suite "$_suite" --force >> "$LOG" 2>&1; then
+                echo "=== Failed to compile $_suite test suite; aborting ===" >> "$LOG"
+                return 1
+            fi
+        fi
+    done
 
     # Run tests and capture report
     RESULTS_DIR="/var/log/ibs-autotest-results-$(date +%Y%m%d-%H%M%S)"
     echo "=== Running tests (results: $RESULTS_DIR) ===" >> "$LOG"
-    sh "$SCRIPT" $_args $_cat_args \
+    sh "$SCRIPT" "$@" \
         --results-dir "$RESULTS_DIR" \
         >> "$LOG" 2>&1
     _rc=$?
@@ -1175,11 +1271,12 @@ ${YELLOW}COMMANDS${NC}
       safety net.
 
   ${BOLD}--compile${NC}
-      Build and install the test suite selected by --suite (default: IBS).
+      Build and install the test suite selected by --suite (default selector
+      uses IBS as the primary build suite).
       Runs 'make clean', 'make -j<ncpu>', and 'make install' inside the
-      suite source directory (tests/sys/amd/<suite>/).  Binaries land in
-      /usr/tests/sys/amd/<suite>/.  If the Kyuafile is missing it is
-      generated automatically.  Requires root.
+      suite source directory (tests/sys/amd/<suite>/).  Binaries and the
+      source-tree Kyuafile land in /usr/tests/sys/amd/<suite>/.
+      Requires root.
 
   ${BOLD}--run-all${NC}
       Execute the installed test suite with kyua and show live output.
@@ -1296,8 +1393,10 @@ ${YELLOW}SUITE SELECTION${NC}
     --suite IBS         Instruction-Based Sampling tests
     --suite UMCDF       UMC + Data Fabric PMU tests
     --suite PMC         General hwpmc counter tests
+    --suite TSC         TSC drift/invariance tests
+    --suite L3          L3 PMU detection and hit/miss tests
     --suite STRESS      Standalone stress-test suite (cpu/mem/net/disk ATF tests)
-    --suite ALL         All suites: IBS + UMCDF + PMC + STRESS
+    --suite ALL         All suites: IBS + UMCDF + PMC + TSC + L3 + STRESS
     (default)           IBS + UMCDF + PMC  (all production suites)
 
     Affects which source directory is compiled (--compile) and which
@@ -1331,6 +1430,16 @@ ${YELLOW}CATEGORY SELECTION${NC}
     PMC categories:
       TC-PMCAPI   hwpmc API       General hwpmc API and error paths         [HIGH]
       TC-PMCSTAT  pmcstat Decode  pmcstat command and pmclog decode paths   [HIGH/MEDIUM]
+
+    TSC categories:
+      TC-TSC-DET  TSC Detection   TSC capability and frequency discovery     [CRITICAL]
+      TC-TSC-DRF  TSC Drift       Cross-CPU TSC drift validation             [HIGH]
+      TC-TSC-INV  TSC Invariant   Invariant-TSC behavior checks             [HIGH]
+      TC-TSCSTR   TSC Stress      TSC behavior under sustained CPU load      [HIGH]
+
+    L3 categories:
+      TC-DET-L3   L3 Detection    L3 PMU availability and metadata checks    [CRITICAL]
+      TC-UNC-L3   L3 PMC          L3 hit/miss event validation               [HIGH]
 
     STRESS categories:
       TC-CSTR  CPU Stress     Per-CPU compute, context-switch, FPU load     [MEDIUM]
@@ -1550,6 +1659,10 @@ check_boot_environment() {
 }
 
 check_root_privileges() {
+    if [ $DRY_RUN -eq 1 ]; then
+        log_verbose "Dry run: skipping root-privilege check"
+        return 0
+    fi
     if [ "$(id -u)" -ne 0 ]; then
         log_error "Root privileges required for IBS testing"
         log_error "Run with: sudo $0 $@"
@@ -1640,7 +1753,11 @@ sync_repository() {
 
 # Build and install tests
 compile_tests() {
-    log_info "Building IBS test suite..."
+    _ct_suite="$SUITE"
+    case "$_ct_suite" in
+        DEFAULT|ALL) _ct_suite="$_SUITE_PRIMARY" ;;
+    esac
+    log_info "Building $_ct_suite test suite..."
 
     if [ ! -d "$TESTS_DIR" ]; then
         log_error "Test source directory not found: $TESTS_DIR"
@@ -1661,7 +1778,7 @@ compile_tests() {
         }
 
         log_verbose "Building tests with ${_ncpu} parallel jobs..."
-        confirm_cmd "Compile IBS tests in $TESTS_DIR (${_ncpu} parallel jobs)" \
+        confirm_cmd "Compile $_ct_suite tests in $TESTS_DIR (${_ncpu} parallel jobs)" \
             "make -j${_ncpu}" || return 1
         make -j"$_ncpu" || {
             log_error "Failed to build tests"
@@ -1676,62 +1793,15 @@ compile_tests() {
             exit 1
         }
 
-        # Generate Kyuafile if missing
+        # The suite Makefile owns the installed Kyuafile.  Do not synthesize a
+        # stale fallback here; run.sh category filtering expects the installed
+        # syntax-2 atf_test_program entries to match the source-tree Kyuafile.
         if [ ! -f "$TESTS_INSTALL_DIR/Kyuafile" ]; then
-            log_verbose "Generating Kyuafile..."
-            cat > "$TESTS_INSTALL_DIR/Kyuafile" << 'EOF'
-syntax(2)
-
-# IBS Test Suite Configuration -generated by run.sh
-# Severity: CRITICAL (any fail = FAIL) | HIGH (>=95%) | MEDIUM (>=80%)
-
-test_suite("IBS Tests") {
-    # TC-DET -Hardware Detection [CRITICAL]
-    include("ibs_cpu_test")
-    include("ibs_detect_test")
-
-    # TC-MSR -MSR Control [CRITICAL]
-    include("ibs_msr_test")
-    include("ibs_period_test")
-
-    # TC-INT -Interrupt Delivery [HIGH]
-    include("ibs_interrupt_test")
-    include("ibs_routing_test")
-
-    # TC-DATA -Sample Accuracy [HIGH]
-    include("ibs_data_accuracy_test")
-    include("ibs_l3miss_test")
-
-    # TC-SMP -SMP/Per-CPU [HIGH]
-    include("ibs_smp_test")
-
-    # TC-API -Userspace API [MEDIUM]
-    include("ibs_api_test")
-    include("ibs_ioctl_test")
-    include("ibs_swfilt_test")
-
-    # TC-STR -Stability/Stress [MEDIUM]
-    include("ibs_stress_test")
-
-    # TODO placeholders -implement and uncomment when ready:
-    # include("core_ctr_test")      # TC-CORE-CTR:  Core PMC Counters     [HIGH]
-    # include("core_filt_test")     # TC-CORE-FILT: Kernel/User Filter    [HIGH]
-    # include("core_smp_test")      # TC-CORE-SMP:  Core PMC SMP          [HIGH]
-    # include("unc_det_test")       # TC-UNC-DET:   Uncore Detection      [CRITICAL]
-    # include("unc_l3_test")        # TC-UNC-L3:    L3 Cache PMU          [HIGH]
-    # include("unc_df_test")        # TC-UNC-DF:    Data Fabric PMU       [HIGH]
-    # include("unc_umc_test")       # TC-UNC-UMC:   Memory Controller PMU [HIGH]
-    # include("unc_c2c_test")       # TC-UNC-C2C:   Cache-to-Cache PMU    [MEDIUM]
-    # include("misc_metrics_test")  # TC-MISC-METRICS: Perf Metrics       [MEDIUM]
-    # include("misc_topdown_test")  # TC-MISC-TOPDOWN: Top-Down Analysis  [MEDIUM]
-    # include("misc_proc_test")     # TC-MISC-PROC:    Per-Process PMC    [MEDIUM]
-    # include("misc_api_test")      # TC-MISC-API:     API Stability      [MEDIUM]
-}
-EOF
-            log_success "Kyuafile generated"
+            log_error "$_ct_suite install did not produce $TESTS_INSTALL_DIR/Kyuafile"
+            exit 1
         fi
 
-        log_success "IBS test suite built and installed successfully"
+        log_success "$_ct_suite test suite built and installed successfully"
         log_info "Tests installed to: $TESTS_INSTALL_DIR"
     else
         log_info "Would build and install tests (dry run)"
@@ -2114,7 +2184,7 @@ td.phase{font-size:11px;white-space:nowrap;font-family:monospace}
 
 <div class="section-title">Execution Phases</div>
 <div class="phase-legend">
-  <span class="phase-pill pill-1">Phase 1 &mdash; Non-stress (full parallelism)</span>
+  <span class="phase-pill pill-1">Phase 1 &mdash; Non-stress (suite-safe parallelism)</span>
   <span class="phase-pill pill-s1">Stress Batch 1 &mdash; CPU</span>
   <span class="phase-pill pill-s2">Stress Batch 2 &mdash; Memory</span>
   <span class="phase-pill pill-s3">Stress Batch 3 &mdash; Disk</span>
@@ -2168,7 +2238,12 @@ generate_html_index() {
 
     # Scan all results dirs, newest first by name (datetime names sort correctly)
     _rows=""
-    for _d in $(ls -dt "$HTML_DIR/results-"* 2>/dev/null); do
+    # Use find + sort (reverse alpha = newest first since names are timestamped)
+    # to avoid word-splitting on dir names with embedded whitespace.
+    find "$HTML_DIR" -maxdepth 1 -type d -name 'results-*' 2>/dev/null \
+        | sort -r > /tmp/ibs_idx_$$.tmp
+    while IFS= read -r _d; do
+        [ -d "$_d" ] || continue
         _n=$(basename "$_d")
         _rpt="$_d/report.txt"
         [ -f "$_rpt" ] || continue
@@ -2220,7 +2295,8 @@ generate_html_index() {
 <td class=\"links\"><a href=\"${_n}/report.txt\">txt</a>${_has_html} <a href=\"${_n}/report.xml\">xml</a></td>
 </tr>
 "
-    done
+    done < /tmp/ibs_idx_$$.tmp
+    rm -f /tmp/ibs_idx_$$.tmp
 
     cat > "$_idx_file" << IDXEOF
 <!DOCTYPE html>
@@ -2399,8 +2475,26 @@ SKIPHTMLEOF
     log_success "Skipped HTML report: ${_sk_html}"
 }
 
+# Validate that a suite has an installed Kyua directory and Kyuafile.
+validate_installed_suite() {
+    _vis_suite="$1"
+    if ! _vis_dir=$(suite_install_dir "$_vis_suite"); then
+        log_error "Unknown suite: $_vis_suite"
+        return 1
+    fi
+    if [ ! -d "$_vis_dir" ]; then
+        log_error "[$_vis_suite] Tests not installed at $_vis_dir. Run --suite $_vis_suite --compile first."
+        return 1
+    fi
+    if [ ! -f "$_vis_dir/Kyuafile" ]; then
+        log_error "[$_vis_suite] Kyuafile missing at $_vis_dir/Kyuafile. Run --suite $_vis_suite --compile first."
+        return 1
+    fi
+    return 0
+}
+
 # Run kyua for a single suite, accumulating results into shared temp files.
-# Args: $1 = suite name (IBS|UMCDF|PMC|STRESS)
+# Args: $1 = suite name (IBS|UMCDF|PMC|TSC|L3|STRESS)
 # Globals written: TMP_PASS, TMP_FAIL, TMP_SKIP, TMP_XFAIL, TMP_BROKEN,
 #                  TMP_CRIT_F, TMP_HIGH_P, TMP_HIGH_F, TMP_MED_P, TMP_MED_F,
 #                  TMP_MATRIX, TMP_DESC, LAST_RUN_LOG, LAST_TEST_STATE,
@@ -2409,18 +2503,17 @@ SKIPHTMLEOF
 _run_suite_once() {
     _rs_suite="$1"
     SUITE="$_rs_suite"
-    TESTS_INSTALL_DIR=$(suite_install_dir "$_rs_suite")
-
-    if [ ! -d "$TESTS_INSTALL_DIR" ]; then
-        log_error "[$_rs_suite] Tests not installed at $TESTS_INSTALL_DIR. Run --compile first."
+    if ! validate_installed_suite "$_rs_suite"; then
         return 1
     fi
+    TESTS_INSTALL_DIR=$(suite_install_dir "$_rs_suite")
 
-    # Parallelism: all suites and stress batches now respect $PARALLELISM.
-    # Resource isolation is achieved by running stress batches sequentially
-    # (Batch 1 CPU → Batch 2 Memory → Batch 3 Disk → Batch 4 Network) via
-    # _run_stress_batches(), not by forcing parallelism=1 here.
     _rs_par="$PARALLELISM"
+    if [ "$_rs_suite" = "L3" ]; then
+        # L3 PMCs are cache/package-level hardware resources.  Serialize this
+        # suite even when --suite ALL uses a high global Kyua parallelism.
+        _rs_par=1
+    fi
 
     echo ""
     echo "================================================================="
@@ -2467,12 +2560,16 @@ _run_suite_once() {
         log_info "Stress monitor started (${_rs_sm_total} tests, sequential)"
         stress_monitor_loop "$_rs_sm_start" "$_rs_sm_total" "$TMP_SM_DONE" "$TMP_SM_LAST" &
         _rs_sm_pid=$!
+        _STRESS_MON_PID="$_rs_sm_pid"
     fi
 
     # Confirm + run kyua
     confirm_cmd "Run${_rs_cat_label} $_rs_suite tests in $TESTS_INSTALL_DIR (parallelism: $_rs_par)" \
         "kyua -v parallelism=$_rs_par test${_rs_kyuafile_opt:+ $_rs_kyuafile_opt}" || {
-        [ -n "$_rs_sm_pid" ] && kill "$_rs_sm_pid" 2>/dev/null
+        if [ -n "$_rs_sm_pid" ]; then
+            kill "$_rs_sm_pid" 2>/dev/null
+            _STRESS_MON_PID=""
+        fi
         return 1
     }
 
@@ -2563,6 +2660,7 @@ _run_suite_once() {
     if [ -n "$_rs_sm_pid" ]; then
         kill "$_rs_sm_pid" 2>/dev/null
         wait "$_rs_sm_pid" 2>/dev/null || true
+        _STRESS_MON_PID=""
     fi
 
     # Append kyua verbose report for this suite (while kyua.db is fresh)
@@ -2600,6 +2698,10 @@ _suite_has_batch_tests() {
         CATEGORIES="$_sht_orig_cats"
         return 1
     fi
+    if [ ! -d "$_sht_dir" ] || [ ! -f "$_sht_dir/Kyuafile" ]; then
+        CATEGORIES="$_sht_orig_cats"
+        return 1
+    fi
     _sht_kf=$(build_filtered_kyuafile "$_sht_dir")
     _sht_count=$(grep -c '^atf_test_program' "$_sht_kf" 2>/dev/null)
     _sht_count=${_sht_count:-0}
@@ -2615,6 +2717,17 @@ _suite_has_batch_tests() {
 # Batches that have no tests for the active SUITE_LIST are skipped silently.
 # Globals written: same as _run_suite_once (TMP_PASS, TMP_FAIL, etc., REPORT_TXT)
 # Globals read:    SUITE_LIST, PARALLELISM, REPORT_TXT, TEST_EXIT_CODE
+_effective_batch_categories() {
+    _ebc_batch="$1"
+    _ebc_orig="$2"
+
+    if [ -n "$_ebc_orig" ]; then
+        category_intersection "$_ebc_orig" "$_ebc_batch"
+    else
+        printf '%s' "$_ebc_batch"
+    fi
+}
+
 _run_stress_batches() {
     _srb_orig_cats="$CATEGORIES"
 
@@ -2632,27 +2745,28 @@ _run_stress_batches() {
     #        ibs_nmi_stress_test (TC-NMISTR, IBS suite)
     #        tsc_stress_test (TC-TSCSTR, TSC suite)
     _srb_b1_cats="TC-CSTR TC-ISTR TC-FSTR TC-STR TC-NMISTR TC-TSCSTR"
+    _srb_b1_eff=$(_effective_batch_categories "$_srb_b1_cats" "$_srb_orig_cats")
     _srb_b1_run=0
     {
         printf '\n=================================================================\n'
-        printf 'STRESS BATCH 1/4 — CPU  [%s]\n' "$_srb_b1_cats"
+        printf 'STRESS BATCH 1/4 — CPU  [%s]\n' "$_srb_b1_eff"
         printf '=================================================================\n'
     } >> "$REPORT_TXT"
-    if [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b1_cats"; then
+    if [ -n "$_srb_b1_eff" ] && [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b1_eff"; then
         log_info "Stress Batch 1/4 — CPU: STRESS suite"
-        CATEGORIES="$_srb_b1_cats"
+        CATEGORIES="$_srb_b1_eff"
         _run_suite_once STRESS || TEST_EXIT_CODE=1
         _srb_b1_run=1
     fi
-    if [ "$_srb_ibs_active" -eq 1 ] && _suite_has_batch_tests IBS "$_srb_b1_cats"; then
+    if [ -n "$_srb_b1_eff" ] && [ "$_srb_ibs_active" -eq 1 ] && _suite_has_batch_tests IBS "$_srb_b1_eff"; then
         log_info "Stress Batch 1/4 — CPU: IBS suite"
-        CATEGORIES="$_srb_b1_cats"
+        CATEGORIES="$_srb_b1_eff"
         _run_suite_once IBS || TEST_EXIT_CODE=1
         _srb_b1_run=1
     fi
-    if [ "$_srb_tsc_active" -eq 1 ] && _suite_has_batch_tests TSC "$_srb_b1_cats"; then
+    if [ -n "$_srb_b1_eff" ] && [ "$_srb_tsc_active" -eq 1 ] && _suite_has_batch_tests TSC "$_srb_b1_eff"; then
         log_info "Stress Batch 1/4 — CPU: TSC suite"
-        CATEGORIES="$_srb_b1_cats"
+        CATEGORIES="$_srb_b1_eff"
         _run_suite_once TSC || TEST_EXIT_CODE=1
         _srb_b1_run=1
     fi
@@ -2662,21 +2776,22 @@ _run_stress_batches() {
     # Tests: mem_stress_test (STRESS suite)
     #        ibs_mem_stress_test (TC-MEMIBS, IBS suite)
     _srb_b2_cats="TC-MSTR TC-MEMIBS"
+    _srb_b2_eff=$(_effective_batch_categories "$_srb_b2_cats" "$_srb_orig_cats")
     _srb_b2_run=0
     {
         printf '\n=================================================================\n'
-        printf 'STRESS BATCH 2/4 — Memory  [%s]\n' "$_srb_b2_cats"
+        printf 'STRESS BATCH 2/4 — Memory  [%s]\n' "$_srb_b2_eff"
         printf '=================================================================\n'
     } >> "$REPORT_TXT"
-    if [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b2_cats"; then
+    if [ -n "$_srb_b2_eff" ] && [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b2_eff"; then
         log_info "Stress Batch 2/4 — Memory: STRESS suite"
-        CATEGORIES="$_srb_b2_cats"
+        CATEGORIES="$_srb_b2_eff"
         _run_suite_once STRESS || TEST_EXIT_CODE=1
         _srb_b2_run=1
     fi
-    if [ "$_srb_ibs_active" -eq 1 ] && _suite_has_batch_tests IBS "$_srb_b2_cats"; then
+    if [ -n "$_srb_b2_eff" ] && [ "$_srb_ibs_active" -eq 1 ] && _suite_has_batch_tests IBS "$_srb_b2_eff"; then
         log_info "Stress Batch 2/4 — Memory: IBS suite"
-        CATEGORIES="$_srb_b2_cats"
+        CATEGORIES="$_srb_b2_eff"
         _run_suite_once IBS || TEST_EXIT_CODE=1
         _srb_b2_run=1
     fi
@@ -2684,14 +2799,15 @@ _run_stress_batches() {
 
     # ── Batch 3 — Disk stress ────────────────────────────────────────────
     _srb_b3_cats="TC-DSTR"
+    _srb_b3_eff=$(_effective_batch_categories "$_srb_b3_cats" "$_srb_orig_cats")
     {
         printf '\n=================================================================\n'
-        printf 'STRESS BATCH 3/4 — Disk  [%s]\n' "$_srb_b3_cats"
+        printf 'STRESS BATCH 3/4 — Disk  [%s]\n' "$_srb_b3_eff"
         printf '=================================================================\n'
     } >> "$REPORT_TXT"
-    if [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b3_cats"; then
+    if [ -n "$_srb_b3_eff" ] && [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b3_eff"; then
         log_info "Stress Batch 3/4 — Disk: STRESS suite"
-        CATEGORIES="$_srb_b3_cats"
+        CATEGORIES="$_srb_b3_eff"
         _run_suite_once STRESS || TEST_EXIT_CODE=1
     else
         printf '  (no tests for active suite selection)\n' >> "$REPORT_TXT"
@@ -2699,14 +2815,15 @@ _run_stress_batches() {
 
     # ── Batch 4 — Network stress ─────────────────────────────────────────
     _srb_b4_cats="TC-NSTR"
+    _srb_b4_eff=$(_effective_batch_categories "$_srb_b4_cats" "$_srb_orig_cats")
     {
         printf '\n=================================================================\n'
-        printf 'STRESS BATCH 4/4 — Network  [%s]\n' "$_srb_b4_cats"
+        printf 'STRESS BATCH 4/4 — Network  [%s]\n' "$_srb_b4_eff"
         printf '=================================================================\n'
     } >> "$REPORT_TXT"
-    if [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b4_cats"; then
+    if [ -n "$_srb_b4_eff" ] && [ "$_srb_str_active" -eq 1 ] && _suite_has_batch_tests STRESS "$_srb_b4_eff"; then
         log_info "Stress Batch 4/4 — Network: STRESS suite"
-        CATEGORIES="$_srb_b4_cats"
+        CATEGORIES="$_srb_b4_eff"
         _run_suite_once STRESS || TEST_EXIT_CODE=1
     else
         printf '  (no tests for active suite selection)\n' >> "$REPORT_TXT"
@@ -2718,11 +2835,25 @@ _run_stress_batches() {
 # Test execution and reporting
 run_all_tests() {
     log_info "Running suites: ${SUITE_LIST}"
+
+    if [ $DRY_RUN -eq 1 ]; then
+        log_info "Would run suites: $SUITE_LIST (dry run)"
+        for _suite in $SUITE_LIST; do
+            log_info "Would validate and run: $_suite"
+        done
+        [ "$WITH_STRESS" -eq 1 ] && log_info "Would start background stressors"
+        return 0
+    fi
+
     preflight_checks
     load_module
-    [ "$WITH_STRESS" -eq 1 ] && start_background_stressors
 
     if [ $DRY_RUN -eq 0 ]; then
+        for _suite in $SUITE_LIST; do
+            validate_installed_suite "$_suite" || return 1
+        done
+        [ "$WITH_STRESS" -eq 1 ] && start_background_stressors
+
         print_cpu_test_context
 
         mkdir -p "$RESULTS_DIR"
@@ -2779,18 +2910,19 @@ run_all_tests() {
         } > "$LAST_TEST_STATE"
 
         # ── Two-phase execution ──────────────────────────────────────────────
-        # Phase 1: all non-stress tests run with full parallelism.
+        # Phase 1: non-stress tests run with suite-safe parallelism; L3 PMU
+        # runtime tests are serialized inside _run_suite_once().
         # Phase 2: stress tests run in 4 sequential resource-based batches
         #          (CPU → Memory → Disk → Network); tests within each batch
         #          run in parallel with each other at $PARALLELISM.
         TEST_EXIT_CODE=0
         _ph_orig_cats="$CATEGORIES"
 
-        # Non-stress categories for IBS, UMCDF, and PMC suites.
+        # Non-stress categories for IBS, UMCDF, PMC, TSC, and L3 suites.
         # TC-NMISTR and TC-MEMIBS are stress; TC-STR is stress — all excluded here.
         _NONSTRESS_CATS="TC-DET TC-MSR TC-INT TC-DATA TC-SMP TC-HWPMC TC-DRV \
 TC-CONC TC-SEC TC-API TC-UNIT TC-UMCDET TC-UMCPMC TC-UMCUNIT \
-TC-PMCAPI TC-PMCSTAT"
+TC-PMCAPI TC-PMCSTAT TC-TSC-DET TC-TSC-DRF TC-TSC-INV TC-DET-L3 TC-UNC-L3"
         if [ -n "$_ph_orig_cats" ]; then
             _ph_cats=$(category_intersection \
                 "$_ph_orig_cats" "$_NONSTRESS_CATS")
@@ -2801,10 +2933,10 @@ TC-PMCAPI TC-PMCSTAT"
         # ── Phase 1: non-stress tests ──
         {
             printf '\n=================================================================\n'
-            printf 'PHASE 1 — NON-STRESS TESTS  (parallelism: %s)\n' "$PARALLELISM"
+            printf 'PHASE 1 — NON-STRESS TESTS  (parallelism: %s; L3 serial)\n' "$PARALLELISM"
             printf '=================================================================\n'
         } >> "$REPORT_TXT"
-        log_info "Phase 1/2: non-stress tests (parallelism: $PARALLELISM)"
+        log_info "Phase 1/2: non-stress tests (parallelism: $PARALLELISM; L3 serial)"
         for _s in $SUITE_LIST; do
             case "$_s" in
                 STRESS) continue ;;  # STRESS suite contains only stress tests
@@ -2820,7 +2952,7 @@ TC-PMCAPI TC-PMCSTAT"
         # Check whether any active suite has stress tests.
         _ph_has_stress=0
         for _s in $SUITE_LIST; do
-            case "$_s" in IBS|STRESS|ALL) _ph_has_stress=1 ;; esac
+            case "$_s" in IBS|TSC|STRESS|ALL) _ph_has_stress=1 ;; esac
         done
         if [ "$_ph_has_stress" -eq 1 ]; then
             {
@@ -3233,34 +3365,62 @@ TC-PMCAPI TC-PMCSTAT"
             log_info "Sending report email to: $REPORT_EMAIL"
             send_report_email "$REPORT_TXT" "$_rt_verdict" "$REPORT_EMAIL"
         fi
-    else
-        log_info "Would run suites: $SUITE_LIST (dry run)"
     fi
 }
 
 run_specific_test() {
     TEST_NAME="$1"
-    log_info "Executing specific test: $TEST_NAME"
+    if [ "$SUITE" = "ALL" ]; then
+        log_error "--run requires a concrete suite; use --suite IBS|UMCDF|PMC|TSC|L3|STRESS."
+        return 1
+    fi
+    _rst_suite="$SUITE"
+    case "$_rst_suite" in
+        DEFAULT) _rst_suite="$_SUITE_PRIMARY" ;;
+    esac
+    TESTS_INSTALL_DIR=$(suite_install_dir "$_rst_suite")
+
+    if [ $DRY_RUN -eq 1 ]; then
+        log_info "Would run $_rst_suite test $TEST_NAME (dry run)"
+        return 0
+    fi
+
+    validate_installed_suite "$_rst_suite" || return 1
+
+    log_info "Executing specific $_rst_suite test: $TEST_NAME"
     preflight_checks
     load_module
 
-    if [ ! -d "$TESTS_INSTALL_DIR" ]; then
-        log_error "Tests not installed. Run --compile first"
-        exit 1
-    fi
-
-    cd "$TESTS_INSTALL_DIR" || exit 1
+    cd "$TESTS_INSTALL_DIR" || return 1
 
     if [ $DRY_RUN -eq 0 ]; then
+        _rst_list=$(kyua list 2>&1) || {
+            log_error "[$_rst_suite] kyua list failed in $TESTS_INSTALL_DIR"
+            printf '%s\n' "$_rst_list"
+            return 1
+        }
+        if ! printf '%s\n' "$_rst_list" | awk -v t="$TEST_NAME" '
+            BEGIN { found = 1 }
+            $0 == t { found = 0 }
+            index($0, t ":") == 1 { found = 0 }
+            END { exit found }
+        '; then
+            log_error "[$_rst_suite] Test not found: $TEST_NAME"
+            log_info "Available tests in $_rst_suite:"
+            printf '%s\n' "$_rst_list" | sed 's/^/  /'
+            return 1
+        fi
+
         mkdir -p "$RESULTS_DIR"
-        REPORT_TXT="$RESULTS_DIR/report-${TEST_NAME}.txt"
+        _rst_report_name=$(printf '%s' "$TEST_NAME" | tr '/:' '__')
+        REPORT_TXT="$RESULTS_DIR/report-${_rst_report_name}.txt"
 
         confirm_cmd "Run single test in $TESTS_INSTALL_DIR" \
-            "kyua test sys/amd/ibs:$TEST_NAME" || return 1
-        log_verbose "Running kyua test sys/amd/ibs:$TEST_NAME..."
+            "kyua test $TEST_NAME" || return 1
+        log_verbose "Running kyua test $TEST_NAME..."
 
         {
-            printf "IBS Test Suite -Single Test Report\n"
+            printf "%s Test Suite -Single Test Report\n" "$_rst_suite"
             printf "Test       : %s\n" "$TEST_NAME"
             printf "Generated  : %s\n" "$(date)"
             printf "System     : %s\n" "$(uname -a)"
@@ -3268,7 +3428,8 @@ run_specific_test() {
             printf "\n"
         } > "$REPORT_TXT"
 
-        KYUA_OUT=$(kyua test "sys/amd/ibs:$TEST_NAME" 2>&1)
+        KYUA_OUT=$(kyua test "$TEST_NAME" 2>&1)
+        _rst_kyua_rc=$?
         printf '%s\n' "$KYUA_OUT"
         printf '%s\n' "$KYUA_OUT" >> "$REPORT_TXT"
 
@@ -3279,7 +3440,7 @@ run_specific_test() {
         T_BRKN=$(printf '%s\n' "$KYUA_OUT" | grep -c " -> .*broken")
         T_TOTAL=$((T_PASS + T_FAIL + T_SKIP + T_XFAIL + T_BRKN))
 
-        if [ "$T_FAIL" -eq 0 ] && [ "$T_BRKN" -eq 0 ]; then
+        if [ "$_rst_kyua_rc" -eq 0 ] && [ "$T_FAIL" -eq 0 ] && [ "$T_BRKN" -eq 0 ]; then
             SINGLE_VERDICT="APPROVED"
         else
             SINGLE_VERDICT="NOT APPROVED"
@@ -3302,59 +3463,111 @@ run_specific_test() {
         } >> "$REPORT_TXT"
 
         log_info "Report saved to: $REPORT_TXT"
-    else
-        log_info "Would run test $TEST_NAME (dry run)"
+        return "$_rst_kyua_rc"
     fi
+}
+
+_list_tests_for_suite() {
+    _lts_suite="$1"
+    _lts_dir="$2"
+
+    if [ ! -d "$_lts_dir" ]; then
+        log_error "[$_lts_suite] Tests not installed at $_lts_dir. Run --suite $_lts_suite --compile first."
+        return 1
+    fi
+    if [ ! -f "$_lts_dir/Kyuafile" ]; then
+        log_error "[$_lts_suite] Kyuafile missing at $_lts_dir/Kyuafile. Run --suite $_lts_suite --compile first."
+        return 1
+    fi
+
+    log_info "Available $_lts_suite tests in $_lts_dir:"
+
+    (
+        cd "$_lts_dir" || exit 1
+
+        _lts_list=$(kyua list 2>&1) || {
+            log_error "[$_lts_suite] kyua list failed in $_lts_dir"
+            printf '%s\n' "$_lts_list"
+            exit 1
+        }
+
+        echo ""
+        printf "  %-38s %-12s %-24s %s\n" "TEST CASE" "CATEGORY" "LABEL" "SEVERITY"
+        printf "  %-38s %-12s %-24s %s\n" "---------" "--------" "-----" "--------"
+        printf '%s\n' "$_lts_list" | while IFS= read -r tc; do
+            BIN=$(printf '%s' "$tc" | cut -d: -f1 | sed 's|.*/||')
+            META=$(get_test_meta "$BIN")
+            CAT=$(printf '%s' "$META" | cut -d: -f1)
+            LABEL=$(printf '%s' "$META" | cut -d: -f2)
+            SEV=$(printf '%s' "$META" | cut -d: -f3)
+            SCOL=$(severity_color "$SEV")
+            printf "  %-38s %-12s %-24s ${SCOL}%s${NC}\n" "$tc" "$CAT" "$LABEL" "$SEV"
+        done
+
+        if [ -z "$_lts_list" ]; then
+            IMPL=0
+        else
+            IMPL=$(printf '%s\n' "$_lts_list" | wc -l | tr -d ' ')
+        fi
+        echo ""
+        if [ "$_lts_suite" = "IBS" ]; then
+            printf '%s\n' "${YELLOW}═══ PLACEHOLDERS -not yet implemented ═══${NC}"
+            printf "  %-38s %-12s %-24s %s\n" "TEST AREA" "CATEGORY" "LABEL" "SEVERITY"
+            printf "  %-38s %-12s %-24s %s\n" "---------" "--------" "-----" "--------"
+            # Core PMC
+            printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "core_ctr_test  (TODO)" "TC-CORE-CTR"  "Core PMC Counters"   "HIGH"
+            printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "core_filt_test (TODO)" "TC-CORE-FILT" "Kernel/User Filter"  "HIGH"
+            printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "core_smp_test  (TODO)" "TC-CORE-SMP"  "Core PMC SMP"        "HIGH"
+            # Uncore PMC
+            printf "  %-38s %-12s %-24s ${RED}%s${NC}\n"    "unc_det_test   (TODO)" "TC-UNC-DET"   "Uncore Detection"   "CRITICAL"
+            printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "unc_l3_test    (TODO)" "TC-UNC-L3"    "L3 Cache PMU"        "HIGH"
+            printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "unc_df_test    (TODO)" "TC-UNC-DF"    "Data Fabric PMU"     "HIGH"
+            printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "unc_umc_test   (TODO)" "TC-UNC-UMC"   "Memory Controller"   "HIGH"
+            printf "  %-38s %-12s %-24s ${CYAN}%s${NC}\n"   "unc_c2c_test   (TODO)" "TC-UNC-C2C"   "Cache-to-Cache PMU"  "MEDIUM"
+            # Misc
+            printf "  %-38s %-12s %-24s ${CYAN}%s${NC}\n"   "misc_metrics_test (TODO)" "TC-MISC-METRICS" "Perf Metrics"   "MEDIUM"
+            printf "  %-38s %-12s %-24s ${CYAN}%s${NC}\n"   "misc_topdown_test (TODO)" "TC-MISC-TOPDOWN" "Top-Down Analysis" "MEDIUM"
+            printf "  %-38s %-12s %-24s ${CYAN}%s${NC}\n"   "misc_proc_test    (TODO)" "TC-MISC-PROC"    "Per-Process PMC"  "MEDIUM"
+            printf "  %-38s %-12s %-24s ${CYAN}%s${NC}\n"   "misc_api_test     (TODO)" "TC-MISC-API"     "API Stability"    "MEDIUM"
+            echo ""
+            echo "  Implemented: $IMPL test cases   Placeholders: 12 test areas"
+        else
+            echo "  Implemented: $IMPL test cases"
+        fi
+    )
 }
 
 list_tests() {
-    log_info "Available IBS tests:"
+    _lt_rc=0
 
-    if [ ! -d "$TESTS_INSTALL_DIR" ]; then
-        log_error "Tests not installed. Run --compile first"
-        exit 1
+    if [ "$SUITE" = "ALL" ]; then
+        for _lt_suite in $SUITE_LIST; do
+            if ! _lt_dir=$(suite_install_dir "$_lt_suite"); then
+                log_error "Unknown suite: $_lt_suite"
+                _lt_rc=1
+                continue
+            fi
+            _list_tests_for_suite "$_lt_suite" "$_lt_dir" || _lt_rc=1
+        done
+        return "$_lt_rc"
     fi
 
-    cd "$TESTS_INSTALL_DIR" || exit 1
-
-    echo ""
-    printf "  %-38s %-12s %-24s %s\n" "TEST CASE" "CATEGORY" "LABEL" "SEVERITY"
-    printf "  %-38s %-12s %-24s %s\n" "---------" "--------" "-----" "--------"
-    kyua list | sed 's|sys/amd/ibs/||' | while IFS= read -r tc; do
-        BIN=$(printf '%s' "$tc" | cut -d: -f1)
-        META=$(get_test_meta "$BIN")
-        CAT=$(printf '%s' "$META" | cut -d: -f1)
-        LABEL=$(printf '%s' "$META" | cut -d: -f2)
-        SEV=$(printf '%s' "$META" | cut -d: -f3)
-        SCOL=$(severity_color "$SEV")
-        printf "  %-38s %-12s %-24s ${SCOL}%s${NC}\n" "$tc" "$CAT" "$LABEL" "$SEV"
-    done
-
-    IMPL=$(kyua list 2>/dev/null | grep -c "sys/amd/ibs" || echo 0)
-    echo ""
-    printf '%s\n' "${YELLOW}═══ PLACEHOLDERS -not yet implemented ═══${NC}"
-    printf "  %-38s %-12s %-24s %s\n" "TEST AREA" "CATEGORY" "LABEL" "SEVERITY"
-    printf "  %-38s %-12s %-24s %s\n" "---------" "--------" "-----" "--------"
-    # Core PMC
-    printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "core_ctr_test  (TODO)" "TC-CORE-CTR"  "Core PMC Counters"   "HIGH"
-    printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "core_filt_test (TODO)" "TC-CORE-FILT" "Kernel/User Filter"  "HIGH"
-    printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "core_smp_test  (TODO)" "TC-CORE-SMP"  "Core PMC SMP"        "HIGH"
-    # Uncore PMC
-    printf "  %-38s %-12s %-24s ${RED}%s${NC}\n"    "unc_det_test   (TODO)" "TC-UNC-DET"   "Uncore Detection"   "CRITICAL"
-    printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "unc_l3_test    (TODO)" "TC-UNC-L3"    "L3 Cache PMU"        "HIGH"
-    printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "unc_df_test    (TODO)" "TC-UNC-DF"    "Data Fabric PMU"     "HIGH"
-    printf "  %-38s %-12s %-24s ${YELLOW}%s${NC}\n" "unc_umc_test   (TODO)" "TC-UNC-UMC"   "Memory Controller"   "HIGH"
-    printf "  %-38s %-12s %-24s ${CYAN}%s${NC}\n"   "unc_c2c_test   (TODO)" "TC-UNC-C2C"   "Cache-to-Cache PMU"  "MEDIUM"
-    # Misc
-    printf "  %-38s %-12s %-24s ${CYAN}%s${NC}\n"   "misc_metrics_test (TODO)" "TC-MISC-METRICS" "Perf Metrics"   "MEDIUM"
-    printf "  %-38s %-12s %-24s ${CYAN}%s${NC}\n"   "misc_topdown_test (TODO)" "TC-MISC-TOPDOWN" "Top-Down Analysis" "MEDIUM"
-    printf "  %-38s %-12s %-24s ${CYAN}%s${NC}\n"   "misc_proc_test    (TODO)" "TC-MISC-PROC"    "Per-Process PMC"  "MEDIUM"
-    printf "  %-38s %-12s %-24s ${CYAN}%s${NC}\n"   "misc_api_test     (TODO)" "TC-MISC-API"     "API Stability"    "MEDIUM"
-    echo ""
-    echo "  Implemented: $IMPL test cases   Placeholders: 12 test areas"
+    _lt_suite="$SUITE"
+    case "$_lt_suite" in
+        DEFAULT) _lt_suite="$_SUITE_PRIMARY" ;;
+    esac
+    if ! _lt_dir=$(suite_install_dir "$_lt_suite"); then
+        log_error "Unknown suite: $_lt_suite"
+        return 1
+    fi
+    _list_tests_for_suite "$_lt_suite" "$_lt_dir"
 }
 
 show_report() {
+    _sr_suite="$SUITE"
+    case "$_sr_suite" in
+        DEFAULT|ALL) _sr_suite="$_SUITE_PRIMARY" ;;
+    esac
     log_info "Generating detailed test report..."
 
     if [ ! -d "$TESTS_INSTALL_DIR" ]; then
@@ -3370,7 +3583,7 @@ show_report() {
 
     echo ""
     echo "================================================================="
-    echo "IBS TEST SUITE DETAILED REPORT"
+    echo "$_sr_suite TEST SUITE DETAILED REPORT"
     echo "================================================================="
     echo "System: $(uname -a)"
     echo "Date: $(date)"
@@ -3492,32 +3705,36 @@ clean_artifacts() {
 }
 
 load_module() {
-    if [ $DRY_RUN -eq 0 ]; then
-        log_info "Loading cpuctl kernel module..."
-        if kldstat | grep -q cpuctl; then
-            log_success "cpuctl module already loaded"
-        else
-            confirm_cmd "Load cpuctl kernel module (required for MSR/CPUID access)" \
-                "kldload cpuctl" || return 1
-            kldload cpuctl || {
-                log_error "Failed to load cpuctl module"
-                log_info "Ensure cpuctl is available in the kernel or as a module"
-                exit 1
-            }
-            log_success "cpuctl module loaded successfully"
-        fi
-
-        log_info "Loading hwpmc kernel module..."
-        if kldstat | grep -q hwpmc; then
-            log_success "hwpmc module already loaded"
-        else
-            confirm_cmd "Load hwpmc kernel module (required for PMC API tests)" \
-                "kldload hwpmc" || return 1
-            kldload hwpmc || log_warning "Failed to load hwpmc -TC-HWPMC tests will skip"
-            log_success "hwpmc module loaded successfully"
-        fi
-    else
+    if [ $DRY_RUN -eq 1 ]; then
         log_info "Would load cpuctl and hwpmc modules (dry run)"
+        return 0
+    fi
+
+    log_info "Loading cpuctl kernel module..."
+    if kldstat -q -n cpuctl 2>/dev/null; then
+        log_success "cpuctl module already loaded"
+    else
+        confirm_cmd "Load cpuctl kernel module (required for MSR/CPUID access)" \
+            "kldload cpuctl" || return 1
+        kldload cpuctl || {
+            log_error "Failed to load cpuctl module"
+            log_info "Ensure cpuctl is available in the kernel or as a module"
+            exit 1
+        }
+        log_success "cpuctl module loaded successfully"
+    fi
+
+    log_info "Loading hwpmc kernel module..."
+    if kldstat -q -n hwpmc 2>/dev/null; then
+        log_success "hwpmc module already loaded"
+    else
+        confirm_cmd "Load hwpmc kernel module (required for PMC API tests)" \
+            "kldload hwpmc" || return 1
+        kldload hwpmc 2>/dev/null || {
+            log_warning "Failed to load hwpmc -TC-HWPMC tests will skip"
+            return 0
+        }
+        log_success "hwpmc module loaded successfully"
     fi
 }
 
@@ -3565,7 +3782,7 @@ show_menu() {
         fi
 
         printf '%s\n' "${CYAN}=================================================================${NC}"
-        printf "  Suites : ${BOLD}%s${NC}  (change with --suite IBS|UMCDF|PMC|STRESS|ALL)\n" "$SUITE_LIST"
+        printf "  Suites : ${BOLD}%s${NC}  (change with --suite IBS|UMCDF|PMC|TSC|L3|STRESS|ALL)\n" "$SUITE_LIST"
         printf '\n'
         printf '  %s1)%s Run all tests (suite: %s)\n'      "$BOLD" "$NC" "$SUITE"
         printf '  %s2)%s Run specific test\n'              "$BOLD" "$NC"
@@ -3589,7 +3806,7 @@ show_menu() {
         case "$MENU_CHOICE" in
             1)
                 check_root_privileges
-                _idir=$(suite_install_dir "$SUITE")
+                _idir=$(suite_install_dir "$_SUITE_PRIMARY")
                 TESTS_INSTALL_DIR="$_idir"
                 run_all_tests
                 printf '\nPress Enter to return to menu...'
@@ -3600,7 +3817,7 @@ show_menu() {
                 read -r _test
                 if [ -n "$_test" ]; then
                     check_root_privileges
-                    _idir=$(suite_install_dir "$SUITE")
+                    _idir=$(suite_install_dir "$_SUITE_PRIMARY")
                     TESTS_INSTALL_DIR="$_idir"
                     run_specific_test "$_test"
                 else
@@ -3613,9 +3830,15 @@ show_menu() {
                 printf '%sCategories (space-separated, e.g. TC-DET TC-MSR): %s' "$BOLD" "$NC"
                 read -r _cats
                 if [ -n "$_cats" ]; then
+                    for _cat in $_cats; do
+                        if ! valid_category_token "$_cat"; then
+                            log_error "Invalid category: $_cat"
+                            continue 2
+                        fi
+                    done
                     check_root_privileges
                     CATEGORIES="$_cats"
-                    _idir=$(suite_install_dir "$SUITE")
+                    _idir=$(suite_install_dir "$_SUITE_PRIMARY")
                     TESTS_INSTALL_DIR="$_idir"
                     run_all_tests
                     CATEGORIES=""
@@ -3628,8 +3851,8 @@ show_menu() {
             4)
                 check_boot_environment
                 check_root_privileges
-                TESTS_DIR=$(suite_src_dir "$SUITE")
-                TESTS_INSTALL_DIR=$(suite_install_dir "$SUITE")
+                TESTS_DIR=$(suite_src_dir "$_SUITE_PRIMARY")
+                TESTS_INSTALL_DIR=$(suite_install_dir "$_SUITE_PRIMARY")
                 compile_tests
                 printf '\nPress Enter to return to menu...'
                 read -r _dummy
@@ -3653,7 +3876,7 @@ show_menu() {
                 read -r _dummy
                 ;;
             8)
-                _idir=$(suite_install_dir "$SUITE")
+                _idir=$(suite_install_dir "$_SUITE_PRIMARY")
                 TESTS_INSTALL_DIR="$_idir"
                 list_tests
                 printf '\nPress Enter to return to menu...'
@@ -3723,6 +3946,10 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             SPECIFIC_TEST="$1"
+            if [ -z "$SPECIFIC_TEST" ]; then
+                log_error "--run requires a non-empty test name"
+                exit 1
+            fi
             case "$SPECIFIC_TEST" in
                 -*) log_error "--run: test name cannot start with '-': $SPECIFIC_TEST"; exit 1 ;;
             esac
@@ -3759,18 +3986,22 @@ while [ $# -gt 0 ]; do
         --suite)
             shift
             if [ $# -eq 0 ]; then
-                log_error "--suite requires IBS|UMCDF|PMC|STRESS|ALL"
+                log_error "--suite requires IBS|UMCDF|PMC|TSC|L3|STRESS|ALL"
                 exit 1
             fi
             case "$1" in
-                IBS|UMCDF|PMC|STRESS|ALL) SUITE="$1" ;;
-                *) log_error "--suite: unknown suite '$1' (use IBS|UMCDF|PMC|STRESS|ALL)"; exit 1 ;;
+                IBS|UMCDF|PMC|TSC|L3|STRESS|ALL|DEFAULT) SUITE="$1" ;;
+                *) log_error "--suite: unknown suite '$1' (use IBS|UMCDF|PMC|TSC|L3|STRESS|ALL)"; exit 1 ;;
             esac
             ;;
         --category)
             shift
             if [ $# -eq 0 ]; then
                 log_error "--category requires a TC-* code"
+                exit 1
+            fi
+            if ! valid_category_token "$1"; then
+                log_error "--category: invalid category '$1' (use TC-* with letters, digits, '_' or '-')"
                 exit 1
             fi
             CATEGORIES="${CATEGORIES} $1"
@@ -3854,12 +4085,26 @@ while [ $# -gt 0 ]; do
 done
 
 # Expand SUITE to the list of suites that will be run.
-SUITE_LIST=$(expand_suite_list "$SUITE")
+if ! SUITE_LIST=$(expand_suite_list "$SUITE"); then
+    log_error "Unknown suite selector: $SUITE"
+    exit 1
+fi
 # For commands that operate on a single suite (--compile, --list, etc.),
 # use the first suite in the list.
 _SUITE_PRIMARY=$(printf '%s' "$SUITE_LIST" | awk '{print $1}')
-TESTS_DIR=$(suite_src_dir "$_SUITE_PRIMARY")
-TESTS_INSTALL_DIR=$(suite_install_dir "$_SUITE_PRIMARY")
+if ! TESTS_DIR=$(suite_src_dir "$_SUITE_PRIMARY"); then
+    log_error "Unknown primary suite: $_SUITE_PRIMARY"
+    exit 1
+fi
+if ! TESTS_INSTALL_DIR=$(suite_install_dir "$_SUITE_PRIMARY"); then
+    log_error "Unknown primary suite: $_SUITE_PRIMARY"
+    exit 1
+fi
+
+if [ "$COMMAND" = "run-specific" ] && [ "$SUITE" = "ALL" ]; then
+    log_error "--run requires a concrete suite; use --suite IBS|UMCDF|PMC|TSC|L3|STRESS."
+    exit 1
+fi
 
 # Execute command
 case $COMMAND in
