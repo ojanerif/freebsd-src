@@ -23,6 +23,7 @@ ATF_TESTS_C=	ibs_cpu_test \
 		ibs_unit_field_masks_test \
 		ibs_unit_helpers_test \
 		ibs_unit_datasrc_test \
+		ibs_unit_caps_test \
 		ibs_unit_cpuid_parse_test \
 		ibs_unit_op_ext_maxcnt_test \
 		ibs_unit_feature_flags_test \

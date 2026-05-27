@@ -29,6 +29,7 @@ atf_test_program{name="ibs_routing_test", }
 atf_test_program{name="ibs_smp_test", }
 atf_test_program{name="ibs_stress_test", }
 atf_test_program{name="ibs_swfilt_test", }
+atf_test_program{name="ibs_unit_caps_test", }
 atf_test_program{name="ibs_unit_cpuid_parse_test", }
 atf_test_program{name="ibs_unit_datasrc_test", }
 atf_test_program{name="ibs_unit_feature_flags_test", }
