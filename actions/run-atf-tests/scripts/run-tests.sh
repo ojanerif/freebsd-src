@@ -57,7 +57,7 @@ kyua_exit=0
 timeout "${TIMEOUT_MINUTES}m" \
 	kyua test \
 		--kyuafile "${TESTS_DIR}/Kyuafile" \
-		--store "$KYUADB" \
+		--results-file "$KYUADB" \
 	|| kyua_exit=$?
 
 if [ "$kyua_exit" -eq 124 ]; then
@@ -65,8 +65,8 @@ if [ "$kyua_exit" -eq 124 ]; then
 	test_status="error"
 	printf 'test_status=%s\n'   "$test_status" >> "$GITHUB_OUTPUT"
 	printf 'results_path=%s\n'  "$RESULTS_XML"  >> "$GITHUB_OUTPUT"
-	kyua report-junit --store "$KYUADB" --output "$RESULTS_XML" 2>/dev/null || true
-	kyua report-html  --store "$KYUADB" --output kyua-report   2>/dev/null || true
+	kyua report-junit --results-file "$KYUADB" --output "$RESULTS_XML" 2>/dev/null || true
+	kyua report-html  --results-file "$KYUADB" --output kyua-report   2>/dev/null || true
 	exit 0
 elif [ "$kyua_exit" -ne 0 ]; then
 	log_info "Some tests failed in attempt 1 (kyua exit: $kyua_exit)"
@@ -86,7 +86,7 @@ if [ "$test_status" = "failed" ]; then
 	# Extract failing test IDs from the kyua database.
 	# Output format: "  test_name:case_name  ->  failed: ..."
 	# We extract just "test_name:case_name".
-	failing=$(kyua report --store "$KYUADB" --results-filter failed,broken 2>/dev/null | \
+	failing=$(kyua report --results-file "$KYUADB" --results-filter failed,broken 2>/dev/null | \
 		grep ' -> ' | sed 's/^[[:space:]]*//; s/[[:space:]]*->.*$//' || true)
 
 	if [ -z "$failing" ]; then
@@ -110,7 +110,7 @@ if [ "$test_status" = "failed" ]; then
 				timeout "${TIMEOUT_MINUTES}m" \
 					kyua test \
 						--kyuafile "${TESTS_DIR}/Kyuafile" \
-						--store "$retry_db" \
+						--results-file "$retry_db" \
 						"$tc" \
 					2>/dev/null || retry_exit=$?
 
@@ -153,7 +153,7 @@ fi
 # ---------------------------------------------------------------------------
 log_info "Generating JUnit XML: $RESULTS_XML"
 kyua report-junit \
-	--store "$KYUADB" \
+	--results-file "$KYUADB" \
 	--output "$RESULTS_XML" \
 	2>/dev/null || true
 
@@ -162,7 +162,7 @@ kyua report-junit \
 # ---------------------------------------------------------------------------
 log_info "Generating HTML report: kyua-report/"
 kyua report-html \
-	--store "$KYUADB" \
+	--results-file "$KYUADB" \
 	--output kyua-report \
 	2>/dev/null || true
 
@@ -170,7 +170,7 @@ kyua report-html \
 # Print summary to log
 # ---------------------------------------------------------------------------
 log_info "=== Test run summary ==="
-kyua report --store "$KYUADB" 2>/dev/null || true
+kyua report --results-file "$KYUADB" 2>/dev/null || true
 
 if [ -n "$flaky_tests" ]; then
 	log_info "=== Flaky tests (passed in retry, failed on attempt 1) ==="
