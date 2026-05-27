@@ -144,6 +144,16 @@ severity_color() {
     esac
 }
 
+# Read a counter temp file as an unsigned decimal.  Treat missing, empty, or
+# corrupted content as zero so report printf/test operands stay numeric.
+read_counter_file() {
+    _rcf_value=$(cat "$1" 2>/dev/null || printf '')
+    case "$_rcf_value" in
+        ''|*[!0123456789]*) printf '0' ;;
+        *)                  printf '%s' "$_rcf_value" ;;
+    esac
+}
+
 # Detect CPU vendor string (FreeBSD sysctl)
 get_cpu_vendor() {
     sysctl -n hw.cpu_vendor 2>/dev/null || \
@@ -2970,16 +2980,16 @@ TC-PMCAPI TC-PMCSTAT TC-TSC-DET TC-TSC-DRF TC-TSC-INV TC-DET-L3 TC-UNC-L3"
         rm -f "$TMP_SM_DONE" "$TMP_SM_LAST"
 
         # ── Read accumulated counters ──
-        PASSED_TESTS=$(cat "$TMP_PASS")
-        FAILED_TESTS=$(cat "$TMP_FAIL")
-        SKIPPED_TESTS=$(cat "$TMP_SKIP")
-        XFAIL_TESTS=$(cat "$TMP_XFAIL")
-        BROKEN_TESTS=$(cat "$TMP_BROKEN")
-        CRIT_FAIL=$(cat "$TMP_CRIT_F")
-        HIGH_PASS=$(cat "$TMP_HIGH_P")
-        HIGH_FAIL=$(cat "$TMP_HIGH_F")
-        MED_PASS=$(cat "$TMP_MED_P")
-        MED_FAIL=$(cat "$TMP_MED_F")
+        PASSED_TESTS=$(read_counter_file "$TMP_PASS")
+        FAILED_TESTS=$(read_counter_file "$TMP_FAIL")
+        SKIPPED_TESTS=$(read_counter_file "$TMP_SKIP")
+        XFAIL_TESTS=$(read_counter_file "$TMP_XFAIL")
+        BROKEN_TESTS=$(read_counter_file "$TMP_BROKEN")
+        CRIT_FAIL=$(read_counter_file "$TMP_CRIT_F")
+        HIGH_PASS=$(read_counter_file "$TMP_HIGH_P")
+        HIGH_FAIL=$(read_counter_file "$TMP_HIGH_F")
+        MED_PASS=$(read_counter_file "$TMP_MED_P")
+        MED_FAIL=$(read_counter_file "$TMP_MED_F")
         TOTAL_TESTS=$((PASSED_TESTS + FAILED_TESTS + SKIPPED_TESTS + XFAIL_TESTS + BROKEN_TESTS))
         rm -f "$TMP_PASS" "$TMP_FAIL" "$TMP_SKIP" "$TMP_XFAIL" "$TMP_BROKEN" \
               "$TMP_CRIT_F" "$TMP_HIGH_P" "$TMP_HIGH_F" "$TMP_MED_P" "$TMP_MED_F"
@@ -2994,8 +3004,16 @@ TC-PMCAPI TC-PMCSTAT TC-TSC-DET TC-TSC-DRF TC-TSC-INV TC-DET-L3 TC-UNC-L3"
 
         HIGH_TOTAL=$((HIGH_PASS + HIGH_FAIL))
         MED_TOTAL=$((MED_PASS + MED_FAIL))
-        HIGH_PASS_PCT=$([ "$HIGH_TOTAL" -gt 0 ] && echo $((HIGH_PASS * 100 / HIGH_TOTAL)) || echo -1)
-        MED_PASS_PCT=$([ "$MED_TOTAL"  -gt 0 ] && echo $((MED_PASS  * 100 / MED_TOTAL))  || echo -1)
+        if [ "$HIGH_TOTAL" -gt 0 ]; then
+            HIGH_PASS_PCT=$((HIGH_PASS * 100 / HIGH_TOTAL))
+        else
+            HIGH_PASS_PCT=-1
+        fi
+        if [ "$MED_TOTAL" -gt 0 ]; then
+            MED_PASS_PCT=$((MED_PASS * 100 / MED_TOTAL))
+        else
+            MED_PASS_PCT=-1
+        fi
 
         # ── Console summary ──
         echo ""
