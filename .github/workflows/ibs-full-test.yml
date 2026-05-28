@@ -33,6 +33,11 @@ on:
         type: string
         required: false
         default: 'ci-actions/tests/sys/amd/ibs'
+      kyua_args:
+        description: 'Whitespace-separated Kyua global arguments before test, e.g. -v parallelism=1'
+        type: string
+        required: false
+        default: ''
 
 jobs:
   build-and-test:
@@ -77,6 +82,7 @@ jobs:
           tests_dir:  ${{ inputs.tests_dir }}
           srcdir:     ${{ inputs.srcdir }}
           kernconf:   ${{ inputs.kernconf }}
+          kyua_args:  ${{ inputs.kyua_args }}
 
       - name: Report results
         if: always()

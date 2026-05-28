@@ -24,6 +24,10 @@ inputs:
     description: 'Maximum minutes for the full test run'
     required: false
     default: '15'
+  kyua_args:
+    description: 'Whitespace-separated Kyua global arguments before test, e.g. -v parallelism=1 -v test_suites.FreeBSD.amd.pmc.grouping.runtime=true'
+    required: false
+    default: ''
 
 outputs:
   test_status:
@@ -51,6 +55,7 @@ runs:
       env:
         TESTS_DIR:       ${{ inputs.tests_dir }}
         TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        KYUA_ARGS:       ${{ inputs.kyua_args }}
       run: |
         ${{ github.action_path }}/scripts/run-tests.sh
 

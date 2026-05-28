@@ -9,6 +9,7 @@
 # Environment variables:
 #   TESTS_DIR        path to directory containing Kyuafile
 #   TIMEOUT_MINUTES  max minutes for the test run (default 15)
+#   KYUA_ARGS        extra kyua global arguments before "test" (optional)
 
 set -eu
 
@@ -17,6 +18,7 @@ log_err()  { printf '[run-atf-tests] ERROR: %s\n' "$*" >&2; }
 
 TESTS_DIR="${TESTS_DIR:?TESTS_DIR not set}"
 TIMEOUT_MINUTES="${TIMEOUT_MINUTES:-15}"
+KYUA_ARGS="${KYUA_ARGS:-}"
 RESULTS_XML="ibs-results.xml"
 KYUADB="kyua.db"
 MAX_ATTEMPTS=3
@@ -55,7 +57,7 @@ mkdir -p kyua-report
 
 kyua_exit=0
 timeout "${TIMEOUT_MINUTES}m" \
-	kyua test \
+	kyua ${KYUA_ARGS} test \
 		--kyuafile "${TESTS_DIR}/Kyuafile" \
 		--results-file "$KYUADB" \
 	|| kyua_exit=$?
@@ -108,7 +110,7 @@ if [ "$test_status" = "failed" ]; then
 				retry_db="kyua-retry${attempt}-$(echo "$tc" | tr ':/' '--').db"
 				retry_exit=0
 				timeout "${TIMEOUT_MINUTES}m" \
-					kyua test \
+					kyua ${KYUA_ARGS} test \
 						--kyuafile "${TESTS_DIR}/Kyuafile" \
 						--results-file "$retry_db" \
 						"$tc" \
