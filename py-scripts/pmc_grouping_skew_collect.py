@@ -102,18 +102,21 @@ DEFAULT_COMMAND_GRACE_SECONDS = 10
 class DataclassMapping:
     """Expose the dict-style reads used by existing collector logic."""
 
-    def _field_name_for_key(self, key: str) -> str:
+    def _field_name_for_key(self, key: str) -> Optional[str]:
         for data_field in dataclass_fields(self):
             if data_field.name == key or data_field.metadata.get("json_name") == key:
                 return data_field.name
-        return key
+        return None
 
     def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, self._field_name_for_key(key), default)
+        field_name = self._field_name_for_key(key)
+        if field_name is None:
+            return default
+        return getattr(self, field_name)
 
     def __getitem__(self, key: str) -> Any:
         field_name = self._field_name_for_key(key)
-        if not hasattr(self, field_name):
+        if field_name is None:
             raise KeyError(key)
         return getattr(self, field_name)
 
@@ -827,18 +830,6 @@ def apply_record_correction(record: ProbeRecord, baseline_signed_offset: float) 
         corrected_delta=corrected_delta,
         corrected_permille=corrected_delta * 1000.0 / float(max_count),
     )
-
-
-def apply_correction(
-    cal_records: Sequence[ProbeRecord],
-    meas_records: Sequence[ProbeRecord],
-) -> Tuple[float, float, List[ProbeRecord]]:
-    baseline_abs_offset, baseline_signed_offset = calibration_offsets(cal_records)
-    corrected_records = [
-        apply_record_correction(record, baseline_signed_offset)
-        for record in meas_records
-    ]
-    return baseline_abs_offset, baseline_signed_offset, corrected_records
 
 
 def corrected_stats(meas_records: Sequence[ProbeRecord]) -> CorrectedStats:
@@ -1806,7 +1797,6 @@ def main() -> int:
             dashboard=dashboard,
             baseline_signed_offset=baseline_signed_offset,
         )
-        baseline_abs_offset, baseline_signed_offset, meas_records = apply_correction(cal_records, meas_records)
         verdict = verdict_from_stats(cal_records, meas_records, baseline_signed_offset, args, state)
         all_records = cal_records + meas_records
     finally:
