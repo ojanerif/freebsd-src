@@ -48,6 +48,55 @@ if [ -f "$RESULTS_XML" ]; then
 	errors=$(  grep -o 'errors="[0-9]*"'   "$RESULTS_XML" | head -1 | grep -o '[0-9]*' || echo 0)
 	skipped=$( grep -o 'skipped="[0-9]*"'  "$RESULTS_XML" | head -1 | grep -o '[0-9]*' || echo 0)
 	passed=$(( total - failures - errors - skipped ))
+	pmcgroupstart_bridge_id=""
+	if grep -q 'group_start_atomicity_EXPECTED_FAIL' "$RESULTS_XML"; then
+		pmcgroupstart_bridge_id=$(awk '
+		function attr(s, key,   pat, v) {
+			pat = "(^|[[:space:]])" key "=\"[^\"]*\""
+			if (match(s, pat)) {
+				v = substr(s, RSTART, RLENGTH)
+				sub("^[^=]*=\"", "", v)
+				sub("\"$", "", v)
+				return v
+			}
+			return ""
+		}
+		BEGIN {
+			in_tc = 0
+			target = 0
+			xfail_marker = 0
+			tc_class = ""
+			tc_name = ""
+		}
+		/<testcase[[:space:]>]/ {
+			in_tc = 1
+			target = 0
+			xfail_marker = 0
+			tc_class = attr($0, "classname")
+			tc_name = attr($0, "name")
+			if (tc_name ~ /^group_start_atomicity_EXPECTED_FAIL($|_)/ &&
+			    tc_class ~ /(^|[.\/])hwpmc_grouping_test$/)
+				target = 1
+		}
+		in_tc && target && (/Expected failure result details/ || /PMCGROUPSTART/) {
+			xfail_marker = 1
+		}
+		in_tc && /<\/testcase>/ {
+			if (target && xfail_marker) {
+				if (tc_class != "")
+					print tc_class ":" tc_name
+				else
+					print "hwpmc_grouping_test:" tc_name
+				exit 0
+			}
+			in_tc = 0
+			target = 0
+			xfail_marker = 0
+			tc_class = ""
+			tc_name = ""
+		}
+		' "$RESULTS_XML")
+	fi
 
 	{
 		printf '### Test Counts\n\n'
@@ -60,6 +109,21 @@ if [ -f "$RESULTS_XML" ]; then
 		printf '| **Total**  | **%s** |\n' "$total"
 		printf '\n'
 	} >> "$GITHUB_STEP_SUMMARY"
+
+	if [ -n "$pmcgroupstart_bridge_id" ]; then
+		{
+			printf '### Expected-Failure Bridge Notes\n\n'
+			printf '%s%s\n' "- \`$pmcgroupstart_bridge_id\` is an intentional " \
+			    'expected failure documenting missing FreeBSD `PMCGROUPSTART`.'
+			printf '%s%s\n' '- Kyua JUnit records `expected_failure` details ' \
+			    'in the testcase `system-err` text.'
+			printf '%s\n' '- The note keeps the bridge visible without changing CI pass/fail status.'
+			printf '%s%s\n' '- Action when this changes: inspect whether a real ' \
+			    'group-start/global-arm ABI landed.'
+			printf '%s\n' '- Otherwise replace the bridge with a measured atomic-arm assertion.'
+			printf '\n'
+		} >> "$GITHUB_STEP_SUMMARY"
+	fi
 
 	# List individual test cases with failures
 	if [ "$failures" -gt 0 ] || [ "$errors" -gt 0 ]; then
