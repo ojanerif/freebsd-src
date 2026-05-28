@@ -52,6 +52,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field as dataclass_field, fields as dataclass_fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -97,11 +98,198 @@ DEFAULT_PREFLIGHT_TIMEOUT = 30
 DEFAULT_COMMAND_TIMEOUT_OVERHEAD = 30
 DEFAULT_COMMAND_GRACE_SECONDS = 10
 
-STOP_REQUESTED = False
-SHUTDOWN_REASON: Optional[str] = None
+
+class DataclassMapping:
+    """Expose the dict-style reads used by existing collector logic."""
+
+    def _field_name_for_key(self, key: str) -> str:
+        for data_field in dataclass_fields(self):
+            if data_field.name == key or data_field.metadata.get("json_name") == key:
+                return data_field.name
+        return key
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, self._field_name_for_key(key), default)
+
+    def __getitem__(self, key: str) -> Any:
+        field_name = self._field_name_for_key(key)
+        if not hasattr(self, field_name):
+            raise KeyError(key)
+        return getattr(self, field_name)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dataclass_to_dict(self)
+
+
+def dataclass_to_dict(value: Any) -> Any:
+    if isinstance(value, DataclassMapping) or is_dataclass(value):
+        result: Dict[str, Any] = {}
+        for data_field in dataclass_fields(value):
+            key = data_field.metadata.get("json_name", data_field.name)
+            result[key] = dataclass_to_dict(getattr(value, data_field.name))
+        return result
+    if isinstance(value, dict):
+        return {key: dataclass_to_dict(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [dataclass_to_dict(item) for item in value]
+    return value
+
+
+@dataclass
+class ProbeRecord(DataclassMapping):
+    run_id: str = ""
+    phase: str = ""
+    iteration: int = 0
+    workload: List[str] = dataclass_field(default_factory=list)
+    command: Optional[List[str]] = dataclass_field(default=None, metadata={"csv": False})
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    elapsed_seconds: Optional[float] = None
+    returncode: Optional[int] = None
+    command_outcome: Optional[str] = None
+    timed_out: Optional[bool] = None
+    terminated_by_signal: Optional[int] = None
+    valid: bool = False
+    row_count: Optional[int] = None
+    last_a: Optional[int] = None
+    last_b: Optional[int] = None
+    max_count: Optional[int] = None
+    delta_abs: Optional[int] = None
+    signed_delta: Optional[int] = None
+    permille: Optional[float] = None
+    baseline_signed_offset: Optional[float] = None
+    corrected_signed_delta: Optional[float] = None
+    corrected_delta: Optional[float] = None
+    corrected_permille: Optional[float] = None
+    b_gt_a: Optional[bool] = None
+    a_gt_b: Optional[bool] = None
+    equal: Optional[bool] = None
+    output_file: Optional[str] = None
+    raw_sha256: Optional[str] = None
+    stderr_tail: str = ""
+
+    def csv_row(self) -> Dict[str, Any]:
+        row = {field_name: self.get(field_name) for field_name in CSV_FIELDS}
+        row["workload"] = shlex.join(self.workload or [])
+        return row
+
+
+@dataclass
+class ParseResult(DataclassMapping):
+    valid: bool = False
+    reason: Optional[str] = None
+    row_count: int = 0
+    last_a: Optional[int] = None
+    last_b: Optional[int] = None
+    max_count: Optional[int] = None
+    delta_abs: Optional[int] = None
+    signed_delta: Optional[int] = None
+    permille: Optional[float] = None
+    b_gt_a: Optional[bool] = None
+    a_gt_b: Optional[bool] = None
+    equal: Optional[bool] = None
+
+
+@dataclass
+class NumericStats(DataclassMapping):
+    n: int = 0
+    min: Optional[float] = None
+    mean: Optional[float] = None
+    median: Optional[float] = None
+    p90: Optional[float] = None
+    p95: Optional[float] = None
+    max: Optional[float] = None
+    stdev: Optional[float] = None
+
+
+@dataclass
+class PhaseStats(DataclassMapping):
+    records: int = 0
+    valid: int = 0
+    invalid: int = 0
+    b_gt_a: int = 0
+    a_gt_b: int = 0
+    equal: int = 0
+    pct_b_gt_a: Optional[float] = None
+    last_a: NumericStats = dataclass_field(default_factory=NumericStats)
+    last_b: NumericStats = dataclass_field(default_factory=NumericStats)
+    max_count: NumericStats = dataclass_field(default_factory=NumericStats)
+    delta_abs: NumericStats = dataclass_field(default_factory=NumericStats)
+    signed_delta: NumericStats = dataclass_field(default_factory=NumericStats)
+    permille: NumericStats = dataclass_field(default_factory=NumericStats)
+
+
+@dataclass
+class CorrectedStats(DataclassMapping):
+    corrected_signed_delta: NumericStats = dataclass_field(default_factory=NumericStats)
+    corrected_delta: NumericStats = dataclass_field(default_factory=NumericStats)
+    corrected_permille: NumericStats = dataclass_field(default_factory=NumericStats)
+
+
+@dataclass
+class Verdict(DataclassMapping):
+    pass_: Optional[bool] = dataclass_field(default=None, metadata={"json_name": "pass"})
+    status: str = "unknown"
+    metric: str = ""
+    metric_value: Optional[float] = None
+    tolerance_permille: float = 0.0
+    calibration_valid_samples: int = 0
+    measurement_valid_samples: int = 0
+    offset_stability_pct: Optional[float] = None
+    offset_stability_warning: bool = False
+    calibration_requested_samples: int = 0
+    measurement_requested_samples: int = 0
+    calibration_completed_samples: int = 0
+    measurement_completed_samples: int = 0
+    partial: bool = False
+    shutdown_reason: Optional[str] = None
+    min_measurement_cycles: int = 0
+    measurement_max_count_median: Optional[float] = None
+    reasons: List[str] = dataclass_field(default_factory=list)
+
+
+@dataclass
+class RunSummary(DataclassMapping):
+    schema_version: int
+    producer: str
+    run_id: str
+    started_at: str
+    ended_at: str
+    event: Dict[str, Any]
+    configuration: Dict[str, Any]
+    platform: Dict[str, Any]
+    hwpmc: Dict[str, Any]
+    event_availability: Dict[str, bool]
+    shutdown_reason: Optional[str]
+    partial: bool
+    requested_samples: Dict[str, int]
+    completed_samples: Dict[str, int]
+    correction: Dict[str, Any]
+    calibration: PhaseStats
+    measurement: PhaseStats
+    corrected: CorrectedStats
+    verdict: Verdict
+
+
+@dataclass
+class RunState:
+    stop_requested: bool = False
+    shutdown_reason: Optional[str] = None
+    active_dashboard: Optional["LiveDashboard"] = None
+
+
+def csv_fields_from_dataclass(model: Any) -> List[str]:
+    return [
+        data_field.metadata.get("csv_name", data_field.name)
+        for data_field in dataclass_fields(model)
+        if data_field.metadata.get("csv", True)
+    ]
+
+
+CSV_FIELDS = csv_fields_from_dataclass(ProbeRecord)
+
 TERMINAL = Terminal("pmc-skew")
 COMMAND_RUNNER = CommandRunner(TERMINAL)
-ACTIVE_DASHBOARD: Optional["LiveDashboard"] = None
 
 
 def log_info(message: str) -> None:
@@ -337,7 +525,10 @@ def check_event_availability(events: Iterable[str], required: Iterable[str]) -> 
     return {event: event in available for event in required}
 
 
-def parse_pmcstat_two_counter(text: str) -> Optional[Dict[str, Any]]:
+def parse_pmcstat_two_counter(text: str) -> ParseResult:
+    if not text.strip():
+        return ParseResult(reason="empty output")
+
     last_a: Optional[int] = None
     last_b: Optional[int] = None
     rows = 0
@@ -351,25 +542,103 @@ def parse_pmcstat_two_counter(text: str) -> Optional[Dict[str, Any]]:
             last_a, last_b = int(fields[0]), int(fields[1])
 
     if last_a is None or last_b is None:
-        return None
+        return ParseResult(reason="no numeric rows")
 
     max_count = max(last_a, last_b)
     delta_abs = abs(last_a - last_b)
     signed_delta = last_b - last_a
     permille = (delta_abs * 1000.0 / max_count) if max_count > 0 else 0.0
 
-    return {
-        "row_count": rows,
-        "last_a": last_a,
-        "last_b": last_b,
-        "max_count": max_count,
-        "delta_abs": delta_abs,
-        "signed_delta": signed_delta,
-        "permille": permille,
-        "b_gt_a": last_b > last_a,
-        "a_gt_b": last_a > last_b,
-        "equal": last_a == last_b,
-    }
+    return ParseResult(
+        valid=True,
+        row_count=rows,
+        last_a=last_a,
+        last_b=last_b,
+        max_count=max_count,
+        delta_abs=delta_abs,
+        signed_delta=signed_delta,
+        permille=permille,
+        b_gt_a=last_b > last_a,
+        a_gt_b=last_a > last_b,
+        equal=last_a == last_b,
+    )
+
+
+def build_probe_command(args: argparse.Namespace, workload: Sequence[str], output_path: Path) -> List[str]:
+    return [
+        args.pmcstat_cmd, "-C", "-q",
+        "-p", EVENT,
+        "-p", EVENT,
+        "-o", str(output_path),
+        "--",
+        *workload,
+    ]
+
+
+def probe_timeout(args: argparse.Namespace, timeout_hint: float) -> Optional[float]:
+    return bounded_timeout(
+        args.deadline,
+        timeout_hint + args.command_timeout_overhead,
+    )
+
+
+def manage_probe_output(
+    args: argparse.Namespace,
+    *,
+    tmp_out: Path,
+    output_file: Path,
+    returncode: Optional[int],
+) -> None:
+    if args.dry_run:
+        return
+    if returncode == 0 and tmp_out.exists():
+        tmp_out.replace(output_file)
+        fsync_directory(output_file.parent)
+        return
+    unlink_suppress(tmp_out)
+
+
+def assemble_probe_record(
+    args: argparse.Namespace,
+    *,
+    phase: str,
+    iteration: int,
+    workload: Sequence[str],
+    run_id: str,
+    output_file: Path,
+    command_result: Dict[str, Any],
+    parsed: ParseResult,
+) -> ProbeRecord:
+    returncode = command_result.get("returncode")
+    valid = bool(parsed.valid and returncode == 0)
+    return ProbeRecord(
+        run_id=run_id,
+        phase=phase,
+        iteration=iteration,
+        workload=list(workload),
+        command=command_result.get("command"),
+        started_at=command_result.get("started_at"),
+        ended_at=command_result.get("ended_at"),
+        elapsed_seconds=command_result.get("elapsed_seconds"),
+        returncode=returncode,
+        command_outcome=command_result.get("outcome"),
+        timed_out=command_result.get("timed_out"),
+        terminated_by_signal=command_result.get("terminated_by_signal"),
+        valid=valid,
+        row_count=parsed.row_count if parsed.valid else None,
+        last_a=parsed.last_a,
+        last_b=parsed.last_b,
+        max_count=parsed.max_count,
+        delta_abs=parsed.delta_abs,
+        signed_delta=parsed.signed_delta,
+        permille=parsed.permille,
+        b_gt_a=parsed.b_gt_a,
+        a_gt_b=parsed.a_gt_b,
+        equal=parsed.equal,
+        output_file=str(output_file) if not args.dry_run else None,
+        raw_sha256=sha256_file(output_file) if (not args.dry_run and output_file.exists()) else None,
+        stderr_tail=(command_result.get("stderr") or "")[-400:],
+    )
 
 
 def run_probe(
@@ -382,21 +651,11 @@ def run_probe(
     run_id: str,
     timeout_hint: float,
     progress_label: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> ProbeRecord:
     output_file = raw_dir / f"{run_id}-{phase}-{iteration:04d}.out"
     tmp_out = output_file if args.dry_run else unique_tmp_path(output_file, "out")
-    command = [
-        args.pmcstat_cmd, "-C", "-q",
-        "-p", EVENT,
-        "-p", EVENT,
-        "-o", str(tmp_out),
-        "--",
-        *workload,
-    ]
-    timeout_seconds = bounded_timeout(
-        args.deadline,
-        timeout_hint + args.command_timeout_overhead,
-    )
+    command = build_probe_command(args, workload, tmp_out)
+    timeout_seconds = probe_timeout(args, timeout_hint)
 
     result = run_command(
         command,
@@ -404,56 +663,31 @@ def run_probe(
         timeout_seconds=timeout_seconds,
         progress_label=progress_label,
     )
-    returncode = result.get("returncode")
-
-    if not args.dry_run and returncode == 0 and tmp_out.exists():
-        tmp_out.replace(output_file)
-        fsync_directory(output_file.parent)
-    elif not args.dry_run:
-        unlink_suppress(tmp_out)
+    manage_probe_output(
+        args,
+        tmp_out=tmp_out,
+        output_file=output_file,
+        returncode=result.get("returncode"),
+    )
 
     output_text = "" if args.dry_run else read_text_file(output_file)
-    parsed = parse_pmcstat_two_counter(output_text) if output_text else None
-    valid = bool(parsed and returncode == 0)
-
-    record: Dict[str, Any] = {
-        "run_id": run_id,
-        "phase": phase,
-        "iteration": iteration,
-        "workload": list(workload),
-        "command": result.get("command"),
-        "started_at": result.get("started_at"),
-        "ended_at": result.get("ended_at"),
-        "elapsed_seconds": result.get("elapsed_seconds"),
-        "returncode": returncode,
-        "command_outcome": result.get("outcome"),
-        "timed_out": result.get("timed_out"),
-        "terminated_by_signal": result.get("terminated_by_signal"),
-        "valid": valid,
-        "row_count": parsed.get("row_count") if parsed else None,
-        "last_a": parsed.get("last_a") if parsed else None,
-        "last_b": parsed.get("last_b") if parsed else None,
-        "max_count": parsed.get("max_count") if parsed else None,
-        "delta_abs": parsed.get("delta_abs") if parsed else None,
-        "signed_delta": parsed.get("signed_delta") if parsed else None,
-        "permille": parsed.get("permille") if parsed else None,
-        "b_gt_a": parsed.get("b_gt_a") if parsed else None,
-        "a_gt_b": parsed.get("a_gt_b") if parsed else None,
-        "equal": parsed.get("equal") if parsed else None,
-        "baseline_signed_offset": None,
-        "corrected_signed_delta": None,
-        "corrected_delta": None,
-        "corrected_permille": None,
-        "output_file": str(output_file) if not args.dry_run else None,
-        "raw_sha256": sha256_file(output_file) if (not args.dry_run and output_file.exists()) else None,
-        "stderr_tail": (result.get("stderr") or "")[-400:],
-    }
-    return record
+    parsed = parse_pmcstat_two_counter(output_text)
+    return assemble_probe_record(
+        args,
+        phase=phase,
+        iteration=iteration,
+        workload=workload,
+        run_id=run_id,
+        output_file=output_file,
+        command_result=result,
+        parsed=parsed,
+    )
 
 
 def run_phase(
     args: argparse.Namespace,
     *,
+    state: RunState,
     phase: str,
     iterations: int,
     workload: Sequence[str],
@@ -462,13 +696,13 @@ def run_phase(
     timeout_hint: float,
     dashboard: Optional[LiveDashboard] = None,
     baseline_signed_offset: Optional[float] = None,
-) -> List[Dict[str, Any]]:
-    records: List[Dict[str, Any]] = []
+) -> List[ProbeRecord]:
+    records: List[ProbeRecord] = []
     if dashboard is not None:
         dashboard.suspend_for_log()
     log_info(f"{phase}: workload={shlex.join(workload)} iterations={iterations}")
     for iteration in range(1, iterations + 1):
-        if STOP_REQUESTED:
+        if state.stop_requested:
             break
         if not enough_time(args, timeout_hint + args.command_timeout_overhead):
             if dashboard is not None:
@@ -495,9 +729,9 @@ def run_phase(
             timeout_hint=timeout_hint,
             progress_label=None if args.quiet or (dashboard is not None and dashboard.enabled) else f"{phase} {iteration}/{iterations}",
         )
-        records.append(record)
         if baseline_signed_offset is not None:
-            apply_record_correction(record, baseline_signed_offset)
+            record = apply_record_correction(record, baseline_signed_offset)
+        records.append(record)
         if dashboard is not None:
             dashboard.finish_probe(
                 records=records,
@@ -516,27 +750,27 @@ def run_phase(
     return records
 
 
-def valid_records(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def valid_records(records: Iterable[ProbeRecord]) -> List[ProbeRecord]:
     return [record for record in records if record.get("valid")]
 
 
-def numeric_stats(values: Sequence[float]) -> Dict[str, Any]:
+def numeric_stats(values: Sequence[float]) -> NumericStats:
     clean = [float(value) for value in values if value is not None and math.isfinite(float(value))]
     if not clean:
-        return {"n": 0}
-    return {
-        "n": len(clean),
-        "min": min(clean),
-        "mean": statistics.fmean(clean),
-        "median": statistics.median(clean),
-        "p90": percentile(clean, 0.90),
-        "p95": percentile(clean, 0.95),
-        "max": max(clean),
-        "stdev": statistics.pstdev(clean) if len(clean) > 1 else 0.0,
-    }
+        return NumericStats(n=0)
+    return NumericStats(
+        n=len(clean),
+        min=min(clean),
+        mean=statistics.fmean(clean),
+        median=statistics.median(clean),
+        p90=percentile(clean, 0.90),
+        p95=percentile(clean, 0.95),
+        max=max(clean),
+        stdev=statistics.pstdev(clean) if len(clean) > 1 else 0.0,
+    )
 
 
-def phase_stats(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+def phase_stats(records: Sequence[ProbeRecord]) -> PhaseStats:
     valid = valid_records(records)
     total = len(records)
     n = len(valid)
@@ -544,31 +778,31 @@ def phase_stats(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     a_gt = sum(1 for record in valid if record.get("a_gt_b"))
     equal = sum(1 for record in valid if record.get("equal"))
 
-    def field(name: str) -> Dict[str, Any]:
+    def field(name: str) -> NumericStats:
         return numeric_stats([record[name] for record in valid if record.get(name) is not None])
 
-    return {
-        "records": total,
-        "valid": n,
-        "invalid": total - n,
-        "b_gt_a": b_gt,
-        "a_gt_b": a_gt,
-        "equal": equal,
-        "pct_b_gt_a": (b_gt / n * 100.0) if n else None,
-        "last_a": field("last_a"),
-        "last_b": field("last_b"),
-        "max_count": field("max_count"),
-        "delta_abs": field("delta_abs"),
-        "signed_delta": field("signed_delta"),
-        "permille": field("permille"),
-    }
+    return PhaseStats(
+        records=total,
+        valid=n,
+        invalid=total - n,
+        b_gt_a=b_gt,
+        a_gt_b=a_gt,
+        equal=equal,
+        pct_b_gt_a=(b_gt / n * 100.0) if n else None,
+        last_a=field("last_a"),
+        last_b=field("last_b"),
+        max_count=field("max_count"),
+        delta_abs=field("delta_abs"),
+        signed_delta=field("signed_delta"),
+        permille=field("permille"),
+    )
 
 
-def phase_complete(records: Sequence[Dict[str, Any]], requested: int) -> bool:
+def phase_complete(records: Sequence[ProbeRecord], requested: int) -> bool:
     return len(records) >= requested
 
 
-def calibration_offsets(cal_records: Sequence[Dict[str, Any]]) -> Tuple[float, float]:
+def calibration_offsets(cal_records: Sequence[ProbeRecord]) -> Tuple[float, float]:
     calibration = valid_records(cal_records)
     abs_offsets = [record["delta_abs"] for record in calibration if record.get("delta_abs") is not None]
     signed_offsets = [record["signed_delta"] for record in calibration if record.get("signed_delta") is not None]
@@ -577,75 +811,81 @@ def calibration_offsets(cal_records: Sequence[Dict[str, Any]]) -> Tuple[float, f
     return float(baseline_abs_offset), float(baseline_signed_offset)
 
 
-def apply_record_correction(record: Dict[str, Any], baseline_signed_offset: float) -> None:
+def apply_record_correction(record: ProbeRecord, baseline_signed_offset: float) -> ProbeRecord:
     if not record.get("valid"):
-        return
+        return replace(record)
     signed_delta = record.get("signed_delta")
     max_count = record.get("max_count")
     if signed_delta is None or not max_count:
-        return
+        return replace(record)
     corrected_signed = float(signed_delta) - float(baseline_signed_offset)
     corrected_delta = abs(corrected_signed)
-    record["baseline_signed_offset"] = baseline_signed_offset
-    record["corrected_signed_delta"] = corrected_signed
-    record["corrected_delta"] = corrected_delta
-    record["corrected_permille"] = corrected_delta * 1000.0 / float(max_count)
+    return replace(
+        record,
+        baseline_signed_offset=baseline_signed_offset,
+        corrected_signed_delta=corrected_signed,
+        corrected_delta=corrected_delta,
+        corrected_permille=corrected_delta * 1000.0 / float(max_count),
+    )
 
 
 def apply_correction(
-    cal_records: Sequence[Dict[str, Any]],
-    meas_records: List[Dict[str, Any]],
-) -> Tuple[float, float]:
+    cal_records: Sequence[ProbeRecord],
+    meas_records: Sequence[ProbeRecord],
+) -> Tuple[float, float, List[ProbeRecord]]:
     baseline_abs_offset, baseline_signed_offset = calibration_offsets(cal_records)
-    for record in meas_records:
+    corrected_records = [
         apply_record_correction(record, baseline_signed_offset)
-    return baseline_abs_offset, baseline_signed_offset
+        for record in meas_records
+    ]
+    return baseline_abs_offset, baseline_signed_offset, corrected_records
 
 
-def corrected_stats(meas_records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+def corrected_stats(meas_records: Sequence[ProbeRecord]) -> CorrectedStats:
     valid = [record for record in valid_records(meas_records) if record.get("corrected_permille") is not None]
-    return {
-        "corrected_signed_delta": numeric_stats([
+    return CorrectedStats(
+        corrected_signed_delta=numeric_stats([
             record["corrected_signed_delta"] for record in valid
             if record.get("corrected_signed_delta") is not None
         ]),
-        "corrected_delta": numeric_stats([
+        corrected_delta=numeric_stats([
             record["corrected_delta"] for record in valid
             if record.get("corrected_delta") is not None
         ]),
-        "corrected_permille": numeric_stats([
+        corrected_permille=numeric_stats([
             record["corrected_permille"] for record in valid
             if record.get("corrected_permille") is not None
         ]),
-    }
+    )
 
 
 def verdict_from_stats(
-    cal_records: Sequence[Dict[str, Any]],
-    meas_records: Sequence[Dict[str, Any]],
+    cal_records: Sequence[ProbeRecord],
+    meas_records: Sequence[ProbeRecord],
     baseline_signed_offset: float,
     args: argparse.Namespace,
-) -> Dict[str, Any]:
+    state: RunState,
+) -> Verdict:
     if args.dry_run:
-        return {
-            "pass": None,
-            "status": "dry_run",
-            "metric": f"corrected_permille_p{args.verdict_percentile * 100:.0f}",
-            "metric_value": None,
-            "tolerance_permille": args.corrected_tol,
-            "calibration_valid_samples": 0,
-            "measurement_valid_samples": 0,
-            "offset_stability_pct": None,
-            "offset_stability_warning": False,
-            "calibration_requested_samples": args.calibration_n,
-            "measurement_requested_samples": args.measurement_n,
-            "calibration_completed_samples": len(cal_records),
-            "measurement_completed_samples": len(meas_records),
-            "partial": False,
-            "shutdown_reason": SHUTDOWN_REASON,
-            "min_measurement_cycles": args.min_measurement_cycles,
-            "reasons": ["dry-run: commands were printed but PMCs were not executed"],
-        }
+        return Verdict(
+            pass_=None,
+            status="dry_run",
+            metric=f"corrected_permille_p{args.verdict_percentile * 100:.0f}",
+            metric_value=None,
+            tolerance_permille=args.corrected_tol,
+            calibration_valid_samples=0,
+            measurement_valid_samples=0,
+            offset_stability_pct=None,
+            offset_stability_warning=False,
+            calibration_requested_samples=args.calibration_n,
+            measurement_requested_samples=args.measurement_n,
+            calibration_completed_samples=len(cal_records),
+            measurement_completed_samples=len(meas_records),
+            partial=False,
+            shutdown_reason=state.shutdown_reason,
+            min_measurement_cycles=args.min_measurement_cycles,
+            reasons=["dry-run: commands were printed but PMCs were not executed"],
+        )
 
     cal_valid = len(valid_records(cal_records))
     meas_valid = len(valid_records(meas_records))
@@ -677,7 +917,7 @@ def verdict_from_stats(
     pass_verdict = True
     calibration_complete = phase_complete(cal_records, args.calibration_n)
     measurement_complete = phase_complete(meas_records, args.measurement_n)
-    partial = bool(SHUTDOWN_REASON or not calibration_complete or not measurement_complete)
+    partial = bool(state.shutdown_reason or not calibration_complete or not measurement_complete)
     if not calibration_complete:
         pass_verdict = False
         reasons.append(
@@ -688,9 +928,9 @@ def verdict_from_stats(
         reasons.append(
             f"measurement completed {len(meas_records)}/{args.measurement_n} requested samples"
         )
-    if SHUTDOWN_REASON:
+    if state.shutdown_reason:
         pass_verdict = False
-        reasons.append(f"run stopped before a complete verdict: {SHUTDOWN_REASON}")
+        reasons.append(f"run stopped before a complete verdict: {state.shutdown_reason}")
     if cal_valid < args.min_valid_samples:
         pass_verdict = False
         reasons.append(f"calibration has {cal_valid} valid samples; need {args.min_valid_samples}")
@@ -726,26 +966,26 @@ def verdict_from_stats(
             f"(warning threshold {args.offset_stability_warn_pct:.2f}%)"
         )
 
-    return {
-        "pass": pass_verdict,
-        "status": "pass" if pass_verdict else "fail",
-        "metric": f"corrected_permille_p{args.verdict_percentile * 100:.0f}",
-        "metric_value": corrected_quantile,
-        "tolerance_permille": args.corrected_tol,
-        "calibration_valid_samples": cal_valid,
-        "measurement_valid_samples": meas_valid,
-        "calibration_requested_samples": args.calibration_n,
-        "measurement_requested_samples": args.measurement_n,
-        "calibration_completed_samples": len(cal_records),
-        "measurement_completed_samples": len(meas_records),
-        "partial": partial,
-        "shutdown_reason": SHUTDOWN_REASON,
-        "min_measurement_cycles": args.min_measurement_cycles,
-        "measurement_max_count_median": measurement_max_count_median,
-        "offset_stability_pct": offset_stability_pct,
-        "offset_stability_warning": stability_warning,
-        "reasons": reasons,
-    }
+    return Verdict(
+        pass_=pass_verdict,
+        status="pass" if pass_verdict else "fail",
+        metric=f"corrected_permille_p{args.verdict_percentile * 100:.0f}",
+        metric_value=corrected_quantile,
+        tolerance_permille=args.corrected_tol,
+        calibration_valid_samples=cal_valid,
+        measurement_valid_samples=meas_valid,
+        calibration_requested_samples=args.calibration_n,
+        measurement_requested_samples=args.measurement_n,
+        calibration_completed_samples=len(cal_records),
+        measurement_completed_samples=len(meas_records),
+        partial=partial,
+        shutdown_reason=state.shutdown_reason,
+        min_measurement_cycles=args.min_measurement_cycles,
+        measurement_max_count_median=measurement_max_count_median,
+        offset_stability_pct=offset_stability_pct,
+        offset_stability_warning=stability_warning,
+        reasons=reasons,
+    )
 
 
 def fmt(value: Any, digits: int = 3) -> str:
@@ -801,6 +1041,131 @@ def progress_bar(done: int, total: int, width: int = 18) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+@dataclass
+class DashboardState:
+    phase: str
+    records: List[ProbeRecord]
+    requested: int
+    baseline_signed_offset: Optional[float]
+    probe_started_mono: Optional[float]
+    phase_started_mono: float
+    last_probe_seconds: Optional[float]
+    spinner: str
+
+
+class DashboardRenderer:
+    TREND_WINDOW = 10
+    WARMUP_VALID = 20
+    TREND_RELATIVE = 0.05
+
+    def __init__(self, tolerance: float) -> None:
+        self.tolerance = tolerance
+
+    def trend(self, values: Sequence[float]) -> str:
+        window = self.TREND_WINDOW
+        if len(values) < window * 2:
+            return "→"
+        recent = statistics.median(values[-window:])
+        prior = statistics.median(values[-2 * window:-window])
+        if prior == 0:
+            return "→"
+        delta = (recent - prior) / abs(prior)
+        if delta > self.TREND_RELATIVE:
+            return "↑"
+        if delta < -self.TREND_RELATIVE:
+            return "↓"
+        return "→"
+
+    def pace(self, p95: Optional[float], valid_n: int) -> Tuple[str, str]:
+        if valid_n < self.WARMUP_VALID or p95 is None or self.tolerance <= 0:
+            return "WARMUP", "dim"
+        if p95 <= self.tolerance:
+            return "PASS", "green"
+        if p95 <= self.tolerance * 2.0:
+            return "MARGIN", "yellow"
+        return "FAIL", "red"
+
+    def phase_tail(self, state: DashboardState, valid: Sequence[ProbeRecord]) -> Tuple[str, str, str]:
+        if state.phase == "calibration" or state.baseline_signed_offset is None:
+            signed_values = [
+                float(record["signed_delta"]) for record in valid
+                if record.get("signed_delta") is not None
+            ]
+            if signed_values:
+                median = statistics.median(signed_values)
+                stdev = statistics.pstdev(signed_values) if len(signed_values) > 1 else 0.0
+                stable_text = f"{stdev / abs(median) * 100.0:5.1f}%" if median else "  n/a"
+                tail = f"baseline={median:+.0f}c stdev={stdev:.0f}c stable={stable_text}"
+            else:
+                tail = "baseline=forming"
+            return tail, "", "cyan"
+
+        corrected = [
+            float(record["corrected_permille"]) for record in valid
+            if record.get("corrected_permille") is not None
+        ]
+        if corrected:
+            p95 = percentile(corrected, 0.95)
+            med = statistics.median(corrected)
+            trend = self.trend(corrected)
+            pace, pace_color = self.pace(p95, len(corrected))
+            tail = f"p95={p95:.3f}‰/{self.tolerance:.3f}‰ med={med:.3f}‰ trend={trend}"
+            return tail, f" PACE: {pace}", pace_color
+
+        return "corrected=n/a", "", "dim"
+
+    def compose(
+        self,
+        state: DashboardState,
+        *,
+        now: float,
+        budget: Optional[float],
+        colorize: Optional[Any] = None,
+    ) -> Tuple[str, str]:
+        color = colorize or (lambda text, _name: text)
+        valid = valid_records(state.records)
+        completed = len(state.records)
+        requested = state.requested
+        pct = (completed / requested * 100.0) if requested else 0.0
+        elapsed = now - state.phase_started_mono
+        rate = (completed / elapsed) if elapsed > 0 and completed else 0.0
+        eta = ((requested - completed) / rate) if rate > 0 else None
+
+        probe_active = state.probe_started_mono is not None
+        probe_age = now - state.probe_started_mono if probe_active else state.last_probe_seconds
+        probe_status = "run " if probe_active else "idle"
+        probe_dur = fmt_duration(probe_age) if probe_age is not None else "--:--"
+
+        tag = f"[{state.phase.upper()[:4]:<4}]"
+        bar = progress_bar(completed, requested)
+        head = (
+            f"{tag} {completed:>5}/{requested:<5} "
+            f"[{bar}] {pct:5.1f}% "
+            f"elapsed {fmt_duration(elapsed)} "
+            f"eta {fmt_duration(eta)} "
+            f"budget {fmt_duration(budget)}"
+        )
+
+        tail, pace_text, pace_color = self.phase_tail(state, valid)
+        valid_text = f"valid {len(valid):>3}/{completed:<3}"
+        suffix = f"{valid_text} probe={probe_status} {probe_dur} {state.spinner}"
+
+        plain = f"{head} │ {tail}{pace_text} │ {suffix}"
+        ansi = (
+            f"{color(tag, 'bold')} "
+            f"{completed:>5}/{requested:<5} "
+            f"[{color(bar, 'cyan')}] {pct:5.1f}% "
+            f"elapsed {fmt_duration(elapsed)} "
+            f"eta {fmt_duration(eta)} "
+            f"budget {fmt_duration(budget)} "
+            f"│ {tail}"
+            f"{color(pace_text, pace_color) if pace_text else ''}"
+            f" │ {valid_text} probe={probe_status} {probe_dur} "
+            f"{color(state.spinner, 'cyan')}"
+        )
+        return plain, ansi
+
+
 class LiveDashboard:
     """Single-line PMC progress on stderr plus permanent checkpoint INFO logs.
 
@@ -812,9 +1177,6 @@ class LiveDashboard:
     SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     MIN_WIDTH = 80
     TICK_SECONDS = 0.5
-    TREND_WINDOW = 10
-    WARMUP_VALID = 20
-    TREND_RELATIVE = 0.05
 
     def __init__(self, args: argparse.Namespace) -> None:
         cols = shutil.get_terminal_size((120, 24)).columns
@@ -824,6 +1186,7 @@ class LiveDashboard:
             and cols >= self.MIN_WIDTH
         )
         self.tolerance = float(args.corrected_tol)
+        self.renderer = DashboardRenderer(self.tolerance)
         self.deadline_mono: Optional[float] = getattr(args, "deadline", None)
         self.lock = threading.Lock()
         self.output_lock = threading.Lock()
@@ -832,7 +1195,7 @@ class LiveDashboard:
         self.has_line = False
         self.cursor_hidden = False
         self.phase = "idle"
-        self.records: Sequence[Dict[str, Any]] = []
+        self.records: Sequence[ProbeRecord] = []
         self.requested = 0
         self.iteration = 0
         self.baseline_signed_offset: Optional[float] = None
@@ -873,7 +1236,7 @@ class LiveDashboard:
         self,
         *,
         phase: str,
-        records: Sequence[Dict[str, Any]],
+        records: Sequence[ProbeRecord],
         requested: int,
         iteration: int,
         baseline_signed_offset: Optional[float] = None,
@@ -903,7 +1266,7 @@ class LiveDashboard:
     def finish_probe(
         self,
         *,
-        records: Sequence[Dict[str, Any]],
+        records: Sequence[ProbeRecord],
         baseline_signed_offset: Optional[float] = None,
     ) -> None:
         if not self.enabled:
@@ -935,146 +1298,33 @@ class LiveDashboard:
         while not self.stop_event.wait(self.TICK_SECONDS):
             self._render()
 
-    def _trend(self, values: Sequence[float]) -> str:
-        window = self.TREND_WINDOW
-        if len(values) < window * 2:
-            return "→"
-        recent = statistics.median(values[-window:])
-        prior = statistics.median(values[-2 * window:-window])
-        if prior == 0:
-            return "→"
-        delta = (recent - prior) / abs(prior)
-        if delta > self.TREND_RELATIVE:
-            return "↑"
-        if delta < -self.TREND_RELATIVE:
-            return "↓"
-        return "→"
-
-    def _pace(self, p95: Optional[float], valid_n: int) -> Tuple[str, str]:
-        if valid_n < self.WARMUP_VALID or p95 is None or self.tolerance <= 0:
-            return "WARMUP", "dim"
-        if p95 <= self.tolerance:
-            return "PASS", "green"
-        if p95 <= self.tolerance * 2.0:
-            return "MARGIN", "yellow"
-        return "FAIL", "red"
-
     def _budget_remaining(self) -> Optional[float]:
         if self.deadline_mono is None:
             return None
         return max(0.0, self.deadline_mono - time.monotonic())
 
-    def _snapshot(self) -> Dict[str, Any]:
+    def _snapshot(self) -> DashboardState:
         with self.lock:
             self.frame += 1
-            snap = {
-                "phase": self.phase,
-                "records": list(self.records),
-                "requested": self.requested,
-                "iteration": self.iteration,
-                "baseline": self.baseline_signed_offset,
-                "probe_started": self.probe_started_mono,
-                "phase_started": self.phase_started_mono,
-                "last_probe": self.last_probe_seconds,
-                "spinner": self.SPINNER[self.frame % len(self.SPINNER)],
-            }
-        return snap
-
-    def _phase_tail(
-        self,
-        snap: Dict[str, Any],
-        valid: Sequence[Dict[str, Any]],
-    ) -> Tuple[str, str, str]:
-        if snap["phase"] == "calibration" or snap["baseline"] is None:
-            signed_values = [
-                float(record["signed_delta"]) for record in valid
-                if record.get("signed_delta") is not None
-            ]
-            if signed_values:
-                median = statistics.median(signed_values)
-                stdev = (
-                    statistics.pstdev(signed_values)
-                    if len(signed_values) > 1
-                    else 0.0
-                )
-                if median:
-                    stable = stdev / abs(median) * 100.0
-                    stable_text = f"{stable:5.1f}%"
-                else:
-                    stable_text = "  n/a"
-                tail = (
-                    f"baseline={median:+.0f}c "
-                    f"stdev={stdev:.0f}c "
-                    f"stable={stable_text}"
-                )
-            else:
-                tail = "baseline=forming"
-            return tail, "", "cyan"
-
-        corrected = [
-            float(record["corrected_permille"]) for record in valid
-            if record.get("corrected_permille") is not None
-        ]
-        if corrected:
-            p95 = percentile(corrected, 0.95)
-            med = statistics.median(corrected)
-            trend = self._trend(corrected)
-            pace, pace_color = self._pace(p95, len(corrected))
-            tail = (
-                f"p95={p95:.3f}‰/{self.tolerance:.3f}‰ "
-                f"med={med:.3f}‰ trend={trend}"
+            state = DashboardState(
+                phase=self.phase,
+                records=list(self.records),
+                requested=self.requested,
+                baseline_signed_offset=self.baseline_signed_offset,
+                probe_started_mono=self.probe_started_mono,
+                phase_started_mono=self.phase_started_mono,
+                last_probe_seconds=self.last_probe_seconds,
+                spinner=self.SPINNER[self.frame % len(self.SPINNER)],
             )
-            return tail, f" PACE: {pace}", pace_color
+        return state
 
-        return "corrected=n/a", "", "dim"
-
-    def _compose(self, snap: Dict[str, Any]) -> Tuple[str, str]:
-        now = time.monotonic()
-        valid = valid_records(snap["records"])
-        completed = len(snap["records"])
-        requested = snap["requested"]
-        pct = (completed / requested * 100.0) if requested else 0.0
-        elapsed = now - snap["phase_started"]
-        rate = (completed / elapsed) if elapsed > 0 and completed else 0.0
-        eta = ((requested - completed) / rate) if rate > 0 else None
-        budget = self._budget_remaining()
-
-        probe_active = snap["probe_started"] is not None
-        if probe_active:
-            probe_age = now - snap["probe_started"]
-        else:
-            probe_age = snap["last_probe"]
-        probe_status = "run " if probe_active else "idle"
-        probe_dur = fmt_duration(probe_age) if probe_age is not None else "--:--"
-
-        tag = f"[{snap['phase'].upper()[:4]:<4}]"
-        bar = progress_bar(completed, requested)
-        head = (
-            f"{tag} {completed:>5}/{requested:<5} "
-            f"[{bar}] {pct:5.1f}% "
-            f"elapsed {fmt_duration(elapsed)} "
-            f"eta {fmt_duration(eta)} "
-            f"budget {fmt_duration(budget)}"
+    def _compose(self, state: DashboardState) -> Tuple[str, str]:
+        return self.renderer.compose(
+            state,
+            now=time.monotonic(),
+            budget=self._budget_remaining(),
+            colorize=TERMINAL.colorize,
         )
-
-        tail, pace_text, pace_color = self._phase_tail(snap, valid)
-        valid_text = f"valid {len(valid):>3}/{completed:<3}"
-        suffix = f"{valid_text} probe={probe_status} {probe_dur} {snap['spinner']}"
-
-        plain = f"{head} │ {tail}{pace_text} │ {suffix}"
-        ansi = (
-            f"{TERMINAL.colorize(tag, 'bold')} "
-            f"{completed:>5}/{requested:<5} "
-            f"[{TERMINAL.colorize(bar, 'cyan')}] {pct:5.1f}% "
-            f"elapsed {fmt_duration(elapsed)} "
-            f"eta {fmt_duration(eta)} "
-            f"budget {fmt_duration(budget)} "
-            f"│ {tail}"
-            f"{TERMINAL.colorize(pace_text, pace_color) if pace_text else ''}"
-            f" │ {valid_text} probe={probe_status} {probe_dur} "
-            f"{TERMINAL.colorize(snap['spinner'], 'cyan')}"
-        )
-        return plain, ansi
 
     def _render(self) -> None:
         if not self.enabled or self.requested == 0:
@@ -1140,7 +1390,7 @@ class LiveDashboard:
             if corrected:
                 p95 = percentile(corrected, 0.95)
                 med = statistics.median(corrected)
-                pace, _ = self._pace(p95, len(corrected))
+                pace, _ = self.renderer.pace(p95, len(corrected))
                 message = (
                     f"CHK meas {completed}/{requested} "
                     f"valid={len(valid)}/{completed} "
@@ -1155,11 +1405,11 @@ class LiveDashboard:
 
 
 def print_results(
-    cal_records: Sequence[Dict[str, Any]],
-    meas_records: Sequence[Dict[str, Any]],
+    cal_records: Sequence[ProbeRecord],
+    meas_records: Sequence[ProbeRecord],
     baseline_abs_offset: float,
     baseline_signed_offset: float,
-    verdict: Dict[str, Any],
+    verdict: Verdict,
     args: argparse.Namespace,
 ) -> None:
     cal = phase_stats(cal_records)
@@ -1263,30 +1513,31 @@ def print_results(
 
 def build_summary(
     *,
+    state: RunState,
     run_id: str,
     started_at: str,
     platform_info: Dict[str, Any],
     hwpmc_status: Dict[str, Any],
     event_availability: Dict[str, bool],
-    cal_records: Sequence[Dict[str, Any]],
-    meas_records: Sequence[Dict[str, Any]],
+    cal_records: Sequence[ProbeRecord],
+    meas_records: Sequence[ProbeRecord],
     baseline_abs_offset: float,
     baseline_signed_offset: float,
-    verdict: Dict[str, Any],
+    verdict: Verdict,
     args: argparse.Namespace,
-) -> Dict[str, Any]:
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "producer": PRODUCER,
-        "run_id": run_id,
-        "started_at": started_at,
-        "ended_at": utc_now(),
-        "event": {
+) -> RunSummary:
+    return RunSummary(
+        schema_version=SCHEMA_VERSION,
+        producer=PRODUCER,
+        run_id=run_id,
+        started_at=started_at,
+        ended_at=utc_now(),
+        event={
             "freebsd_name": EVENT,
             "silicon_event": SILICON_EVENT,
             "description": "AMD core cycles not in halt",
         },
-        "configuration": {
+        configuration={
             "calibration_n": args.calibration_n,
             "measurement_n": args.measurement_n,
             "dd_count": args.dd_count,
@@ -1300,70 +1551,57 @@ def build_summary(
             "sudo_non_interactive": args.sudo_non_interactive,
             "dry_run": args.dry_run,
         },
-        "platform": platform_info,
-        "hwpmc": hwpmc_status,
-        "event_availability": event_availability,
-        "shutdown_reason": SHUTDOWN_REASON,
-        "partial": bool(
-            SHUTDOWN_REASON
+        platform=platform_info,
+        hwpmc=hwpmc_status,
+        event_availability=event_availability,
+        shutdown_reason=state.shutdown_reason,
+        partial=bool(
+            state.shutdown_reason
             or len(cal_records) < args.calibration_n
             or len(meas_records) < args.measurement_n
         ),
-        "requested_samples": {
+        requested_samples={
             "calibration": args.calibration_n,
             "measurement": args.measurement_n,
         },
-        "completed_samples": {
+        completed_samples={
             "calibration": len(cal_records),
             "measurement": len(meas_records),
         },
-        "correction": {
+        correction={
             "method": "signed median calibration",
             "formula": "abs(measured_signed_delta - baseline_signed_offset) / max(last_a,last_b) * 1000",
             "baseline_abs_offset_cycles": baseline_abs_offset,
             "baseline_signed_offset_cycles": baseline_signed_offset,
         },
-        "calibration": phase_stats(cal_records),
-        "measurement": phase_stats(meas_records),
-        "corrected": corrected_stats(meas_records),
-        "verdict": verdict,
-    }
+        calibration=phase_stats(cal_records),
+        measurement=phase_stats(meas_records),
+        corrected=corrected_stats(meas_records),
+        verdict=verdict,
+    )
 
 
-CSV_FIELDS = [
-    "run_id", "phase", "iteration", "workload", "started_at", "ended_at",
-    "elapsed_seconds", "returncode", "command_outcome", "timed_out",
-    "terminated_by_signal", "valid", "row_count", "last_a", "last_b",
-    "max_count", "delta_abs", "signed_delta", "permille",
-    "baseline_signed_offset", "corrected_signed_delta", "corrected_delta",
-    "corrected_permille", "b_gt_a", "a_gt_b", "equal", "output_file",
-    "raw_sha256", "stderr_tail",
-]
-
-
-def write_csv_atomic(path: Path, records: Sequence[Dict[str, Any]]) -> None:
+def write_csv_atomic(path: Path, records: Sequence[ProbeRecord]) -> None:
     def write_rows(fp: Any) -> None:
         writer = csv.DictWriter(fp, fieldnames=CSV_FIELDS, extrasaction="ignore")
         writer.writeheader()
         for record in records:
-            row = {field: record.get(field) for field in CSV_FIELDS}
-            row["workload"] = shlex.join(record.get("workload") or [])
-            writer.writerow(row)
+            writer.writerow(record.csv_row())
 
     atomic_write_file(path, write_rows, suffix="csv")
 
 
 def write_outputs(
     outdir: Path,
-    summary: Dict[str, Any],
-    records: Sequence[Dict[str, Any]],
+    summary: RunSummary,
+    records: Sequence[ProbeRecord],
 ) -> None:
     json_path = outdir / "pmc-grouping-skew.json"
     csv_path = outdir / "pmc-grouping-skew.csv"
     payload = {
-        **summary,
+        **summary.to_dict(),
         "records_total": len(records),
-        "records": list(records),
+        "records": [record.to_dict() for record in records],
     }
     atomic_write_text(json_path, json.dumps(payload, indent=2, sort_keys=True, default=str))
     write_csv_atomic(csv_path, records)
@@ -1371,20 +1609,19 @@ def write_outputs(
     log_info(f"CSV:  {csv_path}")
 
 
-def signal_handler(signum: int, _frame: Any) -> None:
-    global SHUTDOWN_REASON, STOP_REQUESTED
-    STOP_REQUESTED = True
-    SHUTDOWN_REASON = f"signal {signum}"
+def signal_handler(signum: int, _frame: Any, state: RunState) -> None:
+    state.stop_requested = True
+    state.shutdown_reason = f"signal {signum}"
     COMMAND_RUNNER.terminate_active(signal.SIGTERM)
-    if ACTIVE_DASHBOARD is not None:
-        ACTIVE_DASHBOARD.suspend_for_log()
+    if state.active_dashboard is not None:
+        state.active_dashboard.suspend_for_log()
     log_warn(f"received signal {signum}; stopping after the active probe")
 
 
-def shutdown_exit_code() -> int:
-    if SHUTDOWN_REASON is None:
+def shutdown_exit_code(state: RunState) -> int:
+    if state.shutdown_reason is None:
         return 0
-    match = re.fullmatch(r"signal (\d+)", SHUTDOWN_REASON)
+    match = re.fullmatch(r"signal (\d+)", state.shutdown_reason)
     return 128 + int(match.group(1)) if match else 0
 
 
@@ -1396,7 +1633,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  sudo python3 py-scripts/pmc_grouping_skew_collect.py --minutes 30\n"
             "  sudo python3 py-scripts/pmc_grouping_skew_collect.py --calibration-n 30 --measurement-n 30\n"
-            "  python3 py-scripts/pmc_grouping_skew_collect.py --dry-run --once\n"
+            "  python3 py-scripts/pmc_grouping_skew_collect.py --dry-run\n"
         ),
     )
     parser.add_argument("--calibration-n", metavar="N",
@@ -1437,9 +1674,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda value: parse_nonnegative_float(value, "minutes"),
         default=DEFAULT_MINUTES,
         help="time budget in minutes; 0 means no deadline")
-    parser.add_argument("--once", action="store_true",
-        help="compatibility flag; this canonical collector always runs one calibrated pass")
-
     parser.add_argument("--sudo-cmd", default="sudo", help="sudo binary")
     parser.add_argument("--sudo-interactive", dest="sudo_non_interactive",
         action="store_false", help="allow interactive sudo prompts")
@@ -1482,15 +1716,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    global ACTIVE_DASHBOARD
     args = build_parser().parse_args()
+    state = RunState()
     configure_terminal(args)
     args.outdir = args.outdir.expanduser().resolve()
     args.deadline = None if args.minutes == 0 else time.monotonic() + args.minutes * 60.0
     resolve_tool_paths(args)
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    def _handle_signal(signum: int, frame: Any) -> None:
+        signal_handler(signum, frame, state)
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
 
     if not args.dry_run:
         check_tool("pmcstat")
@@ -1538,11 +1775,12 @@ def main() -> int:
     log_info(f"measurement iterations:  {args.measurement_n}")
     log_info(f"measurement workload:    dd if=/dev/zero of=/dev/null bs=4096 count={args.dd_count}")
     dashboard = LiveDashboard(args)
-    ACTIVE_DASHBOARD = dashboard
+    state.active_dashboard = dashboard
 
     try:
         cal_records = run_phase(
             args,
+            state=state,
             phase="calibration",
             iterations=args.calibration_n,
             workload=[args.true_cmd],
@@ -1558,6 +1796,7 @@ def main() -> int:
         )
         meas_records = run_phase(
             args,
+            state=state,
             phase="measurement",
             iterations=args.measurement_n,
             workload=[args.dd_cmd, "if=/dev/zero", "of=/dev/null", "bs=4096", f"count={args.dd_count}"],
@@ -1567,12 +1806,12 @@ def main() -> int:
             dashboard=dashboard,
             baseline_signed_offset=baseline_signed_offset,
         )
-        baseline_abs_offset, baseline_signed_offset = apply_correction(cal_records, meas_records)
-        verdict = verdict_from_stats(cal_records, meas_records, baseline_signed_offset, args)
+        baseline_abs_offset, baseline_signed_offset, meas_records = apply_correction(cal_records, meas_records)
+        verdict = verdict_from_stats(cal_records, meas_records, baseline_signed_offset, args, state)
         all_records = cal_records + meas_records
     finally:
         dashboard.stop()
-        ACTIVE_DASHBOARD = None
+        state.active_dashboard = None
 
     print_results(
         cal_records,
@@ -1583,6 +1822,7 @@ def main() -> int:
         args,
     )
     summary = build_summary(
+        state=state,
         run_id=run_id,
         started_at=started_at,
         platform_info=platform_info,
@@ -1596,7 +1836,7 @@ def main() -> int:
         args=args,
     )
     write_outputs(args.outdir, summary, all_records)
-    return shutdown_exit_code()
+    return shutdown_exit_code(state)
 
 
 if __name__ == "__main__":
