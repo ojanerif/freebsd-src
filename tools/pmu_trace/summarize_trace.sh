@@ -1,5 +1,7 @@
 #!/bin/sh
 #-
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # Author: Davi Chaves Azevedo
