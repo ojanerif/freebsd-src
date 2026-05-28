@@ -11,6 +11,7 @@ work/
 # BSD make build artifacts
 *.o
 *.d
+!tools/pmu_trace/*.d
 .depend
 .depend.*
 .objdir
@@ -30,6 +31,10 @@ tests/sys/amd/pmc/hwpmc_*test
 tests/sys/amd/pmc/hwpmc_*test.debug
 tests/sys/amd/pmc/hwpmc_*test.full
 tests/sys/amd/pmc/hwpmc_*test.pieo
+tests/sys/amd/pmc/pmcinfo_thread_count
+tests/sys/amd/pmc/pmcinfo_thread_count.debug
+tests/sys/amd/pmc/pmcinfo_thread_count.full
+tests/sys/amd/pmc/pmcinfo_thread_count.pieo
 tests/sys/amd/pmc/pmcstat_*_test
 tests/sys/amd/stress/*_test
 tests/sys/amd/stress/*_test.debug
