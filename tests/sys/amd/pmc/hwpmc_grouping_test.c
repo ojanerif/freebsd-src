@@ -17,6 +17,8 @@
 #include <sys/pmc.h>
 #include <sys/wait.h>
 
+#include <dev/hwpmc/hwpmc_amd.h>
+
 #include <atf-c.h>
 
 #include <errno.h>
@@ -59,6 +61,10 @@ require_pmu_core_event(const char *name, struct pmc_op_pmcallocate *cfg)
 	ATF_REQUIRE_MSG(cfg->pm_class == PMC_CLASS_K8,
 	    "PMU event %s mapped to class %d, expected PMC_CLASS_K8", name,
 	    cfg->pm_class);
+	ATF_REQUIRE_MSG(cfg->pm_md.pm_amd.pm_amd_sub_class ==
+	    PMC_AMD_SUB_CLASS_CORE,
+	    "PMU event %s mapped to AMD subclass %u, expected CORE", name,
+	    cfg->pm_md.pm_amd.pm_amd_sub_class);
 }
 
 static int
@@ -78,6 +84,50 @@ read_row_disposition(pmc_id_t pmcid, enum pmc_disp *disp)
 	if (pmc_pmcinfo(0, &pmcinfo) != 0)
 		return (errno != 0 ? errno : EINVAL);
 	*disp = pmcinfo->pm_pmcs[row].pm_rowdisp;
+	free(pmcinfo);
+	return (0);
+}
+
+static int
+amd_core_counter_index_from_pmcid(pmc_id_t pmcid, int cpu,
+    unsigned int *counter, char *errbuf, size_t errlen)
+{
+	struct pmc_pmcinfo *pmcinfo;
+	struct pmc_info *pi;
+	char extra;
+	int error, npmc;
+	unsigned int idx, row;
+
+	pmcinfo = NULL;
+	row = PMC_ID_TO_ROWINDEX(pmcid);
+	npmc = pmc_npmc(cpu);
+	if (npmc < 0) {
+		error = errno != 0 ? errno : EINVAL;
+		(void)snprintf(errbuf, errlen, "pmc_npmc(%d) failed: %s",
+		    cpu, strerror(error));
+		return (error);
+	}
+	if (row >= (unsigned int)npmc) {
+		(void)snprintf(errbuf, errlen,
+		    "global row %u is outside hwpmc row count %d", row, npmc);
+		return (ERANGE);
+	}
+	if (pmc_pmcinfo(cpu, &pmcinfo) != 0) {
+		error = errno != 0 ? errno : EINVAL;
+		(void)snprintf(errbuf, errlen, "pmc_pmcinfo(%d) failed: %s",
+		    cpu, strerror(error));
+		return (error);
+	}
+	pi = &pmcinfo->pm_pmcs[row];
+	if (pi->pm_class != PMC_CLASS_K8 ||
+	    sscanf(pi->pm_name, "K8-%u%c", &idx, &extra) != 1) {
+		(void)snprintf(errbuf, errlen,
+		    "global row %u is %s/class %d, not an AMD core PMC", row,
+		    pi->pm_name, pi->pm_class);
+		free(pmcinfo);
+		return (EINVAL);
+	}
+	*counter = idx;
 	free(pmcinfo);
 	return (0);
 }
@@ -776,6 +826,7 @@ ATF_TC_BODY(start_sys_mode_writes_msr_immediately, tc)
 	struct amd_msr_snapshot before, after;
 	char errbuf[160];
 	pmc_id_t pmcid;
+	unsigned int global_row;
 	unsigned int row;
 	int error;
 
@@ -792,11 +843,20 @@ ATF_TC_BODY(start_sys_mode_writes_msr_immediately, tc)
 		    AMD_GROUPING_CORE_EVENT, strerror(error));
 	ATF_REQUIRE_MSG(error == 0, "pmc_allocate(%s, SC) failed: %s",
 	    AMD_GROUPING_CORE_EVENT, strerror(error));
-	row = PMC_ID_TO_ROWINDEX(pmcid);
+	global_row = PMC_ID_TO_ROWINDEX(pmcid);
+	errbuf[0] = '\0';
+	error = amd_core_counter_index_from_pmcid(pmcid, 0, &row, errbuf,
+	    sizeof(errbuf));
+	if (error != 0) {
+		amd_test_release_pmc(pmcid);
+		atf_tc_fail("failed to map global row %u to AMD core counter: %s",
+		    global_row, errbuf[0] != '\0' ? errbuf : strerror(error));
+	}
 	if (row >= before.num_core_pmcs) {
 		amd_test_release_pmc(pmcid);
-		atf_tc_fail("allocated row %u is outside core MSR snapshot count %u",
-		    row, before.num_core_pmcs);
+		atf_tc_fail("allocated global row %u maps to core counter %u, "
+		    "outside core MSR snapshot count %u", global_row, row,
+		    before.num_core_pmcs);
 	}
 	if (amd_msr_snapshot_evsel_enabled(&before, row)) {
 		amd_test_release_pmc(pmcid);
@@ -839,6 +899,7 @@ ATF_TC_BODY(start_proc_mode_defers_to_csw, tc)
 	pid_t child;
 	pmc_id_t pmcid;
 	pmc_value_t after_count;
+	unsigned int global_row;
 	unsigned int row;
 
 	pmcid = PMC_ID_INVALID;
@@ -883,12 +944,22 @@ ATF_TC_BODY(start_proc_mode_defers_to_csw, tc)
 		atf_tc_fail("pmc_allocate(%s, TC) failed: %s",
 		    AMD_GROUPING_CORE_EVENT, strerror(error));
 	}
-	row = PMC_ID_TO_ROWINDEX(pmcid);
+	global_row = PMC_ID_TO_ROWINDEX(pmcid);
+	errbuf[0] = '\0';
+	error = amd_core_counter_index_from_pmcid(pmcid, target_cpu, &row, errbuf,
+	    sizeof(errbuf));
+	if (error != 0) {
+		amd_test_release_pmc(pmcid);
+		stop_busy_child(child, start_pipe, stop_pipe);
+		atf_tc_fail("failed to map global row %u to AMD core counter: %s",
+		    global_row, errbuf[0] != '\0' ? errbuf : strerror(error));
+	}
 	if (row >= snap.num_core_pmcs) {
 		amd_test_release_pmc(pmcid);
 		stop_busy_child(child, start_pipe, stop_pipe);
-		atf_tc_fail("allocated row %u is outside core MSR snapshot count %u",
-		    row, snap.num_core_pmcs);
+		atf_tc_fail("allocated global row %u maps to core counter %u, "
+		    "outside core MSR snapshot count %u", global_row, row,
+		    snap.num_core_pmcs);
 	}
 	if (pmc_attach(pmcid, child) != 0) {
 		amd_test_release_pmc(pmcid);
