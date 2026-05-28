@@ -103,6 +103,7 @@ get_test_meta() {
         # PMC suite tests
         hwpmc_exterr_test)               printf "TC-PMCAPI:hwpmc API:HIGH" ;;
         hwpmc_grouping_test)             printf "TC-PMCAPI:hwpmc API:HIGH" ;;
+        pmcstat_group_alloc_atomicity_test) printf "TC-PMCSTAT:pmcstat Integration:HIGH" ;;
         pmcstat_grouping_test)           printf "TC-PMCSTAT:pmcstat Integration:MEDIUM" ;;
         pmcstat_ibs_errata_test)         printf "TC-PMCSTAT:pmcstat Decode:HIGH" ;;
         pmcstat_tsc_test)                printf "TC-PMCSTAT:pmcstat Decode:HIGH" ;;
@@ -2519,9 +2520,10 @@ _run_suite_once() {
     TESTS_INSTALL_DIR=$(suite_install_dir "$_rs_suite")
 
     _rs_par="$PARALLELISM"
-    if [ "$_rs_suite" = "L3" ]; then
-        # L3 PMCs are cache/package-level hardware resources.  Serialize this
-        # suite even when --suite ALL uses a high global Kyua parallelism.
+    if [ "$_rs_suite" = "L3" ] || [ "$_rs_suite" = "PMC" ]; then
+        # L3 PMCs and AMD PMC grouping/runtime tests touch global/package MSR
+        # and hwpmc state.  Serialize these suites even when --suite ALL uses a
+        # high global Kyua parallelism.
         _rs_par=1
     fi
 
