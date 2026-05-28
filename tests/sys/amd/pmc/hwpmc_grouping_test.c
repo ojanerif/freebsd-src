@@ -361,7 +361,6 @@ ATF_TC_HEAD(row_disposition_tracks_process_and_system_pmc, tc)
 	    "resource grouping: THREAD for process PMCs and STANDALONE for "
 	    "system PMCs.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(row_disposition_tracks_process_and_system_pmc, tc)
@@ -393,7 +392,6 @@ ATF_TC_HEAD(amd_pmu_core_events_allocate_concurrently, tc)
 	    "Verify the same portable AMD Zen core PMU event resolves and "
 	    "allocates twice as distinct process-counting hwpmc rows.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(amd_pmu_core_events_allocate_concurrently, tc)
@@ -443,7 +441,6 @@ ATF_TC_HEAD(amd_pmu_mixed_core_events_allocate_concurrently, tc)
 	    "Verify mixed portable AMD Zen core PMU events allocate as distinct "
 	    "process-counting hwpmc rows without starting runtime counters.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(amd_pmu_mixed_core_events_allocate_concurrently, tc)
@@ -494,7 +491,6 @@ ATF_TC_HEAD(system_sampling_requires_logfile_before_start, tc)
 	    "Verify system sampling PMCs fail cleanly at pmc_start() when no "
 	    "hwpmc log file is configured.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(system_sampling_requires_logfile_before_start, tc)
@@ -530,7 +526,6 @@ ATF_TC_HEAD(alloc_reserves_distinct_rows, tc)
 	atf_tc_set_md_var(tc, "descr",
 	    "Verify two AMD core pmc_allocate() calls reserve distinct THREAD rows.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(alloc_reserves_distinct_rows, tc)
@@ -584,7 +579,6 @@ ATF_TC_HEAD(alloc_rollback_on_oversubscribe, tc)
 	atf_tc_set_md_var(tc, "descr",
 	    "Verify a failed AMD core allocation leaves the pmc_pmcinfo snapshot unchanged.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(alloc_rollback_on_oversubscribe, tc)
@@ -647,7 +641,6 @@ ATF_TC_HEAD(alloc_no_partial_pmcid_visibility, tc)
 	atf_tc_set_md_var(tc, "descr",
 	    "Verify concurrent pmc_allocate() returns either a visible pmcid or errno only.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(alloc_no_partial_pmcid_visibility, tc)
@@ -714,7 +707,6 @@ ATF_TC_HEAD(alloc_mode_class_atomicity, tc)
 	atf_tc_set_md_var(tc, "descr",
 	    "Verify THREAD-occupied AMD core rows exclude a STANDALONE allocation without residue.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(alloc_mode_class_atomicity, tc)
@@ -777,7 +769,6 @@ ATF_TC_HEAD(start_sys_mode_writes_msr_immediately, tc)
 	atf_tc_set_md_var(tc, "descr",
 	    "Verify PMC_MODE_SC writes AMD PerfEvtSel.En immediately on pmc_start().");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(start_sys_mode_writes_msr_immediately, tc)
@@ -838,7 +829,6 @@ ATF_TC_HEAD(start_proc_mode_defers_to_csw, tc)
 	    "Verify process-mode pmc_start() leaves AMD PerfEvtSel.En clear "
 	    "before target context switch-in and counts only after target run.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(start_proc_mode_defers_to_csw, tc)
@@ -967,7 +957,6 @@ ATF_TC_HEAD(start_skew_is_sequential_per_row, tc)
 	atf_tc_set_md_var(tc, "descr",
 	    "Use DTrace FBT to characterize adjacent amd_start_pmc row starts.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(start_skew_is_sequential_per_row, tc)
@@ -1032,7 +1021,6 @@ ATF_TC_HEAD(group_start_atomicity_EXPECTED_FAIL, tc)
 	atf_tc_set_md_var(tc, "descr",
 	    "Expected-fail bridge for future PMCGROUPSTART atomic row arming.");
 	atf_tc_set_md_var(tc, "require.user", "root");
-	atf_tc_set_md_var(tc, "is_exclusive", "true");
 }
 
 ATF_TC_BODY(group_start_atomicity_EXPECTED_FAIL, tc)

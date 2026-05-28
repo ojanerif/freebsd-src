@@ -233,7 +233,6 @@ concurrent_process_allocations_no_residue_head()
 {
 	atf_set "descr" "Race two full-width AMD pmcstat process allocations and check for residue"
 	atf_set "require.user" "root"
-	atf_set "is_exclusive" "true"
 }
 concurrent_process_allocations_no_residue_body()
 {
