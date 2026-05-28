@@ -4,16 +4,23 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 TESTSDIR=	${TESTSBASE}/sys/amd/pmc
+BINDIR=		${TESTSDIR}
 
 ATF_TESTS_C=	hwpmc_exterr_test hwpmc_grouping_test
 ATF_TESTS_SH=	pmcstat_tsc_test pmcstat_grouping_test \
-		pmcstat_ibs_errata_test
+		pmcstat_ibs_errata_test pmcstat_group_alloc_atomicity_test
+PROGS+=		pmcinfo_thread_count
 
 TEST_METADATA.hwpmc_exterr_test+=	required_user="root"
 TEST_METADATA.hwpmc_grouping_test+=	required_user="root"
 
 LIBADD.hwpmc_exterr_test+=	pmc
-LIBADD.hwpmc_grouping_test+=	pmc
+LIBADD.hwpmc_grouping_test+=	pmc pthread
+SRCS.hwpmc_grouping_test=	hwpmc_grouping_test.c pmcinfo_snapshot.c \
+		msr_snapshot.c
+SRCS.pmcinfo_thread_count=	pmcinfo_thread_count.c pmcinfo_snapshot.c
+CFLAGS.pmcinfo_thread_count+=	-I${.CURDIR}
+LIBADD.pmcinfo_thread_count+=	pmc
 
 # ATF is installed as a port at /usr/local (not a base library on this host).
 # Set LDADD_atf_c so atf.test.mk's per-test LDADD expansion finds the library,
