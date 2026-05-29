@@ -1046,7 +1046,7 @@ ATF_TC_BODY(start_skew_is_sequential_per_row, tc)
 	status = system("/usr/sbin/dtrace -Z -q "
 	    "-n 'fbt::amd_start_pmc:entry "
 	    "/pid == $target || progenyof($target)/ "
-	    "{ printf(\"start,%d,%d,%d,%lld\\n\", cpu, arg1, pid, "
+	    "{ printf(\"start,%d,%d,%d,%d\\n\", cpu, arg1, pid, "
 	    "timestamp); }' "
 	    "-c '/usr/sbin/pmcstat -C -q -p ls_not_halted_cyc "
 	    "-p ls_not_halted_cyc -- /bin/dd if=/dev/zero of=/dev/null "
