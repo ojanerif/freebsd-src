@@ -13,7 +13,9 @@ KYUAFILE=	yes
 
 ATF_TESTS_C=	l3_detect_test \
 		l3_miss_test \
-		l3_hit_test
+		l3_hit_test \
+		l3_config_test \
+		l3_accuracy_test
 
 LIBADD+=	pmc
 

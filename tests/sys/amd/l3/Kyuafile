@@ -5,3 +5,5 @@ test_suite("FreeBSD")
 atf_test_program{name="l3_detect_test", }
 atf_test_program{name="l3_hit_test", }
 atf_test_program{name="l3_miss_test", }
+atf_test_program{name="l3_config_test", }
+atf_test_program{name="l3_accuracy_test", }
