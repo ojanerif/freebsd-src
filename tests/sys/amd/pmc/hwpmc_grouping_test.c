@@ -320,6 +320,11 @@ set_pid_to_cpu(pid_t pid, int cpu)
 	    sizeof(set), &set));
 }
 
+/*
+ * Exit-status contract for the child workload: 0 is the only normal path;
+ * 2 and 3 are reserved for start/stop pipe failures.  The volatile sink keeps
+ * the spin loop observable without leaking arbitrary values into the status.
+ */
 static void
 busy_child(int start_fd, int stop_fd)
 {
@@ -345,7 +350,8 @@ busy_child(int start_fd, int stop_fd)
 		for (i = 0; i < 100000; i++)
 			sink += i;
 	}
-	_exit((int)(sink & 0x7f));
+	(void)sink;
+	_exit(0);
 }
 
 static void
@@ -1006,8 +1012,20 @@ ATF_TC_BODY(start_proc_mode_defers_to_csw, tc)
 	stop_pipe[1] = -1;
 	ATF_REQUIRE_MSG(waitpid_nointr(child, &status) == child,
 	    "waitpid(%d) failed: %s", child, strerror(errno));
-	ATF_CHECK_MSG(WIFEXITED(status) || WIFSIGNALED(status),
-	    "child exited with unexpected wait status %#x", status);
+	/*
+	 * busy_child() reserves WEXITSTATUS 2 and 3 for internal errors and
+	 * exits 0 on the normal path.  Require a strict clean exit so a
+	 * pipe/control-flow failure inside the child cannot masquerade as a
+	 * successful workload run that legitimately accumulated counters.
+	 */
+	if (!WIFEXITED(status)) {
+		atf_tc_fail("child terminated abnormally: wait status %#x "
+		    "signaled=%d signal=%d", status, WIFSIGNALED(status),
+		    WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+	}
+	ATF_REQUIRE_MSG(WEXITSTATUS(status) == 0,
+	    "child exited non-zero %d; 2=start-read-failed, 3=stop-read-failed",
+	    WEXITSTATUS(status));
 	if (pmc_stop(pmcid) != 0) {
 		amd_test_release_pmc(pmcid);
 		atf_tc_fail("pmc_stop(%u) failed: %s", pmcid, strerror(errno));
