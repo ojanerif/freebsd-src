@@ -560,6 +560,147 @@ diag_for_test() {
         printf 'ACTION:Fix the kernel NMI handler to skip counter re-arm when IbsOpEn=0; tracked as FreeBSD-Tests-010.\n'
         ;;
 
+    # ── IBS hwpmc alloc — IBS backend not implemented ─────────────────────
+    ibs_hwpmc_alloc_test:ibs_hwpmc_alloc_fetch_basic)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Calls pmc_allocate() with PMC_CLASS_IBS / IBS_FETCH mode and asserts it succeeds, verifying the hwpmc IBS Fetch backend accepts a basic allocation request.\n'
+        printf 'CAUSE:pmc_allocate() returned EOPNOTSUPP — the IBS PMC backend (PMC_CLASS_IBS) is not implemented in this libpmc/hwpmc tree.\n'
+        printf 'ACTION:Implement the IBS Fetch allocation path in sys/dev/hwpmc/hwpmc_amd.c and expose it via libpmc.\n'
+        ;;
+
+    ibs_hwpmc_alloc_test:ibs_hwpmc_alloc_op_basic)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Calls pmc_allocate() with PMC_CLASS_IBS / IBS_OP mode and asserts it succeeds, verifying the hwpmc IBS Op backend accepts a basic allocation request.\n'
+        printf 'CAUSE:pmc_allocate() returned EOPNOTSUPP — the IBS PMC backend (PMC_CLASS_IBS) is not implemented in this libpmc/hwpmc tree.\n'
+        printf 'ACTION:Implement the IBS Op allocation path in sys/dev/hwpmc/hwpmc_amd.c and expose it via libpmc.\n'
+        ;;
+
+    ibs_hwpmc_alloc_test:ibs_hwpmc_alloc_reject_counting_mode)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Requests an IBS PMC in non-sampling (counting) mode and asserts pmc_allocate() rejects it with EINVAL, since IBS is sampling-only.\n'
+        printf 'CAUSE:pmc_allocate() returned EOPNOTSUPP before it could check the mode argument — the IBS backend is not implemented in this tree, so the rejection reason is wrong.\n'
+        printf 'ACTION:Implement the IBS backend; the mode-validation rejection will then work correctly.\n'
+        ;;
+
+    ibs_hwpmc_alloc_test:ibs_hwpmc_alloc_reject_bad_rate)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Requests an IBS PMC with a sampling rate below the hardware minimum and asserts pmc_allocate() rejects it with EINVAL.\n'
+        printf 'CAUSE:pmc_allocate() returned EOPNOTSUPP before reaching rate validation — the IBS backend is not implemented in this tree.\n'
+        printf 'ACTION:Implement the IBS backend; rate-limit validation will then be reachable.\n'
+        ;;
+
+    ibs_hwpmc_alloc_test:ibs_hwpmc_alloc_reject_unknown_qualifier)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Requests an IBS PMC with an unknown qualifier flag set and asserts pmc_allocate() rejects it with EINVAL.\n'
+        printf 'CAUSE:pmc_allocate() returned EOPNOTSUPP before reaching qualifier validation — the IBS backend is not implemented in this tree.\n'
+        printf 'ACTION:Implement the IBS backend; qualifier validation will then be reachable.\n'
+        ;;
+
+    # ── IBS hwpmc caps — IBS backend not implemented ──────────────────────
+    ibs_hwpmc_caps_test:ibs_hwpmc_fetch_caps_and_width)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Calls pmc_getcpuinfo() and inspects the PMC_CLASS_IBS class descriptor: verifies that at least one IBS Fetch row is reported and that the counter width is non-zero.\n'
+        printf 'CAUSE:PMC_CLASS_IBS is absent from the pmc_cpuinfo class list — the IBS backend is not registered in this libpmc/hwpmc tree.\n'
+        printf 'ACTION:Register PMC_CLASS_IBS in the hwpmc capabilities table and expose it via libpmc pmc_getcpuinfo().\n'
+        ;;
+
+    ibs_hwpmc_caps_test:ibs_hwpmc_pmcinfo_rows_present)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Calls pmc_getpmcinfo() and verifies that at least two IBS rows (one Fetch, one Op) are present in the per-CPU PMC row table.\n'
+        printf 'CAUSE:No IBS rows appear in pmc_getpmcinfo() — the IBS backend is not registered in this libpmc/hwpmc tree.\n'
+        printf 'ACTION:Register PMC_CLASS_IBS rows in hwpmc and expose them via libpmc pmc_getpmcinfo().\n'
+        ;;
+
+    # ── IBS hwpmc info — IBS backend not implemented ──────────────────────
+    ibs_hwpmc_info_test:ibs_hwpmc_info_class_present)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Calls pmc_getcpuinfo() and asserts that PMC_CLASS_IBS appears in the returned class list, confirming the IBS event class is visible to userspace.\n'
+        printf 'CAUSE:PMC_CLASS_IBS is absent from the pmc_cpuinfo class list — the IBS backend is not registered in this libpmc/hwpmc tree.\n'
+        printf 'ACTION:Register PMC_CLASS_IBS in the hwpmc capabilities table and expose it via libpmc pmc_getcpuinfo().\n'
+        ;;
+
+    ibs_hwpmc_info_test:ibs_hwpmc_info_class_name_visible)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Iterates pmc_getcpuinfo() class descriptors and asserts the class named "IBS" is present, verifying the human-readable class name is correct.\n'
+        printf 'CAUSE:No class named "IBS" found in pmc_getcpuinfo() output — the IBS backend is not registered in this libpmc/hwpmc tree.\n'
+        printf 'ACTION:Register PMC_CLASS_IBS with the correct name string in the hwpmc class table.\n'
+        ;;
+
+    ibs_hwpmc_info_test:ibs_hwpmc_info_event_names_visible)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Calls pmc_event_names_of_class(PMC_CLASS_IBS) and asserts at least two event names are returned (e.g. IBS-FETCH, IBS-OP), confirming the event table is populated.\n'
+        printf 'CAUSE:pmc_event_names_of_class(PMC_CLASS_IBS) returned no events or failed — the IBS backend and its event table are not registered in this libpmc/hwpmc tree.\n'
+        printf 'ACTION:Populate the IBS event table in hwpmc_amd.c and wire it into libpmc event name resolution.\n'
+        ;;
+
+    # ── IBS hwpmc runtime — IBS backend not implemented ───────────────────
+    ibs_hwpmc_runtime_test:ibs_hwpmc_fetch_lifecycle_smoke)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Allocates an IBS Fetch PMC via pmc_allocate(), attaches it to the current process, starts sampling, lets it run briefly, stops it, and releases it — exercising the full allocate→attach→start→stop→free lifecycle.\n'
+        printf 'CAUSE:pmc_allocate() returned EOPNOTSUPP at the first step — the IBS PMC runtime backend is not implemented in this libpmc/hwpmc tree.\n'
+        printf 'ACTION:Implement the IBS Fetch sampling lifecycle (allocate, attach, start, stop, free) in sys/dev/hwpmc/hwpmc_amd.c.\n'
+        ;;
+
+    ibs_hwpmc_runtime_test:ibs_hwpmc_getmsr_virtual_negative)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Allocates an IBS Op PMC and calls pmc_rw() with a virtual MSR index out of the valid IBS MSR range, asserting that EINVAL is returned — verifying bounds checking on the virtual MSR accessor.\n'
+        printf 'CAUSE:pmc_allocate() returned EOPNOTSUPP before the MSR accessor was reached — the IBS PMC backend is not implemented in this libpmc/hwpmc tree.\n'
+        printf 'ACTION:Implement the IBS backend; the virtual MSR bounds check will then be exercisable.\n'
+        ;;
+
+    # ── hwpmc_grouping — PMC row disposition API ───────────────────────────
+    hwpmc_grouping_test:row_disposition_tracks_process_and_system_pmc)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Allocates one SOFT-CLOCK.HARD PMC in thread-counting mode (TC) and one in system-counting mode (SC), then calls pmc_getpmcinfo() to verify the row disposition is PMC_DISP_THREAD for the process PMC and PMC_DISP_STANDALONE for the system PMC.\n'
+        printf 'CAUSE:pmc_allocate() or pmc_getpmcinfo() failed, or the disposition values returned do not match expectations — possibly because the row-disposition field (PMC_DISP_*) is not implemented or not exposed in this libpmc/hwpmc version.\n'
+        printf 'ACTION:Confirm pmc_getpmcinfo() populates the disposition field and that PMC_DISP_THREAD / PMC_DISP_STANDALONE are defined; check dmesg for hwpmc initialization errors.\n'
+        ;;
+
+    hwpmc_grouping_test:amd_pmu_core_events_allocate_concurrently)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Allocates the portable "unhalted-cycles" AMD Zen core PMU event twice as independent process-counting (TC) hwpmc rows and asserts both get distinct row numbers, verifying the PMU grouping logic does not force them onto the same row.\n'
+        printf 'CAUSE:pmc_allocate() failed or the two PMCs share the same row — either PMU JSON tables for the running CPU are absent, or the grouping logic incorrectly aliases the two allocations.\n'
+        printf 'ACTION:Verify PMU JSON tables for the AMD CPU family are present and that amd_umcdf_skip_unless_pmu_events() does not guard-skip; inspect hwpmc grouping logic for concurrent-allocation bugs.\n'
+        ;;
+
+    hwpmc_grouping_test:amd_pmu_mixed_core_events_allocate_concurrently)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Allocates "unhalted-cycles" and "instructions" as distinct process-counting hwpmc rows and asserts they receive different row numbers, covering mixed-event concurrent allocation.\n'
+        printf 'CAUSE:pmc_allocate() failed for one or both events, or the two events share a row — either PMU JSON tables are absent or the grouping logic incorrectly merges different event types.\n'
+        printf 'ACTION:Verify PMU JSON tables expose both "unhalted-cycles" and "instructions" for this CPU; inspect hwpmc grouping for cross-event aliasing bugs.\n'
+        ;;
+
+    hwpmc_grouping_test:system_sampling_requires_logfile_before_start)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Allocates SOFT-CLOCK.HARD in system-sampling mode (SS) without configuring a log file, then calls pmc_start() and asserts it returns EDOOFUS — verifying the kernel enforces logfile-before-start ordering.\n'
+        printf 'CAUSE:pmc_allocate() or pmc_start() returned an unexpected error, or pmc_start() succeeded (no EDOOFUS) — possibly because the logfile enforcement check is absent or returns a different errno in this hwpmc version.\n'
+        printf 'ACTION:Check hwpmc for the EDOOFUS guard on pmc_start() with system-sampling PMCs that lack a log file; confirm the behavior matches the ATF assertion.\n'
+        ;;
+
+    # ── UMCDF unit — DF config dispatch ───────────────────────────────────
+    umcdf_unit_df_config_dispatch_test:umcdf_unit_dfdis_df1_df2_differ)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Constructs a DF event with event_code=0x0107 and umask=0x55, computes amd_umcdf_expected_df_config() for both Zen3 (DF1 format) and Zen4 (DF2 format), and asserts the two results differ — validating that the high-nibble event-code encoding diverges between DF generations.\n'
+        printf 'CAUSE:amd_umcdf_expected_df_config() returned identical values for Zen3 and Zen4, indicating the DF1/DF2 encoding branches produce the same bit pattern for this event code — either the high-nibble placement logic is missing or uses the same formula for both generations.\n'
+        printf 'ACTION:Review amd_umcdf_expected_df_config() in the umcdf library: confirm DF1 encodes bits[11:8] of event_code differently from DF2 (e.g. DF1 uses a dedicated high-nibble field vs DF2 extended-event layout).\n'
+        ;;
+
+    # ── UMCDF unit — capabilities ─────────────────────────────────────────
+    umcdf_unit_capabilities_test:umcdf_unit_cap_df1_df2_differ)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Constructs event_code=0x0107 / umask=0x01, calls amd_umcdf_expected_df_config() for Zen3 (DF1) and Zen4 (DF2), and asserts df1_cfg != df2_cfg — verifying the capabilities layer routes to the correct generation-specific encoder.\n'
+        printf 'CAUSE:amd_umcdf_expected_df_config() produced the same 64-bit config word for both Zen3 and Zen4 with event 0x0107 — the capabilities dispatch is either missing the generation split or calling the same encoder for both.\n'
+        printf 'ACTION:Inspect the amd_umcdf_expected_df_config() dispatch path: confirm it selects DF1 encoding for AMD_UMCDF_ZEN_3 and DF2 encoding for AMD_UMCDF_ZEN_4, and that the two encoders produce distinct results for events with bits[11:8] set.\n'
+        ;;
+
+    # ── pmcstat IBS errata — Zen 3 B0 icmiss suppression ─────────────────
+    pmcstat_ibs_errata_test:zen3_b0_fetch_icmiss_suppressed)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Writes a synthetic pmclog stream with IBS Fetch records carrying the IbsIcMiss bit set, stamped with Zen 3 B0 producer CPUIDs (AuthenticAMD-25-00-1 and AuthenticAMD-25-0F-1), then runs pmcstat -R and asserts the icmiss token is absent from the decoded Fetch line — verifying erratum #1238 suppression.\n'
+        printf 'CAUSE:pmcstat -R printed "icmiss" in the decoded output for a Zen 3 B0 CPUID even though the erratum #1238 workaround should suppress it — either the CPUID range check in pmcstat is wrong, missing, or the workaround was not applied to the patched pmcstat binary under test.\n'
+        printf 'ACTION:Verify that the pmcstat erratum #1238 patch (SWLSVROS-6414 / D4) is applied to the binary located by amd.pmcstat.path or found in PATH; check the CPUID range logic covers Family 19h models 00h–0Fh.\n'
+        ;;
+
     # ── UMCDF ─────────────────────────────────────────────────────────────
     umcdf_df_test:umcdf_df_runtime_smoke)
         printf 'CLASS:actionable\n'
@@ -573,6 +714,48 @@ diag_for_test() {
         printf 'OPERATION:Allocates an AMD UMC (Unified Memory Controller) PMC event, starts and stops sampling, and generates memory traffic to confirm the counter increments.\n'
         printf 'CAUSE:pmc_allocate() returned Operation not supported (EOPNOTSUPP) — the UMC PMC backend is not yet implemented in this libpmc/hwpmc tree even though UMC metadata is present.\n'
         printf 'ACTION:Implement the UMC PMC runtime backend in hwpmc and libpmc for Zen4 (EPYC 9xxx series).\n'
+        ;;
+
+    # ── hwpmc_exterr — extended error field not wired in kernel ───────────
+    # All 14 TCs in hwpmc_exterr_test skip with "kernel hwpmc does not
+    # populate extended errors yet".  One entry covers them all.
+    hwpmc_exterr_test:pmcallocate_invalid_mode|\
+    hwpmc_exterr_test:pmcallocate_invalid_cpu|\
+    hwpmc_exterr_test:pmcallocate_invalid_flags|\
+    hwpmc_exterr_test:pmcattach_system_mode|\
+    hwpmc_exterr_test:pmcattach_running_pmc|\
+    hwpmc_exterr_test:pmcrw_no_flags|\
+    hwpmc_exterr_test:pmcrw_write_running|\
+    hwpmc_exterr_test:amd_missing_pmu_flag|\
+    hwpmc_exterr_test:amd_invalid_subclass|\
+    hwpmc_exterr_test:amd_invalid_config_bits|\
+    hwpmc_exterr_test:ibs_missing_system_capability|\
+    hwpmc_exterr_test:ibs_invalid_type|\
+    hwpmc_exterr_test:ibs_invalid_config_bits|\
+    hwpmc_exterr_test:ibs_nonsampling_mode)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Exercises a specific PMC_OP_* ioctl error path (bad mode, bad CPU, bad flags, attach constraints, PMCRW constraints, or IBS-specific rejections) and asserts the kernel populates the extended-error sysctl with a human-readable reason string via pmc_save_uexterr().\n'
+        printf 'CAUSE:require_working_exterr() skips the test because the kernel does not call pmc_save_uexterr() on any error path yet — the extended-error sysctl is always empty, so the assertion cannot be satisfied.\n'
+        printf 'ACTION:Wire pmc_save_uexterr() calls into the relevant PMC_OP_* kernel handlers (hwpmc_ioctl in sys/dev/hwpmc/hwpmc.c) and re-run.\n'
+        ;;
+
+    # ── pmcstat_tsc_test — QA-branch -j flag not in installed pmcstat ─────
+    pmcstat_tsc_test:json_tsc_unsigned)
+        printf 'CLASS:actionable\n'
+        printf 'OPERATION:Captures a live pmclog via pmcstat, then runs pmcstat -R -j to decode it as JSON and asserts every "tsc" field is a non-negative unsigned integer — verifying the %%jd-to-%%ju fix (SWLSVROS-6363) is present.\n'
+        printf 'CAUSE:pmcstat -R test.pmc -j printed "illegal option" — the -j (JSON output) flag is not recognised by the pmcstat binary installed in /usr/sbin/pmcstat on this system; the QA branch carrying SWLSVROS-6363 has not been installed.\n'
+        printf 'ACTION:Install the QA-branch pmcstat (SWLSVROS-6363 patch) to /usr/sbin/pmcstat or point amd.pmcstat.path at the correct binary, then re-run.\n'
+        ;;
+
+    # ── pmcstat_grouping_test — AMD core-grouping runtime disabled ─────────
+    pmcstat_grouping_test:repeated_process_cycles_have_bounded_skew|\
+    pmcstat_grouping_test:mixed_cycles_instructions_are_independent_columns|\
+    pmcstat_grouping_test:mixed_cache_cycles_are_independent_columns|\
+    pmcstat_grouping_test:oversubscribed_process_cycles_fail_cleanly)
+        printf 'CLASS:normal\n'
+        printf 'OPERATION:Runs a live pmcstat process-counting session with AMD Zen core events (ls_not_halted_cyc, ex_ret_instr, cache events) and checks that the grouping patch produces the correct column structure in the output.\n'
+        printf 'CAUSE:The test guards behind amd.umcdf_skip_unless_pmu_grouping_runtime() which checks the kyua config key amd.pmc.grouping.runtime; it is not set to true in this environment, so the test self-skips. This is expected — live process-counting PMC tests are disabled by default.\n'
+        printf 'ACTION:To enable: add "amd.pmc.grouping.runtime=true" to /usr/tests/sys/amd/pmc/kyua.conf (or pass it via kyua -v) and re-run.\n'
         ;;
 
     # ── Fallback ──────────────────────────────────────────────────────────
@@ -1070,7 +1253,7 @@ RCEOF
 
     # Enable it for the next boot only; it self-disables after running.
     # Use the literal service name -${name} is only defined inside the rc.d script.
-    sysrc ibs_autotest_enable=YES
+    sysrc ibs_autotest_enable=YES || { log_error "sysrc failed — ibs_autotest will NOT run after reboot"; return 1; }
     log_success "ibs_autotest enabled for next boot (self-disables after run)"
 }
 
@@ -2519,11 +2702,20 @@ _run_suite_once() {
     fi
     TESTS_INSTALL_DIR=$(suite_install_dir "$_rs_suite")
 
+    # Parallelism: all suites and stress batches now respect $PARALLELISM.
+    # Resource isolation is achieved by running stress batches sequentially
+    # (Batch 1 CPU → Batch 2 Memory → Batch 3 Disk → Batch 4 Network) via
+    # _run_stress_batches(), not by forcing parallelism=1 here.
+    #
+    # Exception — PMC suite is capped at parallelism=1.
+    # pmcstat_grouping_test cases use `pmcstat -c 0` (system-wide counting),
+    # which allocates PMC_MODE_SC rows on every CPU simultaneously.  Running
+    # multiple such tests concurrently causes a kernel panic or hard reboot due
+    # to concurrent system-wide pmc_allocate()/pmc_start() contention inside
+    # hwpmc.ko.  Observed on a 192-CPU EPYC machine: reboot with no crash dump.
     _rs_par="$PARALLELISM"
-    if [ "$_rs_suite" = "L3" ] || [ "$_rs_suite" = "PMC" ]; then
-        # L3 PMCs and AMD PMC grouping/runtime tests touch global/package MSR
-        # and hwpmc state.  Serialize these suites even when --suite ALL uses a
-        # high global Kyua parallelism.
+    if [ "$_rs_suite" = "PMC" ] && [ "$_rs_par" -gt 1 ] 2>/dev/null; then
+        log_warning "PMC suite: capping parallelism from ${_rs_par} to 1 (system-wide PMC tests unsafe under concurrency)"
         _rs_par=1
     fi
 
@@ -2533,6 +2725,7 @@ _run_suite_once() {
     echo "================================================================="
 
     printf '\n=== SUITE: %s started: %s ===\n' "$_rs_suite" "$(date)" >> "$LAST_RUN_LOG"
+    [ -f "$LAST_TEST_STATE" ] && cp "$LAST_TEST_STATE" "${LAST_TEST_STATE}.prev"
     printf 'SUITE=%s\nSTARTED=%s\nPARALLELISM=%s\nLAST_COMPLETED=\nLAST_STATUS=\nLAST_SEEN_AT=\n' \
         "$_rs_suite" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_rs_par" > "$LAST_TEST_STATE"
 
@@ -2909,6 +3102,9 @@ run_all_tests() {
         } > "$REPORT_TXT"
 
         # ── Live-log header (panic recovery) ──
+        # Rotate previous log/state before overwriting so post-reboot 'r' can read them.
+        [ -f "$LAST_RUN_LOG"    ] && cp "$LAST_RUN_LOG"    "${LAST_RUN_LOG}.prev"
+        [ -f "$LAST_TEST_STATE" ] && cp "$LAST_TEST_STATE" "${LAST_TEST_STATE}.prev"
         {
             printf '=== ibs-ci run started: %s ===\n' "$(date)"
             printf 'SUITES=%s  WITH_STRESS=%s\n\n' "$SUITE_LIST" "$WITH_STRESS"
@@ -3584,40 +3780,198 @@ list_tests() {
 }
 
 show_report() {
-    _sr_suite="$SUITE"
-    case "$_sr_suite" in
-        DEFAULT|ALL) _sr_suite="$_SUITE_PRIMARY" ;;
-    esac
-    log_info "Generating detailed test report..."
+    echo ""
+    printf '%s\n' "${CYAN}=================================================================${NC}"
+    printf '%s\n' "${WHITE}  LAST RUN REPORT — PANIC/ERROR TRIAGE${NC}"
+    printf '%s\n' "${CYAN}=================================================================${NC}"
+    printf "  System : %s\n" "$(uname -a)"
+    printf "  Now    : %s\n" "$(date)"
+    echo ""
 
-    if [ ! -d "$TESTS_INSTALL_DIR" ]; then
-        log_error "Tests not installed. Run --compile first"
-        exit 1
+    # ── 1. Kernel panic / crash detection ──────────────────────────────────
+    printf '%s\n' "${BOLD}[1] KERNEL PANIC / CRASH DETECTION${NC}"
+    echo "-----------------------------------------------------------------"
+
+    # Uptime heuristic: short uptime after a test run = likely crash/hard reset
+    _up_secs=$(sysctl -n kern.boottime 2>/dev/null | awk '{print $4}' | tr -d ',')
+    _now_secs=$(date +%s)
+    _uptime_mins=0
+    [ -n "$_up_secs" ] && _uptime_mins=$(( (_now_secs - _up_secs) / 60 ))
+    if [ "$_uptime_mins" -lt 30 ]; then
+        printf '%s\n' "${RED}WARNING: System uptime is only ${_uptime_mins} min — likely a post-crash reboot.${NC}"
+    else
+        printf "  Uptime: ${_uptime_mins} min\n"
+    fi
+    echo ""
+
+    # dmesg panic markers
+    _panic_lines=$(dmesg 2>/dev/null | grep -iE 'panic:|KDB: enter|Trap [0-9]+|Fatal trap|page fault|double fault|NMI|machine check|watchdog' | tail -20)
+    if [ -n "$_panic_lines" ]; then
+        printf '%s\n' "${RED}dmesg panic/crash markers:${NC}"
+        printf '%s\n' "$_panic_lines"
+        echo ""
+        printf '%s\n' "${YELLOW}--- dmesg tail (last 40 lines) ---${NC}"
+        dmesg 2>/dev/null | tail -40
+    else
+        printf '%s\n' "${GREEN}No panic/crash markers in dmesg.${NC}"
+    fi
+    echo ""
+
+    # /var/log/messages — catches watchdog, MCE, hard resets missed by dmesg
+    if [ -f /var/log/messages ]; then
+        _msg_panic=$(grep -iE 'panic|watchdog|machine check|NMI|fatal|reboot|shutdown' \
+            /var/log/messages | tail -20)
+        if [ -n "$_msg_panic" ]; then
+            printf '%s\n' "${YELLOW}/var/log/messages crash/reboot events:${NC}"
+            printf '%s\n' "$_msg_panic"
+        else
+            printf '%s\n' "${GREEN}No crash/reboot events in /var/log/messages.${NC}"
+        fi
+        echo ""
     fi
 
-    mkdir -p "$RESULTS_DIR"
-    REPORT_TXT="$RESULTS_DIR/report.txt"
-    REPORT_XML="$RESULTS_DIR/report.xml"
-
-    cd "$TESTS_INSTALL_DIR" || exit 1
-
-    echo ""
-    echo "================================================================="
-    echo "$_sr_suite TEST SUITE DETAILED REPORT"
-    echo "================================================================="
-    echo "System: $(uname -a)"
-    echo "Date: $(date)"
-    echo "User: $(whoami)"
+    # vmcore check
+    _vmcore=$(ls /var/crash/vmcore* 2>/dev/null | head -5)
+    if [ -n "$_vmcore" ]; then
+        printf '%s\n' "${RED}Crash dump(s) found in /var/crash/:${NC}"
+        ls -lh /var/crash/vmcore* 2>/dev/null
+        printf "  Run: kgdb /boot/kernel/kernel /var/crash/vmcore.last\n"
+    else
+        printf '%s\n' "${YELLOW}No vmcore in /var/crash/ — hard reset or dump not captured.${NC}"
+        printf "  Ensure kern.panic_reboot_wait_time >= 30 (currently: %s s)\n" \
+            "$(sysctl -n kern.panic_reboot_wait_time 2>/dev/null || echo unknown)"
+    fi
     echo ""
 
-    kyua report --verbose --results-filter passed,skipped,xfail,broken,failed \
-        | tee "$REPORT_TXT"
-    kyua report-junit > "$REPORT_XML" 2>/dev/null || true
-
+    # ── 2. Last test state (surviving across reboots via /var/log) ─────────
+    printf '%s\n' "${BOLD}[2] LAST TEST STATE (pre-reboot)${NC}"
+    echo "-----------------------------------------------------------------"
+    if [ -f "$LAST_TEST_STATE" ]; then
+        # If current state has no LAST_COMPLETED (new run just started / was reset),
+        # fall back to .prev which holds the pre-crash evidence.
+        _last_tc=$(grep '^LAST_COMPLETED=' "$LAST_TEST_STATE" | tail -1 | cut -d= -f2-)
+        _sr_state="$LAST_TEST_STATE"
+        if [ -z "$_last_tc" ] && [ -f "${LAST_TEST_STATE}.prev" ]; then
+            _sr_state="${LAST_TEST_STATE}.prev"
+            printf "${YELLOW}  (current state is empty — showing pre-crash .prev file)${NC}\n\n"
+        fi
+        cat "$_sr_state"
+        echo ""
+        # Highlight if the last completed test may be the culprit
+        _last_tc=$(grep '^LAST_COMPLETED=' "$_sr_state" | tail -1 | cut -d= -f2-)
+        _last_st=$(grep '^LAST_STATUS='    "$_sr_state" | tail -1 | cut -d= -f2-)
+        _last_at=$(grep '^LAST_SEEN_AT='   "$_sr_state" | tail -1 | cut -d= -f2-)
+        if [ -n "$_last_tc" ]; then
+            case "$_last_st" in
+                failed|broken)
+                    printf "${RED}>>> Last recorded test was %s: %s at %s${NC}\n" \
+                        "$_last_st" "$_last_tc" "$_last_at"
+                    ;;
+                passed|skipped|xfail)
+                    printf "${YELLOW}>>> Last recorded test was %s: %s at %s${NC}\n" \
+                        "$_last_st" "$_last_tc" "$_last_at"
+                    printf "    If a panic occurred, the NEXT unrecorded test is the likely culprit.\n"
+                    ;;
+            esac
+        fi
+    else
+        printf "  No state file found (%s)\n" "$LAST_TEST_STATE"
+        printf "  Run tests at least once to populate it.\n"
+    fi
     echo ""
-    echo "================================================================="
-    log_info "Full report : $REPORT_TXT"
-    log_info "JUnit XML   : $REPORT_XML"
+
+    # ── 3. Failures from saved report.txt (survives reboots) ───────────────
+    printf '%s\n' "${BOLD}[3] FAILURES FROM SAVED REPORT${NC}"
+    echo "-----------------------------------------------------------------"
+    # Find the most recent report.txt under HTML_DIR
+    _saved_report=""
+    if [ -d "$HTML_DIR" ]; then
+        _saved_report=$(ls -dt "$HTML_DIR"/results-*/report.txt 2>/dev/null | head -1)
+    fi
+    # Fallback: check RESULTS_DIR if it already exists from this session
+    if [ -z "$_saved_report" ] && [ -f "$RESULTS_DIR/report.txt" ]; then
+        _saved_report="$RESULTS_DIR/report.txt"
+    fi
+
+    if [ -n "$_saved_report" ] && [ -f "$_saved_report" ]; then
+        printf "  Source: %s\n" "$_saved_report"
+        printf "  Modified: %s\n\n" "$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$_saved_report" 2>/dev/null || date -r "$_saved_report" 2>/dev/null || echo 'unknown')"
+
+        # Extract verdict line
+        _verdict=$(grep 'VERDICT:' "$_saved_report" | tail -1)
+        if [ -n "$_verdict" ]; then
+            case "$_verdict" in
+                *APPROVED*)    printf "${GREEN}%s${NC}\n\n" "$_verdict" ;;
+                *CONDITIONAL*) printf "${YELLOW}%s${NC}\n\n" "$_verdict" ;;
+                *)             printf "${RED}%s${NC}\n\n" "$_verdict" ;;
+            esac
+        fi
+
+        # Extract failed/broken test entries
+        _failures=$(grep -E '^\s*(FAILED|BROKEN|failed|broken)' "$_saved_report" | head -30)
+        if [ -n "$_failures" ]; then
+            printf '%s\n' "${RED}--- Failed/Broken tests ---${NC}"
+            printf '%s\n' "$_failures"
+        else
+            # Try kyua-style "result: failed" blocks
+            _failures=$(grep -B2 'result: failed\|result: broken' "$_saved_report" | head -40)
+            if [ -n "$_failures" ]; then
+                printf '%s\n' "${RED}--- Failed/Broken tests ---${NC}"
+                printf '%s\n' "$_failures"
+            else
+                printf '%s\n' "${GREEN}No failures found in saved report.${NC}"
+            fi
+        fi
+    else
+        printf "  No saved report.txt found under %s\n" "$HTML_DIR"
+        printf "  (Reports are saved after a --run-all or menu option 1 run)\n"
+    fi
+    echo ""
+
+    # ── 4. Live run log tail (last activity before crash) ──────────────────
+    printf '%s\n' "${BOLD}[4] RUN LOG — LAST 60 LINES (pre-reboot activity)${NC}"
+    echo "-----------------------------------------------------------------"
+    if [ -f "${LAST_RUN_LOG}.prev" ]; then
+        _prev_lines=$(wc -l < "${LAST_RUN_LOG}.prev" 2>/dev/null || echo 0)
+        printf "${YELLOW}  Pre-crash log: %s.prev  (%d lines total)${NC}\n\n" \
+            "$LAST_RUN_LOG" "$_prev_lines"
+        tail -60 "${LAST_RUN_LOG}.prev"
+        echo ""
+        printf "${YELLOW}  --- current log (post-reboot new run) ---${NC}\n"
+    fi
+    if [ -f "$LAST_RUN_LOG" ]; then
+        _log_lines=$(wc -l < "$LAST_RUN_LOG" 2>/dev/null || echo 0)
+        printf "  Source: %s  (%d lines total)\n\n" "$LAST_RUN_LOG" "$_log_lines"
+        tail -40 "$LAST_RUN_LOG"
+    else
+        printf "  No run log found (%s)\n" "$LAST_RUN_LOG"
+    fi
+    echo ""
+
+    # ── 5. Re-generate from kyua db if available ───────────────────────────
+    printf '%s\n' "${BOLD}[5] LIVE KYUA REPORT (requires kyua db to be intact)${NC}"
+    echo "-----------------------------------------------------------------"
+    if [ -d "$TESTS_INSTALL_DIR" ]; then
+        mkdir -p "$RESULTS_DIR"
+        REPORT_TXT="$RESULTS_DIR/report.txt"
+        REPORT_XML="$RESULTS_DIR/report.xml"
+        cd "$TESTS_INSTALL_DIR" || true
+        if kyua report --verbose --results-filter passed,skipped,xfail,broken,failed \
+                2>/dev/null | tee "$REPORT_TXT"; then
+            kyua report-junit > "$REPORT_XML" 2>/dev/null || true
+            printf "\n"
+            log_info "Full report : $REPORT_TXT"
+            log_info "JUnit XML   : $REPORT_XML"
+        else
+            printf '%s\n' "${YELLOW}kyua db unavailable or empty — skipped.${NC}"
+            printf "  (This is expected after a kernel panic/reboot)\n"
+        fi
+    else
+        printf "${YELLOW}Tests not installed at %s — skipping live kyua report.${NC}\n" "$TESTS_INSTALL_DIR"
+        printf "  Run --compile first if you want live report generation.\n"
+    fi
+
+    printf '\n%s\n' "${CYAN}=================================================================${NC}"
 }
 
 show_status() {
