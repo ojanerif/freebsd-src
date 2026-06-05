@@ -131,6 +131,35 @@ pmcstat_capture_process_two_events()
 	fi
 }
 
+pmcstat_capture_process_two_events_cpubound()
+{
+	local block_count duration err out
+	local event_a="$2"
+	local event_b="$3"
+
+	#
+	# Run a deterministic CPU-bound workload pinned to one logical CPU so
+	# the duplicate-PMC skew measurement sees real retire activity instead
+	# of halted sleep time.  /bin/dd from /dev/zero to /dev/null at a 4 KiB
+	# block size keeps the workload in the user-side memcpy/cache path and
+	# does no I/O.  block_count is large enough to bury per-iteration
+	# scheduler noise on a modern Zen core but small enough to terminate in
+	# under a second on the slowest validated targets.
+	#
+	out="$1"
+	duration="${4:-5}"
+	block_count=$((duration * 250000))
+	if ! cpuset -l 0 pmcstat -C -q -p "$event_a" -p "$event_b" \
+	    -o "$out" -- dd if=/dev/zero of=/dev/null bs=4096 \
+	    count="$block_count" > /dev/null 2>pmcstat.err; then
+		err=$(cat pmcstat.err)
+		atf_fail "pmcstat failed with $event_a,$event_b (cpu-bound): $err"
+	fi
+	if [ ! -s "$out" ]; then
+		atf_fail "pmcstat produced an empty cpu-bound process-counting output file"
+	fi
+}
+
 pmcstat_require_header_event_count()
 {
 	local count
@@ -318,8 +347,23 @@ repeated_process_cycles_have_bounded_skew_body()
 	pmcstat_check_support
 	pmcstat_check_amd_grouping_runtime
 	pmcstat_require_event "ls_not_halted_cyc"
+	if ! command -v cpuset > /dev/null 2>&1; then
+		atf_skip "cpuset(1) not found in PATH"
+	fi
+	if ! command -v dd > /dev/null 2>&1; then
+		atf_skip "dd(1) not found in PATH"
+	fi
 
-	pmcstat_capture_process_two_events "pmcstat-cycles-skew.out" \
+	#
+	# Use a pinned CPU-bound workload by default: ls_not_halted_cyc
+	# (PMCx076) only ticks when the core is NOT halted, so the historical
+	# `sleep 5` workload accumulated near-zero in process-counting mode
+	# and produced flaky permille deltas dominated by the tiny denominator.
+	# The dedicated `repeated_sleep_cycles_have_bounded_skew` characterization
+	# case below still exercises the scheduler-noise sleep path under an
+	# explicit config gate.
+	#
+	pmcstat_capture_process_two_events_cpubound "pmcstat-cycles-skew.out" \
 	    "ls_not_halted_cyc" "ls_not_halted_cyc" 5
 	header=$(grep '^#' pmcstat-cycles-skew.out | grep 'ls_not_halted_cyc' |
 	    head -1)
@@ -344,11 +388,68 @@ repeated_process_cycles_have_bounded_skew_body()
 	fi
 	tolerance=$(pmcstat_cycle_tolerance_permille)
 	pmcstat_require_bounded_delta "$cycles_a" "$cycles_b" "$tolerance" \
-	    "duplicate ls_not_halted_cyc"
+	    "duplicate ls_not_halted_cyc (cpu-bound)"
 }
 repeated_process_cycles_have_bounded_skew_cleanup()
 {
 	rm -f pmcstat-cycles-skew.out pmcstat.err
+}
+
+atf_test_case repeated_sleep_cycles_have_bounded_skew cleanup
+repeated_sleep_cycles_have_bounded_skew_head()
+{
+	atf_set "descr" "scheduler-noise characterization for duplicate AMD cycle PMCs around sleep(1)"
+	atf_set "require.user" "root"
+}
+repeated_sleep_cycles_have_bounded_skew_body()
+{
+	local cycles_a cycles_b header positive_a positive_b rows stats tolerance
+
+	pmcstat_check_support
+	pmcstat_check_amd_grouping_runtime
+	pmcstat_require_event "ls_not_halted_cyc"
+	if [ "$(atf_config_get amd.pmc.grouping.sleep_characterization false)" \
+	    != "true" ]; then
+		atf_skip "sleep-workload characterization is opt-in; set amd.pmc.grouping.sleep_characterization=true"
+	fi
+
+	#
+	# Sleep-based duplicate-cycle case kept as a separate scheduler/noise
+	# characterization.  PMCx076 only counts non-halted cycles, so this run
+	# measures whatever wake-ups the kernel attributes to the sleeping
+	# process while it is descheduled.  It is intentionally not a default
+	# correctness check.
+	#
+	pmcstat_capture_process_two_events "pmcstat-cycles-skew-sleep.out" \
+	    "ls_not_halted_cyc" "ls_not_halted_cyc" 5
+	header=$(grep '^#' pmcstat-cycles-skew-sleep.out |
+	    grep 'ls_not_halted_cyc' | head -1)
+	if [ -z "$header" ]; then
+		atf_fail "pmcstat output is missing the duplicate-cycle (sleep) header"
+	fi
+	pmcstat_require_header_event_count "ls_not_halted_cyc" 2 "$header"
+
+	stats=$(pmcstat_two_counter_stats pmcstat-cycles-skew-sleep.out)
+	set -- $stats
+	rows=$1
+	positive_a=$2
+	positive_b=$3
+	cycles_a=$4
+	cycles_b=$5
+
+	if [ "$rows" -eq 0 ]; then
+		atf_fail "pmcstat produced no numeric rows for sleep duplicate cycle PMCs"
+	fi
+	if [ "$positive_a" -eq 0 ] || [ "$positive_b" -eq 0 ]; then
+		atf_skip "sleep duplicate cycle PMCs did not both accumulate positive counts; scheduler-quiet sleep is expected to do this"
+	fi
+	tolerance=$(pmcstat_cycle_tolerance_permille)
+	pmcstat_require_bounded_delta "$cycles_a" "$cycles_b" "$tolerance" \
+	    "duplicate ls_not_halted_cyc (sleep)"
+}
+repeated_sleep_cycles_have_bounded_skew_cleanup()
+{
+	rm -f pmcstat-cycles-skew-sleep.out pmcstat.err
 }
 
 atf_test_case mixed_cycles_instructions_are_independent_columns cleanup
@@ -490,6 +591,7 @@ atf_init_test_cases()
 	atf_add_test_case multiple_system_events_are_independent_columns
 	atf_add_test_case same_system_event_group_has_same_count
 	atf_add_test_case repeated_process_cycles_have_bounded_skew
+	atf_add_test_case repeated_sleep_cycles_have_bounded_skew
 	atf_add_test_case mixed_cycles_instructions_are_independent_columns
 	atf_add_test_case mixed_cache_cycles_are_independent_columns
 	atf_add_test_case oversubscribed_process_cycles_fail_cleanly
