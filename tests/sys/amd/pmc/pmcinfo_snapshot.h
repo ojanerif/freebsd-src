@@ -40,6 +40,7 @@ struct pmcinfo_snapshot {
 	int		ncpu;
 	int		npmc;
 	size_t		nrows;
+	size_t		capacity;	/* allocated row slots */
 	struct pmcinfo_snapshot_row *rows;
 };
 

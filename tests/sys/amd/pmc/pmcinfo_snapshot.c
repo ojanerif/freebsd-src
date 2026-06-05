@@ -63,6 +63,7 @@ pmcinfo_snapshot_take(struct pmcinfo_snapshot *snap, char *errbuf,
 	snap->ncpu = (int)ci->pm_ncpu;
 	snap->npmc = (int)ci->pm_npmc;
 	cap = (size_t)snap->ncpu * (size_t)snap->npmc;
+	snap->capacity = cap;
 	snap->rows = calloc(cap == 0 ? 1 : cap, sizeof(*snap->rows));
 	if (snap->rows == NULL) {
 		error = errno != 0 ? errno : ENOMEM;
@@ -94,6 +95,26 @@ pmcinfo_snapshot_take(struct pmcinfo_snapshot *snap, char *errbuf,
 		}
 
 		for (ri = 0; ri < npmc; ri++) {
+			/*
+			 * Capacity guard.  cap was sized from
+			 * pmc_cpuinfo()->pm_ncpu * pm_npmc, which today matches
+			 * every CPU's pmc_npmc() report.  Future hwpmc backends
+			 * (sparse CPU topology, per-CPU class divergence) could
+			 * surface more rows for a given CPU than the global
+			 * pm_npmc figure that sized the allocation; fail closed
+			 * with ERANGE and a useful diagnostic before writing
+			 * past the array.
+			 */
+			if (snap->nrows >= snap->capacity) {
+				snapshot_err(errbuf, errlen,
+				    "snapshot capacity %zu exceeded at cpu=%d ri=%d "
+				    "(pm_ncpu=%d pm_npmc=%d cpu_npmc=%d)",
+				    snap->capacity, cpu, ri, snap->ncpu,
+				    snap->npmc, npmc);
+				free(info);
+				pmcinfo_snapshot_free(snap);
+				return (ERANGE);
+			}
 			pi = &info->pm_pmcs[ri];
 			row = &snap->rows[snap->nrows++];
 			row->cpu = cpu;
