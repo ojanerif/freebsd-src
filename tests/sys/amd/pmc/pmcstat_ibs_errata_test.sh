@@ -282,15 +282,30 @@ pmcstat_errata_op_line()
 
 pmcstat_errata_line_has_token()
 {
-
-	case " $1 " in
-	*" $2 "*)
-		return 0
-		;;
-	*)
-		return 1
-		;;
-	esac
+	#
+	# Whitespace-tolerant token search against a `pmcstat -R` decode line.
+	# The previous implementation matched literal " token " in the
+	# untouched string, which silently missed a hit when the decoder
+	# emitted a tab, a punctuation suffix, or doubled spaces.
+	#
+	# Use awk field splitting so any run of whitespace separates tokens,
+	# then accept either an exact field match or the field with a trailing
+	# punctuation character (',' ';' ':' '.' ')' ']').  This stays robust
+	# against pmcstat formatting drift without becoming a fuzzy substring
+	# match that could mask a genuine missing decode.
+	#
+	awk -v t="$2" '
+	    function strip(s) {
+	        sub(/[,;:.\)\]]+$/, "", s)
+	        return s
+	    }
+	    {
+	        for (i = 1; i <= NF; i++)
+	            if ($i == t || strip($i) == t) { found = 1; exit }
+	    }
+	    END { exit(found ? 0 : 1) }' <<EOF
+$1
+EOF
 }
 
 pmcstat_errata_require_fetch_context()
