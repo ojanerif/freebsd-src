@@ -18,8 +18,11 @@ pmc_atomicity_check_support()
 	if ! command -v pmcstat > /dev/null 2>&1; then
 		atf_skip "pmcstat not found in PATH"
 	fi
+	if ! command -v dd > /dev/null 2>&1; then
+		atf_skip "dd not found in PATH; required for the FIFO start barrier"
+	fi
 	if ! command -v timeout > /dev/null 2>&1; then
-		atf_skip "timeout not found in PATH; required for bounded FIFO release"
+		atf_skip "timeout not found in PATH; required for bounded FIFO barriers"
 	fi
 }
 
@@ -212,21 +215,66 @@ pmc_atomicity_run_pmcstat()
 {
 	local event="$1"
 	local start_fifo="$2"
-	local out="$3"
-	local err="$4"
+	local ready_fifo="$3"
+	local out="$4"
+	local err="$5"
 
-	read _ < "$start_fifo"
+	# Open the start FIFO before signaling readiness.  Each child consumes
+	# exactly one byte, so one reader cannot drain both start tokens.
+	exec 7<&-
+	exec 9< "$start_fifo"
+	printf 'ready\n' > "$ready_fifo"
+	if ! dd bs=1 count=1 of=/dev/null <&9 2>/dev/null; then
+		printf 'start barrier read failed\n' > "$err"
+		exec 9<&-
+		return 125
+	fi
+	exec 9<&-
 	exec pmcstat -C -q \
 	    -p "$event" -p "$event" -p "$event" \
 	    -p "$event" -p "$event" -p "$event" \
 	    -o "$out" -- sleep 1 > /dev/null 2> "$err"
 }
 
-pmc_atomicity_release_fifo()
+pmc_atomicity_wait_ready()
 {
-	local fifo="$1"
+	local ready_fifo="$1"
+	local n_expected="$2"
 
-	timeout 30 sh -c 'printf "go\n" > "$1"' sh "$fifo"
+	timeout 30 sh -c '
+		ready_fifo=$1
+		n_expected=$2
+		seen=0
+		exec 8<> "$ready_fifo" || exit 1
+		while [ "$seen" -lt "$n_expected" ]; do
+			if ! IFS= read -r line <&8; then
+				printf "ready-barrier read failed after %s/%s readers\n" \
+				    "$seen" "$n_expected" >&2
+				exit 1
+			fi
+			if [ "$line" != "ready" ]; then
+				printf "unexpected ready-barrier token: %s\n" "$line" >&2
+				exit 1
+			fi
+			seen=$((seen + 1))
+		done
+	' sh "$ready_fifo" "$n_expected"
+}
+
+pmc_atomicity_release_start()
+{
+	local n_readers="$1"
+	local i tokens
+
+	# The parent holds fd 7 open read/write, while each child is blocked on a
+	# one-byte read from the same FIFO.  One byte per reader avoids token theft.
+	tokens=""
+	i=0
+	while [ "$i" -lt "$n_readers" ]; do
+		tokens="${tokens}g"
+		i=$((i + 1))
+	done
+	printf '%s' "$tokens" >&7
 }
 
 pmc_atomicity_cleanup_lock()
@@ -250,8 +298,8 @@ concurrent_process_allocations_no_residue_head()
 }
 concurrent_process_allocations_no_residue_body()
 {
-	local baseline err_a err_b event fail_msg fifo_a fifo_b i iterations lockdir
-	local out_a out_b pid_a pid_b rc_a rc_b successes
+	local baseline err_a err_b event fail_msg i iterations lockdir
+	local out_a out_b pid_a pid_b rc_a rc_b ready_fifo start_fifo successes
 
 	pmc_atomicity_check_support
 	pmc_atomicity_check_runtime_enabled
@@ -279,29 +327,38 @@ concurrent_process_allocations_no_residue_body()
 	successes=0
 
 	for i in $(jot "$iterations"); do
-		fifo_a="start-a.$i.fifo"
-		fifo_b="start-b.$i.fifo"
+		start_fifo="start.$i.fifo"
+		ready_fifo="ready.$i.fifo"
 		out_a="pmcstat-a.$i.out"
 		out_b="pmcstat-b.$i.out"
 		err_a="pmcstat-a.$i.err"
 		err_b="pmcstat-b.$i.err"
-		mkfifo "$fifo_a" "$fifo_b" || atf_fail "mkfifo iteration $i failed"
-		pmc_atomicity_run_pmcstat "$event" "$fifo_a" "$out_a" "$err_a" &
+		mkfifo "$start_fifo" "$ready_fifo" || \
+		    atf_fail "mkfifo iteration $i failed"
+		#
+		# Open the start FIFO RW on fd 7 *before* either reader exists.
+		# This anchors a writer in the parent, so a child that opens
+		# the FIFO read-only does not block on the missing-writer wait
+		# and the parent's later broadcast write does not block on a
+		# missing-reader wait either.  The RW handle is the entire
+		# synchronization domain for this iteration.
+		#
+		exec 7<> "$start_fifo"
+		pmc_atomicity_run_pmcstat "$event" "$start_fifo" "$ready_fifo" \
+		    "$out_a" "$err_a" &
 		pid_a=$!
-		pmc_atomicity_run_pmcstat "$event" "$fifo_b" "$out_b" "$err_b" &
+		pmc_atomicity_run_pmcstat "$event" "$start_fifo" "$ready_fifo" \
+		    "$out_b" "$err_b" &
 		pid_b=$!
-		if ! pmc_atomicity_release_fifo "$fifo_a"; then
+		if ! pmc_atomicity_wait_ready "$ready_fifo" 2; then
 			kill "$pid_a" "$pid_b" 2>/dev/null || true
 			wait "$pid_a" 2>/dev/null || true
 			wait "$pid_b" 2>/dev/null || true
-			atf_fail "iteration $i failed to release first pmcstat child"
+			exec 7<&-
+			atf_fail "iteration $i ready barrier failed"
 		fi
-		if ! pmc_atomicity_release_fifo "$fifo_b"; then
-			kill "$pid_a" "$pid_b" 2>/dev/null || true
-			wait "$pid_a" 2>/dev/null || true
-			wait "$pid_b" 2>/dev/null || true
-			atf_fail "iteration $i failed to release second pmcstat child"
-		fi
+		pmc_atomicity_release_start 2
+		exec 7<&-
 		wait "$pid_a"; rc_a=$?
 		wait "$pid_b"; rc_b=$?
 		if [ "$rc_a" -ne 0 ] && [ ! -s "$err_a" ]; then
@@ -324,7 +381,7 @@ concurrent_process_allocations_no_residue_body()
 		fi
 		pmc_atomicity_assert_k8_thread_baseline "$baseline" \
 		    "pmcinfo.$i.out" "pmcinfo.$i.err"
-		rm -f "$fifo_a" "$fifo_b"
+		rm -f "$start_fifo" "$ready_fifo"
 	done
 	if [ "$successes" -eq 0 ]; then
 		fail_msg="all concurrent pmcstat allocation attempts failed"
@@ -335,7 +392,7 @@ concurrent_process_allocations_no_residue_cleanup()
 {
 	pmc_atomicity_cleanup_lock
 	# Keep baseline and per-iteration pmcinfo outputs under this prefix.
-	rm -f start-a.*.fifo start-b.*.fifo pmcstat-a.*.out pmcstat-b.*.out \
+	rm -f start.*.fifo ready.*.fifo pmcstat-a.*.out pmcstat-b.*.out \
 	    pmcstat-a.*.err pmcstat-b.*.err pmcinfo*.out pmcinfo*.err
 }
 
