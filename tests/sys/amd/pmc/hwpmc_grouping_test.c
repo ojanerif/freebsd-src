@@ -251,6 +251,10 @@ release_pmcid_array(pmc_id_t *pmcs, size_t n)
 	}
 }
 
+/*
+ * Allocation failures that represent unavailable PMC resources.  Keep EINVAL
+ * out of this set: hwpmc(4) also uses it for malformed requests.
+ */
 static bool
 error_is_resource_exhaustion(int error)
 {
@@ -263,6 +267,12 @@ static bool
 error_is_post_success_exhaustion(int error, size_t successes)
 {
 
+	/*
+	 * Current hwpmc(4) returns EINVAL when pmc_do_op_pmcallocate()
+	 * exhausts the row scan.  Accept that only after the same request
+	 * shape has already succeeded; pre-success EINVAL still means the
+	 * request was malformed.
+	 */
 	return (error_is_resource_exhaustion(error) ||
 	    (successes > 0 && error == EINVAL));
 }
