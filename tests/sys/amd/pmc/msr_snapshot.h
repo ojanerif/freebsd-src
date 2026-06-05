@@ -16,6 +16,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * AMD architecturally exposes six programmable core PMC pairs on every
+ * Family 15h/17h/19h/1Ah CPU through MSRC001_0200..MSRC001_020B.  PerfMonV2
+ * (CPUID Fn80000022) can advertise more; the snapshot helper clamps to
+ * AMD_MSR_SNAPSHOT_CORE_LIMIT so the on-stack buffer stays bounded.  Without
+ * PerfMonV2 the helper must not assume more than the six legacy pairs, or
+ * cpuctl(4) RDMSR will fault on the trailing MSRs.
+ */
+#define	AMD_MSR_LEGACY_CORE_PMCS	6
 #define	AMD_MSR_SNAPSHOT_CORE_LIMIT	16
 #define	AMD_MSR_CORE_BASE		0xC0010200U
 #define	AMD_MSR_CORE_STRIDE		2U

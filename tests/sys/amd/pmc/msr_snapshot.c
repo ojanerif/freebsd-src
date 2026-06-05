@@ -77,10 +77,18 @@ amd_msr_detect_perfmon_v2(bool *present, unsigned int *num_core_pmcs,
     char *errbuf, size_t errlen)
 {
 	uint32_t regs[4];
+	unsigned int reported;
 	int error;
 
+	/*
+	 * Default to the six legacy programmable core PMC pairs shared by every
+	 * AMD Zen generation.  Zen 1, Zen+, Zen 2 and Zen 3 do not implement
+	 * PerfMonV2; reading MSRC001_020C..MSRC001_021F on those parts via
+	 * cpuctl(4) raises #GP and aborts the snapshot.  Only override this
+	 * default once CPUID Fn80000022 EAX[0] confirms PerfMonV2 is present.
+	 */
 	*present = false;
-	*num_core_pmcs = AMD_MSR_SNAPSHOT_CORE_LIMIT;
+	*num_core_pmcs = AMD_MSR_LEGACY_CORE_PMCS;
 
 	error = amd_test_do_cpuid(AMD_CPUID_EXT_BASE, regs);
 	if (error != 0) {
@@ -100,14 +108,16 @@ amd_msr_detect_perfmon_v2(bool *present, unsigned int *num_core_pmcs,
 		return (error);
 	}
 
-	*present = (regs[0] & AMD_PERFMON_V2_PRESENT) != 0;
-	if (*present) {
-		*num_core_pmcs = regs[1] & 0x0f;
-		if (*num_core_pmcs == 0)
-			*num_core_pmcs = AMD_MSR_SNAPSHOT_CORE_LIMIT;
-		if (*num_core_pmcs > AMD_MSR_SNAPSHOT_CORE_LIMIT)
-			*num_core_pmcs = AMD_MSR_SNAPSHOT_CORE_LIMIT;
-	}
+	if ((regs[0] & AMD_PERFMON_V2_PRESENT) == 0)
+		return (0);
+
+	*present = true;
+	reported = regs[1] & 0x0fU;
+	if (reported < AMD_MSR_LEGACY_CORE_PMCS)
+		reported = AMD_MSR_LEGACY_CORE_PMCS;
+	if (reported > AMD_MSR_SNAPSHOT_CORE_LIMIT)
+		reported = AMD_MSR_SNAPSHOT_CORE_LIMIT;
+	*num_core_pmcs = reported;
 	return (0);
 }
 
