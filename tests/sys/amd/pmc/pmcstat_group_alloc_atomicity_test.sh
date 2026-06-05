@@ -73,13 +73,25 @@ pmc_atomicity_check_known_zen()
 	*) atf_skip "cannot parse AMD stepping from kern.hwpmc.cpuid=$cpuid" ;;
 	esac
 
+	#
+	# Generation map aligned with AMD PPR family/model ranges, not just the
+	# SKUs available at authoring time, so a newly released part inside an
+	# already-validated range still runs the atomicity case instead of
+	# being skipped as "not in the validated Zen map".
+	#
+	# Notable inclusions:
+	#   Family 17h model 70h  - Matisse-class Zen 2 (Ryzen 9 3900-series)
+	#   Family 1Ah model 3xh  - reserved Zen 5 desktop/embedded range that
+	#                           sits between the published 00h-2Fh and
+	#                           40h-4Fh windows
+	#
 	zen=
 	case "$family" in
 	23)
 		case "$model" in
 		0[1-7]|1[1-7]) zen="Zen 1" ;;
 		08|09|0A|0B|0C|0D|0E|0F|1[8-9A-F]) zen="Zen+" ;;
-		3[1-9A-F]|6[0-9A-F]|7[1-9A-F]|9[0-9A-F]|A[0-9A-F]) zen="Zen 2" ;;
+		3[1-9A-F]|6[0-9A-F]|7[0-9A-F]|9[0-9A-F]|A[0-9A-F]) zen="Zen 2" ;;
 		esac
 		;;
 	25)
@@ -91,8 +103,10 @@ pmc_atomicity_check_known_zen()
 		;;
 	26)
 		case "$model" in
-		0[0-9A-F]|1[0-9A-F]|2[0-9A-F]|4[0-9A-F]|6[0-9A-F]|7[0-9A-F]) zen="Zen 5" ;;
-		5[0-9A-F]|8[0-9A-F]|9[0-9A-F]|A[0-9A-F]|C[0-9A-F]) zen="Zen 6" ;;
+		0[0-9A-F]|1[0-9A-F]|2[0-9A-F]|3[0-9A-F]|4[0-9A-F]|6[0-9A-F]|7[0-9A-F])
+			zen="Zen 5" ;;
+		5[0-9A-F]|8[0-9A-F]|9[0-9A-F]|A[0-9A-F]|C[0-9A-F])
+			zen="Zen 6" ;;
 		esac
 		;;
 	esac
