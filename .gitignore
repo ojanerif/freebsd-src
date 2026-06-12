@@ -68,6 +68,8 @@ atf-work-*/
 
 # Personal documentation — local only, never pushed to any remote
 ojanerif-docs/
+dev-docs/
+docs/
 CLAUDE.md
 GEMINI.md
 
