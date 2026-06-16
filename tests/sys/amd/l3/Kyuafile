@@ -7,3 +7,5 @@ atf_test_program{name="l3_hit_test", }
 atf_test_program{name="l3_miss_test", }
 atf_test_program{name="l3_config_test", }
 atf_test_program{name="l3_accuracy_test", }
+atf_test_program{name="l3_smp_test", }
+atf_test_program{name="l3_stress_test", }

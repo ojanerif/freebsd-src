@@ -15,9 +15,11 @@ ATF_TESTS_C=	l3_detect_test \
 		l3_miss_test \
 		l3_hit_test \
 		l3_config_test \
-		l3_accuracy_test
+		l3_accuracy_test \
+		l3_smp_test \
+		l3_stress_test
 
-LIBADD+=	pmc
+LIBADD+=	pmc pthread
 
 # ATF is installed as a port under /usr/local (not a base library).
 CFLAGS+=	-I/usr/local/include
