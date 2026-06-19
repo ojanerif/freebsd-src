@@ -6,16 +6,19 @@
 TESTSDIR=	${TESTSBASE}/sys/amd/pmc
 BINDIR=		${TESTSDIR}
 
-ATF_TESTS_C=	hwpmc_exterr_test hwpmc_grouping_test
+ATF_TESTS_C=	hwpmc_exterr_test hwpmc_grouping_test hwpmc_group_api_test
 ATF_TESTS_SH=	pmcstat_tsc_test pmcstat_grouping_test \
-		pmcstat_ibs_errata_test pmcstat_group_alloc_atomicity_test
+		pmcstat_ibs_errata_test pmcstat_group_alloc_atomicity_test \
+		pmcstat_batch_grouping_test
 PROGS+=		pmcinfo_thread_count
 
 TEST_METADATA.hwpmc_exterr_test+=	required_user="root"
 TEST_METADATA.hwpmc_grouping_test+=	required_user="root"
+TEST_METADATA.hwpmc_group_api_test+=	required_user="root"
 
 LIBADD.hwpmc_exterr_test+=	pmc
 LIBADD.hwpmc_grouping_test+=	pmc pthread
+LIBADD.hwpmc_group_api_test+=	pmc
 SRCS.hwpmc_grouping_test=	hwpmc_grouping_test.c pmcinfo_snapshot.c \
 		msr_snapshot.c
 SRCS.pmcinfo_thread_count=	pmcinfo_thread_count.c pmcinfo_snapshot.c

@@ -4,7 +4,9 @@ test_suite("FreeBSD")
 
 atf_test_program{name="hwpmc_exterr_test", }
 atf_test_program{name="hwpmc_grouping_test", }
+atf_test_program{name="hwpmc_group_api_test", }
 atf_test_program{name="pmcstat_grouping_test", }
 atf_test_program{name="pmcstat_group_alloc_atomicity_test", }
+atf_test_program{name="pmcstat_batch_grouping_test", }
 atf_test_program{name="pmcstat_ibs_errata_test", }
 atf_test_program{name="pmcstat_tsc_test", }
