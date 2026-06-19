@@ -13,7 +13,6 @@ import math
 import os
 import signal
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -21,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from freebsd_cache_hotspot import _fbcacheprobe as _fb
-from freebsd_cache_hotspot.topology import Topology, fmt_kb
+from freebsd_cache_hotspot.topology import Topology, fmt_kb, read_sysctl_int
 
 
 CCX_CORES_ZEN4 = 8
@@ -176,16 +175,7 @@ def _ccx_size_for(generation: str) -> int:
 
 
 def _smt_threads_per_core() -> int:
-    try:
-        out = subprocess.check_output(
-            ["sysctl", "-n", "kern.smp.threads_per_core"],
-            stderr=subprocess.DEVNULL, timeout=2,
-        ).decode().strip()
-        if out.isdigit() and int(out) > 0:
-            return int(out)
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        pass
-    return 2
+    return read_sysctl_int("kern.smp.threads_per_core", default=2)
 
 
 def _l3_shared_threads(topo: Topology) -> int:

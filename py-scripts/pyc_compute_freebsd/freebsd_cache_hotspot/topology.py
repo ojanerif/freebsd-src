@@ -72,11 +72,21 @@ def _cpuid_max(leaf: int) -> int:
     return eax
 
 
-def _sysctl(name: str) -> str:
+def read_sysctl(name: str) -> str:
     try:
         return subprocess.check_output(["sysctl", "-n", name], stderr=subprocess.DEVNULL, timeout=2).decode().strip()
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return ""
+
+
+def read_sysctl_int(name: str, *, default: int, minimum: int = 1) -> int:
+    """Return an integer sysctl, falling back to ``default`` below ``minimum``."""
+    text = read_sysctl(name)
+    if text.isdigit():
+        value = int(text)
+        if value >= minimum:
+            return value
+    return default
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +171,7 @@ class Topology:
         _, ebx0, ecx0, edx0 = _fb.cpuid(0x00000000)
         vendor = struct.pack("<III", ebx0, edx0, ecx0).decode("ascii", errors="replace")
 
-        brand = _sysctl("hw.model")
+        brand = read_sysctl("hw.model")
         if not brand and max_ext >= 0x80000004:
             raw = b""
             for leaf in (0x80000002, 0x80000003, 0x80000004):
@@ -232,17 +242,11 @@ class Topology:
 
     @staticmethod
     def _discover_online_cpus() -> int:
-        text = _sysctl("hw.ncpu")
-        if text.isdigit():
-            return int(text)
-        return os.cpu_count() or 1
+        return read_sysctl_int("hw.ncpu", default=os.cpu_count() or 1, minimum=0)
 
     @staticmethod
     def _discover_numa_domains() -> int:
-        text = _sysctl("vm.ndomains")
-        if text.isdigit() and int(text) > 0:
-            return int(text)
-        return 1
+        return read_sysctl_int("vm.ndomains", default=1)
 
     def cache_size_kb(self, level: int, cache_type: str | None = None) -> int:
         for cache in self.caches:
