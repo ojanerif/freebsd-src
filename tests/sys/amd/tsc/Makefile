@@ -16,7 +16,8 @@ KYUAFILE=	yes
 ATF_TESTS_C=	tsc_detect_test \
 		tsc_drift_test \
 		tsc_invariant_test \
-		tsc_stress_test
+		tsc_stress_test \
+		tsc_deadline_test
 
 # ATF is installed as a port under /usr/local (not a base library).
 CFLAGS+=	-I/usr/local/include

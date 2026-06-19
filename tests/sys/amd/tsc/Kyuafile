@@ -8,3 +8,4 @@ atf_test_program{name="tsc_detect_test", }
 atf_test_program{name="tsc_drift_test", }
 atf_test_program{name="tsc_invariant_test", }
 atf_test_program{name="tsc_stress_test", }
+atf_test_program{name="tsc_deadline_test", }
