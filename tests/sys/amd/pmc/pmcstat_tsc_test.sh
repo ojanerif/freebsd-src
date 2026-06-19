@@ -15,8 +15,9 @@
 # Skip if hwpmc is not loaded or pmcstat is unavailable.
 pmc_check_support()
 {
-	if ! kldstat -n hwpmc > /dev/null 2>&1; then
-		atf_skip "hwpmc module not loaded (kldload hwpmc)"
+	if ! kldstat -n hwpmc > /dev/null 2>&1 &&
+	    ! sysctl -n kern.hwpmc.cpuid > /dev/null 2>&1; then
+		atf_skip "hwpmc unavailable: no hwpmc KLD and no kern.hwpmc.cpuid"
 	fi
 	if ! command -v pmcstat > /dev/null 2>&1; then
 		atf_skip "pmcstat not found in PATH"
