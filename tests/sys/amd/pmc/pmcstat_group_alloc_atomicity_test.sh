@@ -12,8 +12,9 @@
 
 pmc_atomicity_check_support()
 {
-	if ! kldstat -n hwpmc > /dev/null 2>&1; then
-		atf_skip "hwpmc module not loaded (kldload hwpmc)"
+	if ! kldstat -n hwpmc > /dev/null 2>&1 &&
+	    ! sysctl -n kern.hwpmc.cpuid > /dev/null 2>&1; then
+		atf_skip "hwpmc unavailable: no hwpmc KLD and no kern.hwpmc.cpuid"
 	fi
 	if ! command -v pmcstat > /dev/null 2>&1; then
 		atf_skip "pmcstat not found in PATH"
@@ -124,9 +125,8 @@ pmc_atomicity_event_available()
 {
 	local event="$1"
 
-	pmcstat -L | awk -v event="$event" '
-	    $1 == event { found = 1 }
-	    END { exit(found ? 0 : 1) }'
+	pmcstat -C -q -p "$event" -o /dev/null -- /usr/bin/true \
+	    > /dev/null 2>pmcstat-event.err
 }
 
 pmc_atomicity_require_event()
@@ -393,7 +393,8 @@ concurrent_process_allocations_no_residue_cleanup()
 	pmc_atomicity_cleanup_lock
 	# Keep baseline and per-iteration pmcinfo outputs under this prefix.
 	rm -f start.*.fifo ready.*.fifo pmcstat-a.*.out pmcstat-b.*.out \
-	    pmcstat-a.*.err pmcstat-b.*.err pmcinfo*.out pmcinfo*.err
+	    pmcstat-a.*.err pmcstat-b.*.err pmcinfo*.out pmcinfo*.err \
+	    pmcstat-event.err
 }
 
 atf_init_test_cases()
