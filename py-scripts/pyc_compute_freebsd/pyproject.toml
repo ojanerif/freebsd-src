@@ -1,0 +1,24 @@
+#-
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# Author: Davi Chaves Azevedo
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyc-compute-freebsd"
+version = "0.1.0"
+description = "FreeBSD AMD Zen cache-hotspot localization using Python orchestration and native C probes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-2-Clause" }
+authors = [
+  { name = "Davi Chaves Azevedo" }
+]
+
+[tool.setuptools]
+packages = ["freebsd_cache_hotspot"]

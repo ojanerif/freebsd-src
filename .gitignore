@@ -84,6 +84,13 @@ pmu-skew-data/
 # Python bytecode caches
 __pycache__/
 
+# pyc_compute_freebsd build/test artifacts
+py-scripts/pyc_compute_freebsd/build/
+py-scripts/pyc_compute_freebsd/dist/
+py-scripts/pyc_compute_freebsd/*.egg-info/
+py-scripts/pyc_compute_freebsd/.pytest_cache/
+py-scripts/pyc_compute_freebsd/freebsd_cache_hotspot/*.so
+
 # AI agent rule files — local only, never committed
 AGENTS.md
 .clinerules
