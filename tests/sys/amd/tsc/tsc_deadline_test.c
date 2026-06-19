@@ -227,6 +227,16 @@ ATF_TC_BODY(tsc_deadline_latency_bound, tc)
 	/* overshoot threshold: DDL02_OVERSHOOT_MS ms of TSC cycles */
 	overshoot_threshold = (uint64_t)DDL02_OVERSHOOT_MS * freq / 1000;
 
+	/* Print TSC-deadline mode status for diagnostic context. */
+	{
+		int tsc_dl = 0;
+		size_t tsc_dl_sz = sizeof(tsc_dl);
+		if (sysctlbyname("hw.apic.timer_tsc_deadline",
+		    &tsc_dl, &tsc_dl_sz, NULL, 0) == 0)
+			printf("hw.apic.timer_tsc_deadline: %d %s\n", tsc_dl,
+			    tsc_dl ? "(TSC-deadline LAPIC mode)"
+				   : "(one-shot/periodic LAPIC mode)");
+	}
 	printf("TSC frequency: %.4f GHz\n", (double)freq / 1e9);
 	printf("Expected 10 ms delta: %ju cycles\n",
 	    (uintmax_t)expected_delta);
@@ -461,6 +471,7 @@ ATF_TC_HEAD(tsc_kernel_invariant_sysctl, tc)
 ATF_TC_BODY(tsc_kernel_invariant_sysctl, tc)
 {
 	int invariant_tsc, smp_tsc, tsc_deadline;
+	bool deadline_available, smp_tsc_available;
 	size_t sz;
 	bool cpuid_invariant;
 
@@ -475,16 +486,13 @@ ATF_TC_BODY(tsc_kernel_invariant_sysctl, tc)
 
 	/* --- kern.timecounter.smp_tsc --- */
 	sz = sizeof(smp_tsc);
-	if (sysctlbyname("kern.timecounter.smp_tsc",
-	    &smp_tsc, &sz, NULL, 0) != 0) {
-		smp_tsc = -1;	/* not fatal — older kernels may lack it */
-	}
+	smp_tsc_available = (sysctlbyname("kern.timecounter.smp_tsc",
+	    &smp_tsc, &sz, NULL, 0) == 0);
 
 	/* --- hw.apic.timer_tsc_deadline (informational) --- */
 	sz = sizeof(tsc_deadline);
-	if (sysctlbyname("hw.apic.timer_tsc_deadline",
-	    &tsc_deadline, &sz, NULL, 0) != 0)
-		tsc_deadline = -1;
+	deadline_available = (sysctlbyname("hw.apic.timer_tsc_deadline",
+	    &tsc_deadline, &sz, NULL, 0) == 0);
 
 	/* --- CPUID invariant bit --- */
 	cpuid_invariant = tsc_invariant_present();
@@ -493,10 +501,10 @@ ATF_TC_BODY(tsc_kernel_invariant_sysctl, tc)
 	printf("kern.timecounter.invariant_tsc : %d  (expected 1)\n",
 	    invariant_tsc);
 	printf("kern.timecounter.smp_tsc       : %s\n",
-	    smp_tsc < 0 ? "not available" :
+	    !smp_tsc_available ? "not available" :
 	    (smp_tsc ? "1  (expected 1)" : "0  (FAIL)"));
 	printf("hw.apic.timer_tsc_deadline     : %s  (informational)\n",
-	    tsc_deadline < 0 ? "not available" :
+	    !deadline_available ? "not available" :
 	    (tsc_deadline ? "1 (TSC-deadline mode active)" :
 		"0 (one-shot or periodic LAPIC mode)"));
 	printf("CPUID.80000007.EDX[8] (InvariantTSC): %s\n",
@@ -525,7 +533,7 @@ ATF_TC_BODY(tsc_kernel_invariant_sysctl, tc)
 	}
 
 	/* smp_tsc: required for multi-CPU deadline correctness. */
-	if (smp_tsc >= 0) {
+	if (smp_tsc_available) {
 		ATF_CHECK_MSG(smp_tsc == 1,
 		    "kern.timecounter.smp_tsc=%d — kernel did not verify "
 		    "cross-CPU TSC synchronisation.  TSC deadline timer "
