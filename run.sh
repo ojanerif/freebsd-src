@@ -4107,7 +4107,30 @@ load_module() {
 
     log_info "Loading hwpmc kernel module..."
     if kldstat -q -n hwpmc 2>/dev/null; then
-        log_success "hwpmc module already loaded"
+        # Module is loaded — verify ABI matches the running kernel by probing
+        # pmccontrol.  After a kernel rebuild without reboot the old hwpmc.ko
+        # can remain in memory; pmc_init() then fails with "Program version
+        # wrong".  Force a reload in that case.
+        if pmccontrol -L >/dev/null 2>&1; then
+            log_success "hwpmc module already loaded (ABI OK)"
+        else
+            log_warning "hwpmc ABI mismatch (PMC_VERSION_MINOR skew between kernel and libpmc)"
+            log_warning "Attempting module reload — will fix rebuild-without-reboot cases"
+            log_warning "If mismatch persists after reload, sync pmc.h version in source tree"
+            kldunload hwpmc 2>/dev/null || {
+                log_warning "kldunload hwpmc failed — tests requiring pmc_init() will skip"
+                return 0
+            }
+            kldload hwpmc 2>/dev/null || {
+                log_warning "Failed to reload hwpmc — TC-HWPMC tests will skip"
+                return 0
+            }
+            if pmccontrol -L >/dev/null 2>&1; then
+                log_success "hwpmc reloaded successfully (ABI now OK)"
+            else
+                log_warning "hwpmc reloaded but ABI still wrong — source pmc.h out of sync with system libpmc; TC-HWPMC tests will skip"
+            fi
+        fi
     else
         confirm_cmd "Load hwpmc kernel module (required for PMC API tests)" \
             "kldload hwpmc" || return 1
