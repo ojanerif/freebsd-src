@@ -1161,8 +1161,15 @@ ibs_autotest_run()
         fi
     done
 
-    # Run tests and capture report
-    RESULTS_DIR="/var/log/ibs-autotest-results-$(date +%Y%m%d-%H%M%S)"
+    # Run tests and capture report; store results under HTML_DIR so
+    # generate_html_index picks them up, falling back to /var/log/ if
+    # HTML_DIR is not writable (e.g. darkhttpd not installed).
+    _auto_ts="$(date +%Y-%m-%d_%H-%M-%S)"
+    if [ -d "$HTML_DIR" ] && [ -w "$HTML_DIR" ]; then
+        RESULTS_DIR="$HTML_DIR/results-${_auto_ts}"
+    else
+        RESULTS_DIR="/var/log/ibs-autotest-results-${_auto_ts}"
+    fi
     echo "=== Running tests (results: $RESULTS_DIR) ===" >> "$LOG"
     sh "$SCRIPT" "$@" \
         --results-dir "$RESULTS_DIR" \
