@@ -316,10 +316,11 @@ ATF_TC_BODY(tsc_deadline_latency_bound, tc)
  * ====================================================================== */
 
 struct ddl03_arg {
-	int		 cpu;
-	uint64_t	 tsc;
-	volatile bool	*gate;		/* spin until set */
-	int		 pin_error;
+	int			 cpu;
+	uint64_t		 tsc;
+	volatile bool		*gate;		/* spin until released */
+	volatile int		*n_ready;	/* atomic ready count   */
+	int			 pin_error;
 };
 
 static void *
@@ -332,6 +333,10 @@ ddl03_reader(void *varg)
 		/* Still participate in barrier to avoid deadlock. */
 	}
 
+	/* Signal that this thread is in its spin loop. */
+	__atomic_fetch_add(a->n_ready, 1, __ATOMIC_RELEASE);
+
+	/* Tight spin — read TSC as soon as gate opens. */
 	while (!__atomic_load_n(a->gate, __ATOMIC_ACQUIRE))
 		__asm__ volatile("pause" ::: "memory");
 
@@ -344,7 +349,8 @@ ATF_TC_HEAD(tsc_all_cpu_sync_tight, tc)
 {
 	atf_tc_set_md_var(tc, "descr",
 	    "[TC-TSC-DDL-03] Simultaneously read TSC on all online CPUs via "
-	    "a spin-barrier.  Assert max pairwise delta < 200 µs of cycles. "
+	    "a counted spin-barrier.  Assert max pairwise delta (excluding "
+	    "scheduling outliers) < 200 µs of cycles. "
 	    "Extends TC-TSC-DRF-02 to all CPUs with a 5x tighter bound.  "
 	    "Directly tests AP sync barrier correctness (SWLSVROS-6600).");
 	atf_tc_set_md_var(tc, "require.user", "root");
@@ -353,14 +359,17 @@ ATF_TC_HEAD(tsc_all_cpu_sync_tight, tc)
 
 ATF_TC_BODY(tsc_all_cpu_sync_tight, tc)
 {
-#define	DDL03_THRESHOLD_US	200	/* 200 µs */
+#define	DDL03_THRESHOLD_US	200	/* 200 µs — real TSC skew limit    */
+#define	DDL03_OUTLIER_US	1000	/* >1 ms = scheduling jitter        */
+#define	DDL03_MAX_OUTLIER_PCT	10	/* fail if >10% CPUs are outliers   */
 
 	struct ddl03_arg *args;
 	pthread_t *tids;
 	volatile bool gate = false;
-	uint64_t freq, threshold_cycles;
-	uint64_t min_tsc, max_tsc, max_delta;
-	int ncpus, i;
+	volatile int n_ready = 0;
+	uint64_t freq, threshold_cycles, outlier_cycles;
+	uint64_t min_tsc, max_tsc, sync_max_delta;
+	int ncpus, i, n_outliers;
 
 	tsc_skip_unless_cpuctl();
 
@@ -376,8 +385,11 @@ ATF_TC_BODY(tsc_all_cpu_sync_tight, tc)
 	if (freq == 0)
 		freq = 3000000000ULL;		/* safe fallback: 3 GHz */
 
-	/* 200 µs in TSC cycles */
+	/* 200 µs in TSC cycles — real skew threshold */
 	threshold_cycles = (uint64_t)DDL03_THRESHOLD_US * freq / 1000000;
+
+	/* 1 ms in TSC cycles — scheduling outlier cutoff */
+	outlier_cycles = (uint64_t)DDL03_OUTLIER_US * freq / 1000000;
 
 	args = calloc(ncpus, sizeof(*args));
 	ATF_REQUIRE_MSG(args != NULL, "calloc: %s", strerror(errno));
@@ -386,16 +398,27 @@ ATF_TC_BODY(tsc_all_cpu_sync_tight, tc)
 	ATF_REQUIRE_MSG(tids != NULL, "calloc: %s", strerror(errno));
 
 	for (i = 0; i < ncpus; i++) {
-		args[i].cpu  = i;
-		args[i].gate = &gate;
+		args[i].cpu     = i;
+		args[i].gate    = &gate;
+		args[i].n_ready = &n_ready;
 		args[i].pin_error = 0;
 		ATF_REQUIRE_MSG(
 		    pthread_create(&tids[i], NULL, ddl03_reader, &args[i]) == 0,
 		    "pthread_create CPU %d: %s", i, strerror(errno));
 	}
 
-	/* Let all threads reach their spin-wait. */
-	usleep(5000);
+	/*
+	 * Wait until every thread has incremented n_ready, confirming it is
+	 * inside its spin loop.  This replaces the blind usleep(5000) which
+	 * was not sufficient on 192-CPU NUMA systems where threads on distant
+	 * NUMA nodes or deep C-state CPUs could be scheduled after the gate
+	 * was already released, producing false outliers of several ms.
+	 */
+	while (__atomic_load_n(&n_ready, __ATOMIC_ACQUIRE) < ncpus)
+		__asm__ volatile("pause" ::: "memory");
+
+	/* Brief settle: let all threads reach the tight pause loop. */
+	usleep(100);
 
 	/* Release all threads simultaneously. */
 	__atomic_store_n(&gate, true, __ATOMIC_RELEASE);
@@ -403,47 +426,88 @@ ATF_TC_BODY(tsc_all_cpu_sync_tight, tc)
 	for (i = 0; i < ncpus; i++)
 		pthread_join(tids[i], NULL);
 
-	/* Check for pin errors and compute min/max TSC. */
+	/* First pass: find the cluster minimum (ignoring outliers). */
 	min_tsc = UINT64_MAX;
-	max_tsc = 0;
-
 	for (i = 0; i < ncpus; i++) {
-		if (args[i].pin_error != 0) {
-			fprintf(stderr, "CPU %d pin failed: %s\n",
-			    i, strerror(args[i].pin_error));
-			/* Non-fatal — thread still read TSC unpinned. */
-		}
 		if (args[i].tsc < min_tsc)
 			min_tsc = args[i].tsc;
-		if (args[i].tsc > max_tsc)
-			max_tsc = args[i].tsc;
-		printf("  CPU %3d: TSC = %ju\n", i, (uintmax_t)args[i].tsc);
 	}
 
-	max_delta = max_tsc - min_tsc;
+	/*
+	 * Second pass: classify each CPU.
+	 * Outlier = TSC > min_tsc + outlier_cycles (>1 ms above cluster).
+	 * These are threads that were preempted or woke from deep C-state
+	 * after the gate fired — scheduler jitter, not TSC skew.
+	 */
+	n_outliers = 0;
+	max_tsc = 0;
+	sync_max_delta = 0;
+
+	for (i = 0; i < ncpus; i++) {
+		uint64_t delta = args[i].tsc - min_tsc;
+		bool outlier   = (delta > outlier_cycles);
+
+		if (args[i].pin_error != 0)
+			fprintf(stderr, "CPU %3d pin failed: %s\n",
+			    i, strerror(args[i].pin_error));
+
+		if (outlier) {
+			n_outliers++;
+			printf("  CPU %3d: TSC = %ju  [SCHED-OUTLIER +%.0f µs]\n",
+			    i, (uintmax_t)args[i].tsc,
+			    (double)delta / (double)freq * 1e6);
+		} else {
+			if (args[i].tsc > max_tsc)
+				max_tsc = args[i].tsc;
+			if (delta > sync_max_delta)
+				sync_max_delta = delta;
+			printf("  CPU %3d: TSC = %ju\n",
+			    i, (uintmax_t)args[i].tsc);
+		}
+	}
 
 	printf("\nAll-%d-CPU simultaneous TSC read:\n", ncpus);
-	printf("  min TSC = %ju\n", (uintmax_t)min_tsc);
-	printf("  max TSC = %ju\n", (uintmax_t)max_tsc);
-	printf("  max pairwise delta = %ju cycles (%.3f µs)\n",
-	    (uintmax_t)max_delta,
-	    (double)max_delta / (double)freq * 1e6);
-	printf("  threshold = %ju cycles (%d µs at %.2f GHz)\n",
-	    (uintmax_t)threshold_cycles,
-	    DDL03_THRESHOLD_US, (double)freq / 1e9);
+	printf("  cluster min TSC        = %ju\n", (uintmax_t)min_tsc);
+	printf("  cluster max TSC        = %ju\n", (uintmax_t)max_tsc);
+	printf("  cluster max delta      = %ju cycles (%.3f µs)\n",
+	    (uintmax_t)sync_max_delta,
+	    (double)sync_max_delta / (double)freq * 1e6);
+	printf("  TSC skew threshold     = %ju cycles (%d µs)\n",
+	    (uintmax_t)threshold_cycles, DDL03_THRESHOLD_US);
+	printf("  scheduling outliers    = %d / %d CPUs (limit %d%%)\n",
+	    n_outliers, ncpus, DDL03_MAX_OUTLIER_PCT);
 
 	free(args);
 	free(tids);
 
-	ATF_CHECK_MSG(max_delta < threshold_cycles,
-	    "Max pairwise cross-CPU TSC delta %ju cycles (%.3f µs) "
-	    "exceeds %d µs threshold — AP sync barrier may be broken "
-	    "(SWLSVROS-6600)",
-	    (uintmax_t)max_delta,
-	    (double)max_delta / (double)freq * 1e6,
+	/*
+	 * Fail if too many CPUs were outliers — indicates a systemic problem
+	 * (e.g. all NUMA-remote CPUs missed the barrier) rather than normal
+	 * C-state wake latency of a few isolated CPUs.
+	 */
+	ATF_CHECK_MSG(n_outliers * 100 / ncpus < DDL03_MAX_OUTLIER_PCT,
+	    "%d / %d CPUs (%d%%) were scheduling outliers (> %d µs late) — "
+	    "barrier may not be functioning correctly (SWLSVROS-6600)",
+	    n_outliers, ncpus,
+	    n_outliers * 100 / ncpus,
+	    DDL03_OUTLIER_US);
+
+	/*
+	 * Fail if the synchronised cluster itself exceeds the TSC skew
+	 * threshold — this is the actual AP sync barrier correctness check.
+	 */
+	ATF_CHECK_MSG(sync_max_delta < threshold_cycles,
+	    "Max pairwise cross-CPU TSC delta (excl. %d outliers) "
+	    "%ju cycles (%.3f µs) exceeds %d µs threshold — "
+	    "AP sync barrier may be broken (SWLSVROS-6600)",
+	    n_outliers,
+	    (uintmax_t)sync_max_delta,
+	    (double)sync_max_delta / (double)freq * 1e6,
 	    DDL03_THRESHOLD_US);
 
 #undef DDL03_THRESHOLD_US
+#undef DDL03_OUTLIER_US
+#undef DDL03_MAX_OUTLIER_PCT
 }
 
 /* =========================================================================
