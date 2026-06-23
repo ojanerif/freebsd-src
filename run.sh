@@ -100,6 +100,7 @@ get_test_meta() {
         tsc_drift_test)                  printf "TC-TSC-DRF:TSC Drift:HIGH" ;;
         tsc_invariant_test)              printf "TC-TSC-INV:TSC Invariant:HIGH" ;;
         tsc_stress_test)                 printf "TC-TSCSTR:TSC Stress:HIGH" ;;
+        tsc_deadline_test)               printf "TC-TSC-DDL:TSC Deadline:HIGH" ;;
         # PMC suite tests
         hwpmc_exterr_test)               printf "TC-PMCAPI:hwpmc API:HIGH" ;;
         hwpmc_grouping_test)             printf "TC-PMCAPI:hwpmc API:HIGH" ;;
@@ -1202,6 +1203,27 @@ ibs_autotest_run()
         printf 'Host     : %s  (%s)\n' "$(uname -n)" "$(uname -r)"
         printf 'Kernel   : %s\n' "$AUTOTEST_KERNCONF"
         printf 'Trigger  : %s\n' "$AUTOTEST_TRIGGER_TIME"
+        if [ -f "$_report" ]; then
+            _em_total=$(awk '/^Tests Run :/{print $NF}' "$_report" | head -1)
+            _em_pass=$(awk '/^Passed    :/{print $3}' "$_report" | head -1)
+            _em_fail=$(awk '/^Failed    :/{print $3}' "$_report" | head -1)
+            _em_skip=$(awk '/^Skipped   :/{print $3}' "$_report" | head -1)
+            _em_brkn=$(awk '/^Broken    :/{print $3}' "$_report" | head -1)
+            printf '\n'
+            printf 'Tests Run: %s\n' "${_em_total:--}"
+            printf 'Passed   : %s\n' "${_em_pass:--}"
+            printf 'Failed   : %s\n' "${_em_fail:--}"
+            printf 'Skipped  : %s\n' "${_em_skip:--}"
+            printf 'Broken   : %s\n' "${_em_brkn:--}"
+            _em_fail_list=$(grep '^\[FAIL/BRKN\]' "$_report" | sed 's/^\[FAIL\/BRKN\] /  - /' | head -20)
+            if [ -n "$_em_fail_list" ]; then
+                printf '\nFailed tests:\n%s\n' "$_em_fail_list"
+            fi
+            _em_skip_list=$(grep '^\[SKIP\]\|^\[SKIP-OK\]' "$_report" | sed 's/^\[SKIP[^]]*\] */  - /' | head -20)
+            if [ -n "$_em_skip_list" ]; then
+                printf '\nSkipped tests:\n%s\n' "$_em_skip_list"
+            fi
+        fi
     )
     _boundary="----=_AmdCIPart_$(date +%s)_$$"
     _sep="--${_boundary}"
@@ -1637,6 +1659,7 @@ ${YELLOW}CATEGORY SELECTION${NC}
       TC-TSC-DRF  TSC Drift       Cross-CPU TSC drift validation             [HIGH]
       TC-TSC-INV  TSC Invariant   Invariant-TSC behavior checks             [HIGH]
       TC-TSCSTR   TSC Stress      TSC behavior under sustained CPU load      [HIGH]
+      TC-TSC-DDL  TSC Deadline    APIC deadline timer accuracy via TSC        [HIGH]
 
     L3 categories:
       TC-DET-L3   L3 Detection    L3 PMU availability and metadata checks    [CRITICAL]
@@ -2475,8 +2498,13 @@ generate_html_index() {
         [ -z "$_brkn"  ] && _brkn="—"
         [ -n "$_pct" ] && _pct_disp="${_pct}%" || _pct_disp="—"
 
-        # Extract kernel string: "FreeBSD 16.0-CURRENT #N branch-slug" (strip hostname+release dupe, cut at build date)
-        _kver=$(grep "^System     :" "$_rpt" 2>/dev/null | head -1 | sed 's/System     : FreeBSD [^ ]* [^ ]* //' | awk -F': ' '{print $1}' | cut -c1-60)
+        # Extract kernel string: "16.0-CURRENT #N KERNCONF" (version + build number + kernconf only)
+        _kver=$(grep "^System     :" "$_rpt" 2>/dev/null | head -1 | awk '{
+            ver=$5
+            for(i=1;i<=NF;i++) if($i ~ /^#[0-9]+$/) { n=$i; break }
+            prev=$(NF-1); split(prev,a,"/"); kconf=a[length(a)]
+            printf "%s %s %s", ver, n, kconf
+        }')
         [ -z "$_kver" ] && _kver="—"
         _kver_esc=$(_he "$_kver")
 
@@ -3137,7 +3165,7 @@ run_all_tests() {
         # TC-NMISTR and TC-MEMIBS are stress; TC-STR is stress — all excluded here.
         _NONSTRESS_CATS="TC-DET TC-MSR TC-INT TC-DATA TC-SMP TC-HWPMC TC-DRV \
 TC-CONC TC-SEC TC-API TC-UNIT TC-UMCDET TC-UMCPMC TC-UMCUNIT \
-TC-PMCAPI TC-PMCSTAT TC-TSC-DET TC-TSC-DRF TC-TSC-INV TC-DET-L3 TC-UNC-L3"
+TC-PMCAPI TC-PMCSTAT TC-TSC-DET TC-TSC-DRF TC-TSC-INV TC-TSC-DDL TC-DET-L3 TC-UNC-L3"
         if [ -n "$_ph_orig_cats" ]; then
             _ph_cats=$(category_intersection \
                 "$_ph_orig_cats" "$_NONSTRESS_CATS")
@@ -4520,7 +4548,12 @@ case $COMMAND in
     compile)
         check_boot_environment
         check_root_privileges
-        compile_tests
+        for _compile_s in $SUITE_LIST; do
+            SUITE="$_compile_s"
+            TESTS_DIR=$(suite_src_dir "$_compile_s")
+            TESTS_INSTALL_DIR=$(suite_install_dir "$_compile_s")
+            compile_tests
+        done
         ;;
     run-all)
         check_root_privileges
