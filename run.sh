@@ -1037,6 +1037,9 @@ write_autotest_sentinel() {
         write_sentinel_var AUTOTEST_TRIGGER_TIME "$_trigger_time"
         write_sentinel_var AUTOTEST_SRC_COMMIT "$_sentinel_commit"
         write_sentinel_var AUTOTEST_WITH_STRESS "$WITH_STRESS"
+        write_sentinel_var AUTOTEST_BRANCH "$BRANCH"
+        write_sentinel_var AUTOTEST_REPO_URL "$REPO_URL"
+        write_sentinel_var AUTOTEST_BRANCH_TAG "$_branch_tag"
     } > "$AUTOTEST_SENTINEL"
     chmod 600 "$AUTOTEST_SENTINEL"
     log_success "Sentinel written"
@@ -1166,10 +1169,11 @@ ibs_autotest_run()
     # generate_html_index picks them up, falling back to /var/log/ if
     # HTML_DIR is not writable (e.g. darkhttpd not installed).
     _auto_ts="$(date +%Y-%m-%d_%H-%M-%S)"
+    _auto_btag="${AUTOTEST_BRANCH_TAG:-main}"
     if [ -d "$HTML_DIR" ] && [ -w "$HTML_DIR" ]; then
-        RESULTS_DIR="$HTML_DIR/results-${_auto_ts}"
+        RESULTS_DIR="$HTML_DIR/results-${_auto_btag}-${_auto_ts}"
     else
-        RESULTS_DIR="/var/log/ibs-autotest-results-${_auto_ts}"
+        RESULTS_DIR="/var/log/ibs-autotest-results-${_auto_btag}-${_auto_ts}"
     fi
     echo "=== Running tests (results: $RESULTS_DIR) ===" >> "$LOG"
     sh "$SCRIPT" "$@" \
@@ -1195,13 +1199,15 @@ ibs_autotest_run()
     _sender="freebsd-ci-actions@amd.com"
     _report="${RESULTS_DIR}/report.txt"
     _xml="${RESULTS_DIR}/report.xml"
-    _subject="[AMD CI] ${AUTOTEST_SUITE} Tests: ${_verdict} - $(hostname -s) $(date +%Y-%m-%d)"
+    _subject="[AMD CI][${AUTOTEST_BRANCH}] ${AUTOTEST_SUITE} Tests: ${_verdict} - $(hostname -s) $(date +%Y-%m-%d)"
     _summary=$(
         printf 'AMD PMU CI -%s Test Suite Report\n' "$AUTOTEST_SUITE"
         printf 'Verdict  : %s\n' "$_verdict"
         printf 'Date     : %s\n' "$(date)"
         printf 'Host     : %s  (%s)\n' "$(uname -n)" "$(uname -r)"
         printf 'Kernel   : %s\n' "$AUTOTEST_KERNCONF"
+        printf 'Branch   : %s\n' "$AUTOTEST_BRANCH"
+        printf 'Repo     : %s\n' "$AUTOTEST_REPO_URL"
         printf 'Trigger  : %s\n' "$AUTOTEST_TRIGGER_TIME"
         if [ -f "$_report" ]; then
             _em_total=$(awk '/^Tests Run :/{print $NF}' "$_report" | head -1)
@@ -4415,6 +4421,22 @@ while [ $# -gt 0 ]; do
             COMMAND="auto"
             AUTO_MODE=1
             ;;
+        --branch)
+            shift
+            if [ $# -eq 0 ]; then
+                log_error "--branch requires a branch name"
+                exit 1
+            fi
+            BRANCH="$1"
+            ;;
+        --repo)
+            shift
+            if [ $# -eq 0 ]; then
+                log_error "--repo requires a URL"
+                exit 1
+            fi
+            REPO_URL="$1"
+            ;;
         --suite)
             shift
             if [ $# -eq 0 ]; then
@@ -4515,6 +4537,20 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# Derive per-branch paths when --branch/--repo override the defaults.
+# Default branch uses the existing hardcoded paths (no behaviour change).
+_DEFAULT_REPO="https://github.com/AMDESE/freebsd-src.git"
+_DEFAULT_BRANCH="amdese/integration/main"
+if [ "$REPO_URL" != "$_DEFAULT_REPO" ] || [ "$BRANCH" != "$_DEFAULT_BRANCH" ]; then
+    _branch_tag=$(printf '%s' "$BRANCH" | tr '/' '-' | tr -cd 'a-zA-Z0-9-' | cut -c1-20)
+    SRC_DIR="${SCRIPT_DIR}/dev/freebsd-${_branch_tag}"
+    AUTOTEST_SENTINEL="/var/db/ibs-autotest-sentinel-${_branch_tag}"
+    LAST_COMMIT_FILE="/var/db/ibs-autotest-last-commit-${_branch_tag}"
+    RCD_SERVICE="/usr/local/etc/rc.d/ibs_autotest_${_branch_tag}"
+else
+    _branch_tag="main"
+fi
 
 # Expand SUITE to the list of suites that will be run.
 if ! SUITE_LIST=$(expand_suite_list "$SUITE"); then
