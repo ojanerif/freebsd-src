@@ -252,6 +252,8 @@ AUTOTEST_SENTINEL="/var/db/ibs-autotest-sentinel"
 LAST_COMMIT_FILE="/var/db/ibs-autotest-last-commit"
 FORCE_REBUILD=0	# --force-rebuild: skip the "already tested" commit check in --auto
 RCD_SERVICE="/usr/local/etc/rc.d/ibs_autotest"
+AUTOTEST_RCD_NAME="ibs_autotest"
+AUTOTEST_LOG="/var/log/ibs-autotest.log"
 
 # Panic-recovery / --last-test persistent files.
 # Written during every --run-all so that after a kernel panic + reboot we
@@ -274,8 +276,14 @@ _ibs_cleanup() {
           /tmp/ibs_skip_$$.tmp /tmp/ibs_xfail_$$.tmp /tmp/ibs_broken_$$.tmp \
           /tmp/ibs_crit_f_$$.tmp /tmp/ibs_high_p_$$.tmp /tmp/ibs_high_f_$$.tmp \
           /tmp/ibs_med_p_$$.tmp /tmp/ibs_med_f_$$.tmp /tmp/ibs_matrix_$$.tmp \
-          /tmp/ibs_kyuafile_$$.tmp /tmp/ibs_desc_$$.tmp \
+          /tmp/ibs_desc_$$.tmp \
           /tmp/ibs_sm_done_$$.tmp /tmp/ibs_sm_last_$$.tmp \
+          /usr/tests/sys/amd/ibs/.kyuafile_filtered_$$.tmp \
+          /usr/tests/sys/amd/umcdf/.kyuafile_filtered_$$.tmp \
+          /usr/tests/sys/amd/pmc/.kyuafile_filtered_$$.tmp \
+          /usr/tests/sys/amd/tsc/.kyuafile_filtered_$$.tmp \
+          /usr/tests/sys/amd/l3/.kyuafile_filtered_$$.tmp \
+          /usr/tests/sys/amd/stress/.kyuafile_filtered_$$.tmp \
           /tmp/ibs_idx_$$.tmp /tmp/ibs_exit_$$_*.tmp 2>/dev/null || true
 }
 trap _ibs_cleanup EXIT INT TERM
@@ -320,6 +328,28 @@ expand_suite_list() {
     esac
 }
 
+suite_label_from_list() {
+    case "$1" in
+        ''|DEFAULT) printf 'IBS UMCDF PMC' ;;
+        ALL)        printf 'IBS UMCDF PMC TSC L3 STRESS' ;;
+        *)          printf '%s' "$1" ;;
+    esac
+}
+
+suite_word_for_label() {
+    case "$1" in
+        *" "*) printf 'Suites' ;;
+        *)     printf 'Suite' ;;
+    esac
+}
+
+suite_field_for_label() {
+    case "$1" in
+        *" "*) printf 'Suites   ' ;;
+        *)     printf 'Suite    ' ;;
+    esac
+}
+
 # ── Background stressor management ─────────────────────────────────────────
 
 # Start the four stressor binaries as background processes.
@@ -352,8 +382,10 @@ start_background_stressors() {
     # Apply safe IBS rate cap if requested.
     if [ -n "$SAFE_IBS_RATE" ]; then
         log_info "Applying safe IBS rate cap: dev.hwpmc.ibs.min_period=${SAFE_IBS_RATE}"
-        sysctl "dev.hwpmc.ibs.min_period=${SAFE_IBS_RATE}" 2>/dev/null || \
-            log_warning "Could not set dev.hwpmc.ibs.min_period (sysctl not present yet)"
+        sysctl "dev.hwpmc.ibs.min_period=${SAFE_IBS_RATE}" >/dev/null 2>&1 || {
+            log_error "Could not set dev.hwpmc.ibs.min_period=${SAFE_IBS_RATE}"
+            exit 1
+        }
     fi
 
     # Net stressor runs at reduced thread count when used as background load.
@@ -843,19 +875,29 @@ mail_all() {
     _ma_subject="$1"
     _ma_body="$2"
     _ma_list="${3:-$REPORT_EMAIL}"
+    if ! valid_email_list "$_ma_list"; then
+        log_error "Invalid email recipient list"
+        return 1
+    fi
     if [ $DRY_RUN -eq 1 ]; then
         log_info "Would email '${_ma_subject}' to '${_ma_list}' (dry run)"
         return 0
     fi
+    _ma_rc=0
     _ma_IFS="$IFS"; IFS=','
     for _ma_addr in $_ma_list; do
         _ma_addr=$(printf '%s' "$_ma_addr" | tr -d ' ')
-        [ -n "$_ma_addr" ] && printf 'From: %s\nTo: %s\nSubject: %s\n\n%s\n' \
+        [ -z "$_ma_addr" ] && continue
+        if ! printf 'From: %s\nTo: %s\nSubject: %s\n\n%s\n' \
                 "$SENDER_EMAIL" "$_ma_addr" "$_ma_subject" "$_ma_body" \
-                | sendmail -f "$SENDER_EMAIL" "$_ma_addr"
+                | sendmail -f "$SENDER_EMAIL" "$_ma_addr"; then
+            log_error "Failed to email: $_ma_addr"
+            _ma_rc=1
+        fi
     done
     IFS="$_ma_IFS"
-    log_success "Email sent to: ${_ma_list}"
+    [ "$_ma_rc" -eq 0 ] && log_success "Email sent to: ${_ma_list}"
+    return "$_ma_rc"
 }
 
 # send_mime_report <to> <subject> <summary> <report_txt> <report_xml>
@@ -867,6 +909,10 @@ send_mime_report() {
     _smr_summary="$3"
     _smr_txt="$4"
     _smr_xml="$5"
+    if ! valid_email_list "$_smr_to"; then
+        log_error "Invalid email recipient"
+        return 1
+    fi
     _smr_boundary="----=_AmdCIPart_$(date +%s)_$$"
     _smr_sep="--${_smr_boundary}"
     {
@@ -906,8 +952,15 @@ send_report_email() {
     _report="$1"
     _verdict="$2"
     _to="${3:-$REPORT_EMAIL}"
+    if ! valid_email_list "$_to"; then
+        log_error "Invalid email recipient list"
+        return 1
+    fi
+    _suite_label=$(suite_label_from_list "${SUITE_LIST:-$SUITE}")
+    _suite_word=$(suite_word_for_label "$_suite_label")
+    _suite_field=$(suite_field_for_label "$_suite_label")
 
-    _subject="[AMD CI] ${SUITE} Test Suite: ${_verdict} - $(hostname -s) $(date +%Y-%m-%d)"
+    _subject="[AMD CI] ${_suite_label} Test ${_suite_word}: ${_verdict} - $(hostname -s) $(date +%Y-%m-%d)"
 
     if [ ! -f "$_report" ]; then
         log_warning "Report file not found: $_report -sending summary only"
@@ -919,20 +972,26 @@ send_report_email() {
 
     _xml="${_report%.txt}.xml"
     _summary=$(
-        printf 'AMD PMU CI -%s Test Suite Report\n' "$SUITE"
+        printf 'AMD PMU CI -%s Test %s Report\n' "$_suite_label" "$_suite_word"
         printf 'Verdict  : %s\n' "$_verdict"
         printf 'Date     : %s\n' "$(date)"
         printf 'Host     : %s  (%s)\n' "$(uname -n)" "$(uname -r)"
-        printf 'Suite    : %s\n' "$SUITE"
+        printf '%s: %s\n' "$_suite_field" "$_suite_label"
         [ -n "$CATEGORIES" ] && printf 'Categories: %s\n' "$CATEGORIES"
     )
+    _sre_rc=0
     _sre_IFS="$IFS"; IFS=','
     for _sre_addr in $_to; do
         _sre_addr=$(printf '%s' "$_sre_addr" | tr -d ' ')
-        [ -n "$_sre_addr" ] && send_mime_report "$_sre_addr" "$_subject" "$_summary" "$_report" "$_xml"
+        [ -z "$_sre_addr" ] && continue
+        if ! send_mime_report "$_sre_addr" "$_subject" "$_summary" "$_report" "$_xml"; then
+            log_error "Failed to email report to: $_sre_addr"
+            _sre_rc=1
+        fi
     done
     IFS="$_sre_IFS"
-    log_success "Email sent to: ${_to}"
+    [ "$_sre_rc" -eq 0 ] && log_success "Email sent to: ${_to}"
+    return "$_sre_rc"
 }
 
 # ── Kernel build ───────────────────────────────────────────────────────────
@@ -1014,16 +1073,39 @@ valid_category_token() {
     return 0
 }
 
+valid_email_list() {
+    _vel_seen=0
+    case "$1" in
+        ''|*[![:print:]]*) return 1 ;;
+    esac
+    _vel_IFS="$IFS"; IFS=','
+    for _vel_addr in $1; do
+        _vel_addr=$(printf '%s' "$_vel_addr" | tr -d ' ')
+        [ -z "$_vel_addr" ] && continue
+        case "$_vel_addr" in
+            -*) IFS="$_vel_IFS"; return 1 ;;
+        esac
+        _vel_seen=1
+    done
+    IFS="$_vel_IFS"
+    [ "$_vel_seen" -eq 1 ] || return 1
+    return 0
+}
+
 # Write the sentinel file that the rc.d service reads after reboot
 write_autotest_sentinel() {
     _email="${1:-$REPORT_EMAIL}"
+    if ! valid_email_list "$_email"; then
+        log_error "Invalid email recipient list"
+        return 1
+    fi
 
     log_info "Writing autotest sentinel: ${AUTOTEST_SENTINEL}"
     if [ $DRY_RUN -eq 1 ]; then
         log_info "Would write sentinel: ${AUTOTEST_SENTINEL} (dry run)"
         return 0
     fi
-    _sentinel_commit=$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
+    _sentinel_commit=$(GIT_MASTER=1 git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
     _trigger_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     {
         printf '%s\n' '# ibs-autotest sentinel -written by run.sh --auto'
@@ -1037,45 +1119,53 @@ write_autotest_sentinel() {
         write_sentinel_var AUTOTEST_TRIGGER_TIME "$_trigger_time"
         write_sentinel_var AUTOTEST_SRC_COMMIT "$_sentinel_commit"
         write_sentinel_var AUTOTEST_WITH_STRESS "$WITH_STRESS"
+        write_sentinel_var AUTOTEST_SAFE_IBS_RATE "$SAFE_IBS_RATE"
+        write_sentinel_var AUTOTEST_PARALLELISM "$PARALLELISM"
         write_sentinel_var AUTOTEST_BRANCH "$BRANCH"
         write_sentinel_var AUTOTEST_REPO_URL "$REPO_URL"
         write_sentinel_var AUTOTEST_BRANCH_TAG "$_branch_tag"
-    } > "$AUTOTEST_SENTINEL"
-    chmod 600 "$AUTOTEST_SENTINEL"
+    } > "$AUTOTEST_SENTINEL" || {
+        log_error "Failed to write autotest sentinel: $AUTOTEST_SENTINEL"
+        return 1
+    }
+    chmod 600 "$AUTOTEST_SENTINEL" || {
+        log_error "Failed to protect autotest sentinel: $AUTOTEST_SENTINEL"
+        return 1
+    }
     log_success "Sentinel written"
 }
 
 # Install the rc.d service that runs tests once after reboot
 install_rcd_service() {
+    _rcvar="${AUTOTEST_RCD_NAME}_enable"
+
     log_info "Installing rc.d service: ${RCD_SERVICE}"
     if [ $DRY_RUN -eq 1 ]; then
         log_info "Would install rc.d service: ${RCD_SERVICE} (dry run)"
-        log_info "Would enable: sysrc ibs_autotest_enable=YES (dry run)"
+        log_info "Would enable: sysrc ${_rcvar}=YES (dry run)"
         return 0
     fi
 
-    cat > "$RCD_SERVICE" << 'RCEOF'
-#!/bin/sh
-#
-# PROVIDE: ibs_autotest
-# REQUIRE: NETWORKING LOGIN cleanvar
-# KEYWORD: nojail
-#
-# ibs_autotest rc.d service -runs AMD PMU test suite once after --auto reboot.
-# Self-disables after completion.  Written by run.sh --auto.
-
-. /etc/rc.subr
-
-name="ibs_autotest"
-rcvar="${name}_enable"
-start_cmd="${name}_run"
-stop_cmd=":"
-
-ibs_autotest_run()
-{
-    SENTINEL="/var/db/ibs-autotest-sentinel"
-    LOG="/var/log/ibs-autotest.log"
-
+    {
+        printf '#!/bin/sh\n'
+        printf '#\n'
+        printf '# PROVIDE: %s\n' "$AUTOTEST_RCD_NAME"
+        printf '# REQUIRE: NETWORKING LOGIN cleanvar\n'
+        printf '# KEYWORD: nojail\n'
+        printf '#\n'
+        printf '# %s rc.d service -runs AMD PMU test suite once after --auto reboot.\n' "$AUTOTEST_RCD_NAME"
+        printf '# Self-disables after completion.  Written by run.sh --auto.\n'
+        printf '\n'
+        printf '. /etc/rc.subr\n\n'
+        printf 'name='; shell_quote "$AUTOTEST_RCD_NAME"; printf '\n'
+        printf 'rcvar="${name}_enable"\n'
+        printf 'start_cmd="autotest_run"\n'
+        printf 'stop_cmd=":"\n\n'
+        printf 'autotest_run()\n{\n'
+        printf '    SENTINEL='; shell_quote "$AUTOTEST_SENTINEL"; printf '\n'
+        printf '    LAST_COMMIT_FILE='; shell_quote "$LAST_COMMIT_FILE"; printf '\n'
+        printf '    LOG='; shell_quote "$AUTOTEST_LOG"; printf '\n\n'
+        cat << 'RCEOF'
     [ -f "$SENTINEL" ] || return 0
 
     # The sentinel is shell syntax.  Verify the file and parent directory before
@@ -1097,20 +1187,38 @@ ibs_autotest_run()
     # Read config from sentinel after the trust boundary above.
     . "$SENTINEL"
     SCRIPT="${AUTOTEST_SCRIPT_DIR}/run.sh"
+    case "$AUTOTEST_EMAIL" in ''|*[![:print:]]*) echo "Invalid AUTOTEST_EMAIL in sentinel" >> "$LOG"; return 1 ;; esac
+    _ae_ok=0; _ae_IFS="$IFS"; IFS=','
+    for _ae_addr in $AUTOTEST_EMAIL; do
+        _ae_addr=$(printf '%s' "$_ae_addr" | tr -d ' ')
+        [ -z "$_ae_addr" ] && continue
+        case "$_ae_addr" in -*) echo "Invalid AUTOTEST_EMAIL in sentinel" >> "$LOG"; IFS="$_ae_IFS"; return 1 ;; esac
+        _ae_ok=1
+    done
+    IFS="$_ae_IFS"
+    [ "$_ae_ok" -eq 1 ] || { echo "Invalid AUTOTEST_EMAIL in sentinel" >> "$LOG"; return 1; }
+    _auto_suite_label="${AUTOTEST_SUITE_LIST:-$AUTOTEST_SUITE}"
+    case "$_auto_suite_label" in
+        ''|DEFAULT) _auto_suite_label="IBS UMCDF PMC" ;;
+        ALL)        _auto_suite_label="IBS UMCDF PMC TSC L3 STRESS" ;;
+    esac
+    _auto_suite_word="Suite"
+    _auto_suite_field="Suite    "
+    case "$_auto_suite_label" in
+        *" "*) _auto_suite_word="Suites"; _auto_suite_field="Suites   " ;;
+    esac
 
     {
-        echo "=== ibs_autotest rc.d started: $(date) ==="
-        echo "Suite      : ${AUTOTEST_SUITE}"
+        echo "=== ${name} rc.d started: $(date) ==="
+        echo "Suite      : ${_auto_suite_label}"
         echo "Categories : ${AUTOTEST_CATEGORIES}"
         echo "Email      : ${AUTOTEST_EMAIL}"
         echo "Kernel     : ${AUTOTEST_KERNCONF}"
         echo ""
     } >> "$LOG" 2>&1
 
-    # Disable ourselves so we don't run on the next reboot
     sysrc -x "${name}_enable" >> "$LOG" 2>&1 || sysrc "${name}_enable"=NO >> "$LOG" 2>&1
 
-    # Remove sentinel to prevent re-run
     rm -f "$SENTINEL"
 
     # Validate sourced sentinel values before using them as paths or argv.
@@ -1122,6 +1230,23 @@ ibs_autotest_run()
         ""|0|1) ;;
         *) echo "Invalid AUTOTEST_WITH_STRESS in sentinel: $AUTOTEST_WITH_STRESS" >> "$LOG"; return 1 ;;
     esac
+    case "$AUTOTEST_PARALLELISM" in
+        "") ;;
+        *[!0-9]*|0) echo "Invalid AUTOTEST_PARALLELISM in sentinel: $AUTOTEST_PARALLELISM" >> "$LOG"; return 1 ;;
+    esac
+    if [ -n "$AUTOTEST_SAFE_IBS_RATE" ]; then
+        case "$AUTOTEST_SAFE_IBS_RATE" in
+            0x*) _rate_digits=${AUTOTEST_SAFE_IBS_RATE#0x}; _rate_class='0-9A-Fa-f' ;;
+            *)   _rate_digits=$AUTOTEST_SAFE_IBS_RATE; _rate_class='0-9' ;;
+        esac
+        case "$_rate_digits" in
+            ""|*[!$_rate_class]*) echo "Invalid AUTOTEST_SAFE_IBS_RATE in sentinel: $AUTOTEST_SAFE_IBS_RATE" >> "$LOG"; return 1 ;;
+        esac
+        if [ -z "$(printf '%s' "$_rate_digits" | tr -d '0')" ]; then
+            echo "Invalid zero AUTOTEST_SAFE_IBS_RATE in sentinel: $AUTOTEST_SAFE_IBS_RATE" >> "$LOG"
+            return 1
+        fi
+    fi
     for _c in $AUTOTEST_CATEGORIES; do
         case "$_c" in
             TC-?*) ;;
@@ -1138,6 +1263,8 @@ ibs_autotest_run()
     # Build argv with set --.  Do not concatenate shell argument strings here.
     set -- --run-all --force
     [ -n "$AUTOTEST_SUITE" ]          && set -- "$@" --suite "$AUTOTEST_SUITE"
+    [ -n "$AUTOTEST_PARALLELISM" ]    && set -- "$@" --parallelism "$AUTOTEST_PARALLELISM"
+    [ -n "$AUTOTEST_SAFE_IBS_RATE" ]  && set -- "$@" --safe-ibs-rate "$AUTOTEST_SAFE_IBS_RATE"
     [ "$AUTOTEST_WITH_STRESS" = "1" ] && set -- "$@" --stress
     for _c in $AUTOTEST_CATEGORIES; do
         set -- "$@" --category "$_c"
@@ -1181,7 +1308,6 @@ ibs_autotest_run()
         >> "$LOG" 2>&1
     _rc=$?
 
-    # Determine verdict from report
     _verdict="UNKNOWN"
     if [ -f "${RESULTS_DIR}/report.txt" ]; then
         if grep -q "VERDICT: APPROVED" "${RESULTS_DIR}/report.txt"; then
@@ -1195,16 +1321,16 @@ ibs_autotest_run()
 
     echo "=== Test run finished (rc=$_rc) verdict=$_verdict ===" >> "$LOG"
 
-    # Email the report -MIME multipart: summary body + report.txt + report.xml attached
     _sender="freebsd-ci-actions@amd.com"
     _report="${RESULTS_DIR}/report.txt"
     _xml="${RESULTS_DIR}/report.xml"
-    _subject="[AMD CI][${AUTOTEST_BRANCH}] ${AUTOTEST_SUITE} Tests: ${_verdict} - $(hostname -s) $(date +%Y-%m-%d)"
+    _subject="[AMD CI][${AUTOTEST_BRANCH}] ${_auto_suite_label} Test ${_auto_suite_word}: ${_verdict} - $(hostname -s) $(date +%Y-%m-%d)"
     _summary=$(
-        printf 'AMD PMU CI -%s Test Suite Report\n' "$AUTOTEST_SUITE"
+        printf 'AMD PMU CI -%s Test %s Report\n' "$_auto_suite_label" "$_auto_suite_word"
         printf 'Verdict  : %s\n' "$_verdict"
         printf 'Date     : %s\n' "$(date)"
         printf 'Host     : %s  (%s)\n' "$(uname -n)" "$(uname -r)"
+        printf '%s: %s\n' "$_auto_suite_field" "$_auto_suite_label"
         printf 'Kernel   : %s\n' "$AUTOTEST_KERNCONF"
         printf 'Branch   : %s\n' "$AUTOTEST_BRANCH"
         printf 'Repo     : %s\n' "$AUTOTEST_REPO_URL"
@@ -1233,11 +1359,12 @@ ibs_autotest_run()
     )
     _boundary="----=_AmdCIPart_$(date +%s)_$$"
     _sep="--${_boundary}"
+    _mail_rc=0
     _rcd_IFS="$IFS"; IFS=','
     for _rcd_addr in $AUTOTEST_EMAIL; do
         _rcd_addr=$(printf '%s' "$_rcd_addr" | tr -d ' ')
         [ -z "$_rcd_addr" ] && continue
-        {
+        if ! {
             printf 'From: %s\n' "$_sender"
             printf 'To: %s\n' "$_rcd_addr"
             printf 'Subject: %s\n' "$_subject"
@@ -1266,61 +1393,86 @@ ibs_autotest_run()
                 printf '\n'
             fi
             printf '%s--\n' "$_sep"
-        } | sendmail -f "$_sender" "$_rcd_addr"
+        } | sendmail -f "$_sender" "$_rcd_addr"; then
+            echo "=== Failed to email report to $_rcd_addr ===" >> "$LOG"
+            _mail_rc=1
+        fi
     done
     IFS="$_rcd_IFS"
 
-    echo "=== Report emailed to $AUTOTEST_EMAIL ===" >> "$LOG"
+    if [ "$_mail_rc" -eq 0 ]; then
+        echo "=== Report emailed to $AUTOTEST_EMAIL ===" >> "$LOG"
+    else
+        echo "=== Report email failed for one or more recipients ===" >> "$LOG"
+    fi
 
     # Record the tested source commit so the next --auto run can skip if unchanged
     if [ -n "$AUTOTEST_SRC_COMMIT" ] && [ "$AUTOTEST_SRC_COMMIT" != "unknown" ]; then
-        printf '%s\n' "$AUTOTEST_SRC_COMMIT" > /var/db/ibs-autotest-last-commit
+        printf '%s\n' "$AUTOTEST_SRC_COMMIT" > "$LAST_COMMIT_FILE"
         echo "=== Recorded last-tested commit: $AUTOTEST_SRC_COMMIT ===" >> "$LOG"
     fi
+    [ "$_mail_rc" -ne 0 ] && return "$_mail_rc"
+    return "$_rc"
 }
 
 load_rc_config $name
 run_rc_command "$1"
 RCEOF
+    } > "$RCD_SERVICE" || {
+        log_error "Failed to write rc.d service: $RCD_SERVICE"
+        return 1
+    }
 
-    chmod 555 "$RCD_SERVICE"
+    chmod 555 "$RCD_SERVICE" || {
+        log_error "Failed to make rc.d service executable: $RCD_SERVICE"
+        return 1
+    }
     log_success "rc.d service installed: ${RCD_SERVICE}"
 
     # Enable it for the next boot only; it self-disables after running.
-    # Use the literal service name -${name} is only defined inside the rc.d script.
-    sysrc ibs_autotest_enable=YES || { log_error "sysrc failed — ibs_autotest will NOT run after reboot"; return 1; }
-    log_success "ibs_autotest enabled for next boot (self-disables after run)"
+    sysrc "${_rcvar}=YES" || { log_error "sysrc failed — ${AUTOTEST_RCD_NAME} will NOT run after reboot"; return 1; }
+    log_success "${AUTOTEST_RCD_NAME} enabled for next boot (self-disables after run)"
 }
 
 # ── --auto orchestration ───────────────────────────────────────────────────
 
 auto_mode() {
     _email="${1:-$REPORT_EMAIL}"
+    _auto_suite_label=$(suite_label_from_list "${SUITE_LIST:-$SUITE}")
+    _auto_suite_word=$(suite_word_for_label "$_auto_suite_label")
 
-    # Step 0: Fetch latest from GitHub so the comparison reflects remote HEAD,
-    # not whatever happens to be in the local working tree.
+    if ! valid_email_list "$_email"; then
+        log_error "--auto: invalid email recipient list"
+        return 1
+    fi
+
+    # Fetch first so the already-tested check compares against remote HEAD.
     if [ -d "$SRC_DIR/.git" ]; then
         # Ensure origin points to the configured REPO_URL (may have changed)
-        _cur_remote=$(git -C "$SRC_DIR" remote get-url origin 2>/dev/null || echo "")
+        _cur_remote=$(GIT_MASTER=1 git -C "$SRC_DIR" remote get-url origin 2>/dev/null || echo "")
         if [ "$_cur_remote" != "$REPO_URL" ]; then
             log_info "Updating origin remote: ${_cur_remote} → ${REPO_URL}"
-            git -C "$SRC_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || true
+            if [ $DRY_RUN -eq 0 ]; then
+                GIT_MASTER=1 git -C "$SRC_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || true
+            else
+                log_info "Would update origin remote to ${REPO_URL} (dry run)"
+            fi
         fi
 
         log_info "Fetching latest from ${REPO_URL} branch ${BRANCH}..."
         if [ $DRY_RUN -eq 0 ]; then
-            git -C "$SRC_DIR" fetch origin "$BRANCH" 2>/dev/null || \
+            GIT_MASTER=1 git -C "$SRC_DIR" fetch origin "$BRANCH" 2>/dev/null || \
                 log_warning "git fetch failed -falling back to local HEAD for commit check"
         else
-            log_info "Would run: git fetch origin ${BRANCH} (dry run)"
+            log_info "Would run: GIT_MASTER=1 git fetch origin ${BRANCH} (dry run)"
         fi
     fi
 
     # Resolve the remote HEAD using the unambiguous full ref path with --verify
     # (branch names with slashes confuse plain rev-parse and produce stdout noise)
-    _current_commit=$(git -C "$SRC_DIR" rev-parse --verify \
+    _current_commit=$(GIT_MASTER=1 git -C "$SRC_DIR" rev-parse --verify \
                           "refs/remotes/origin/${BRANCH}" 2>/dev/null || \
-                      git -C "$SRC_DIR" rev-parse --verify HEAD 2>/dev/null || echo "")
+                      GIT_MASTER=1 git -C "$SRC_DIR" rev-parse --verify HEAD 2>/dev/null || echo "")
 
     # Check if this commit was already built and tested
     if [ $FORCE_REBUILD -eq 1 ]; then
@@ -1335,7 +1487,7 @@ auto_mode() {
                 printf 'No new commits on branch %s since the last test run.\n' "$BRANCH"
                 printf '\n'
                 printf 'Host     : %s  (%s)\n' "$(uname -n)" "$(uname -r)"
-                printf 'Suite    : %s\n' "$SUITE"
+                printf 'Suite    : %s\n' "$_auto_suite_label"
                 printf 'Kernel   : %s\n' "$AUTO_KERNCONF"
                 printf 'Commit   : %s\n' "$_current_commit"
                 printf 'Repo     : %s\n' "$REPO_URL"
@@ -1343,54 +1495,48 @@ auto_mode() {
                 printf '\n'
                 printf 'Nothing to do -no build or reboot was started.\n'
             )
+            _uptodate_rc=0
             mail_all "[AMD CI] Kernel up to date, already tested - $(hostname -s) $(date +%Y-%m-%d)" \
-                "$_uptodate_body" "$_email"
-            generate_html_skipped_report "$_current_commit" "$BRANCH"
-            return 0
+                "$_uptodate_body" "$_email" || _uptodate_rc=1
+            generate_html_skipped_report "$_current_commit" "$BRANCH" || _uptodate_rc=1
+            return "$_uptodate_rc"
         fi
     fi
 
     log_info "New commit detected: ${_current_commit}"
     log_info "Auto mode: fetch → reset → build kernel → install → write sentinel → reboot"
-    log_info "Suite: ${SUITE}  Kernel: ${AUTO_KERNCONF}  Email: ${_email}"
+    log_info "Suite: ${_auto_suite_label}  Kernel: ${AUTO_KERNCONF}  Email: ${_email}"
 
     check_boot_environment
     check_root_privileges
 
-    # Step 1: Update local source tree to the fetched remote HEAD before building
     if [ -d "$SRC_DIR/.git" ] && [ $DRY_RUN -eq 0 ]; then
         log_info "Resetting ${SRC_DIR} to origin/${BRANCH}..."
-        git -C "$SRC_DIR" reset --hard "origin/${BRANCH}" || {
+        GIT_MASTER=1 git -C "$SRC_DIR" reset --hard "origin/${BRANCH}" || {
             log_error "Failed to reset source tree to origin/${BRANCH}"
             exit 1
         }
-        git -C "$SRC_DIR" clean -fd > /dev/null 2>&1 || true
+        GIT_MASTER=1 git -C "$SRC_DIR" clean -fd > /dev/null 2>&1 || true
     fi
 
-    # Step 2: Build kernel
     build_kernel_from_src
 
-    # Step 3: Install kernel (marks /boot/kernel for next boot)
     install_kernel_to_boot
 
-    # Step 4: Compile test suite (so rc.d service doesn't need to)
     log_info "Pre-compiling test suite..."
     compile_tests
 
-    # Step 5: Write sentinel
-    write_autotest_sentinel "$_email"
+    write_autotest_sentinel "$_email" || return 1
 
-    # Step 6: Install + enable rc.d service
-    install_rcd_service
+    install_rcd_service || return 1
 
-    # Step 7: Reboot
     echo ""
     echo "================================================================="
     log_info "System is ready for auto-test reboot."
     log_info "After reboot:"
-    log_info "  1. rc.d/ibs_autotest will run the ${SUITE} test suite"
+    log_info "  1. rc.d/${AUTOTEST_RCD_NAME} will run: ${_auto_suite_label}"
     log_info "  2. Report will be emailed to: ${_email}"
-    log_info "  3. Log at: /var/log/ibs-autotest.log"
+    log_info "  3. Log at: ${AUTOTEST_LOG}"
     log_info "  4. Service will self-disable (runs exactly once)"
     log_info "  Fallback kernel: /boot/kernel.old"
     echo "================================================================="
@@ -1537,6 +1683,10 @@ ${YELLOW}COMMANDS${NC}
       Also regenerates the JUnit XML file.  Does not run tests; reads
       the existing kyua results database.
 
+  ${BOLD}--reindex${NC}
+      Regenerate the HTML results index under \$HTML_DIR from existing
+      result directories.  Does not run tests.
+
   ${BOLD}--status${NC}
       Snapshot of the current system state:
         • CPU vendor and IBS CPUID/MSR feature-bit status
@@ -1558,15 +1708,14 @@ ${YELLOW}COMMANDS${NC}
       Requires root.
 
   ${BOLD}--fetch${NC}
-      Pull the latest commits from origin/main of the freebsd-ci-actions
-      repo itself (github.com/ojanerif/freebsd-ci-actions).  Shows the
+      Pull the latest commits from this repo's configured upstream.  Shows the
       commits added since the previous HEAD.  Safe to run at any time;
       will not overwrite local uncommitted changes.
 
   ${BOLD}--push${NC}
-      Push local commits on main to origin/main of the freebsd-ci-actions
-      repo.  Checks how many commits are ahead of origin before pushing
-      and asks for confirmation.  Does nothing if already up-to-date.
+      Push local commits to this repo's configured upstream.  Checks how many
+      commits are ahead before pushing and asks for confirmation.  Does
+      nothing if already up-to-date.
 
   ${BOLD}--commit${NC}
       Sync test sources and CI tooling to the AMD sos-git mirror and
@@ -1606,7 +1755,7 @@ ${YELLOW}COMMANDS${NC}
       After reboot the rc.d service runs unattended: it reads the
       sentinel, executes run.sh --run-all, determines the verdict,
       sends the full plain-text report to the configured email address
-      via the system MTA (dma → txsmtp.amd.com), and writes the tested
+      via the system MTA, and writes the tested
       source commit to /var/db/ibs-autotest-last-commit so the next
       --auto invocation can skip an unchanged tree.
       Log: /var/log/ibs-autotest.log
@@ -1690,9 +1839,9 @@ ${YELLOW}STRESS OPTIONS${NC}
                         minimum IBS sampling period in that case.
 
     --safe-ibs-rate N   Set dev.hwpmc.ibs.min_period=N via sysctl before
-                        starting the test run.  Caps the maximum IBS NMI rate
-                        when using --stress + IBS suite together.  Has no
-                        effect if the sysctl is not present in the kernel.
+                        starting the stress run.  Caps the maximum IBS NMI
+                        rate when using --stress + IBS suite together.  The
+                        run fails if the sysctl cannot be set.
 
 ${YELLOW}PANIC RECOVERY${NC}
     --last-test         Show the last test run's live output and state.
@@ -1714,10 +1863,12 @@ ${YELLOW}AUTO MODE OPTIONS${NC}
                         emails).  For --run-all, email is sent only when --email
                         is explicitly given on the command line.
                         Default: freebsd-test@mailman-svr.amd.com,ojanerif@amd.com
-                        Delivery uses the system MTA (dma → atlsmtp10.amd.com).
+                        Delivery uses the system MTA.
     --force-rebuild     Skip the "already tested" commit check.  Forces --auto
                         to proceed with build → reboot → test even when the
                         source tree has not changed since the last run.
+    --branch BRANCH     FreeBSD source branch for --download/--auto.
+    --repo URL          FreeBSD source repository for --download/--auto.
 
 ${YELLOW}OPTIONS${NC}
     -v, --verbose       Print additional diagnostic messages (git SHAs,
@@ -1865,6 +2016,10 @@ confirm_cmd() {
 
 # Safety checks
 check_boot_environment() {
+    if [ $DRY_RUN -eq 1 ]; then
+        log_verbose "Dry run: skipping boot environment check"
+        return 0
+    fi
     if [ $AUTO_MODE -eq 1 ]; then
         log_verbose "Auto mode: skipping boot environment check"
         return 0
@@ -1895,7 +2050,7 @@ check_root_privileges() {
     fi
     if [ "$(id -u)" -ne 0 ]; then
         log_error "Root privileges required for IBS testing"
-        log_error "Run with: sudo $0 $@"
+        log_error "Run with: sudo $(shell_quote "$(realpath "$0")")${ORIGINAL_ARGS}"
         exit 1
     fi
 }
@@ -1945,8 +2100,8 @@ sync_repository() {
         log_verbose "Performing fresh clone..."
         if [ $DRY_RUN -eq 0 ]; then
             confirm_cmd "Clone $REPO_URL (branch: $BRANCH) into $SRC_DIR" \
-                "git clone -b $BRANCH $REPO_URL $SRC_DIR" || return 1
-            git clone -b "$BRANCH" "$REPO_URL" "$SRC_DIR" || {
+                "GIT_MASTER=1 git clone -b $(shell_quote "$BRANCH") -- $(shell_quote "$REPO_URL") $(shell_quote "$SRC_DIR")" || return 1
+            GIT_MASTER=1 git clone -b "$BRANCH" -- "$REPO_URL" "$SRC_DIR" || {
                 log_error "Failed to clone repository"
                 exit 1
             }
@@ -1955,17 +2110,17 @@ sync_repository() {
         log_verbose "Updating existing repository..."
         if [ $DRY_RUN -eq 0 ]; then
             confirm_cmd "Update $SRC_DIR -fetch, reset to origin/$BRANCH, clean untracked" \
-                "git fetch origin $BRANCH && git reset --hard origin/$BRANCH && git clean -fd" || return 1
+                "GIT_MASTER=1 git fetch origin $(shell_quote "$BRANCH") && GIT_MASTER=1 git reset --hard $(shell_quote "origin/$BRANCH") && GIT_MASTER=1 git clean -fd" || return 1
             cd "$SRC_DIR" || exit 1
-            git fetch origin "$BRANCH" || {
+            GIT_MASTER=1 git fetch origin "$BRANCH" || {
                 log_error "Failed to fetch from repository"
                 exit 1
             }
-            git reset --hard "origin/$BRANCH" || {
+            GIT_MASTER=1 git reset --hard "origin/$BRANCH" || {
                 log_error "Failed to reset repository"
                 exit 1
             }
-            git clean -fd || {
+            GIT_MASTER=1 git clean -fd || {
                 log_error "Failed to clean repository"
                 exit 1
             }
@@ -1974,7 +2129,7 @@ sync_repository() {
 
     if [ $DRY_RUN -eq 0 ]; then
         cd "$SRC_DIR" || exit 1
-        LAST_COMMIT=$(git log -1 --format="%h %s (%cd)" --date=format:'%Y-%m-%d %H:%M')
+        LAST_COMMIT=$(GIT_MASTER=1 git log -1 --format="%h %s (%cd)" --date=format:'%Y-%m-%d %H:%M')
         log_success "Repository synced - Last commit: $LAST_COMMIT"
     else
         log_info "Would sync repository (dry run)"
@@ -1997,7 +2152,10 @@ compile_tests() {
     cd "$TESTS_DIR" || exit 1
 
     if [ $DRY_RUN -eq 0 ]; then
-        _ncpu=$(sysctl -n hw.ncpu)
+        _ncpu=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
+        case "$_ncpu" in
+            ''|*[!0-9]*|0) _ncpu=1 ;;
+        esac
 
         log_verbose "Cleaning previous build..."
         confirm_cmd "Remove previous build artifacts in $TESTS_DIR" \
@@ -2052,7 +2210,7 @@ commit_to_sos() {
 
     if [ $DRY_RUN -eq 0 ]; then
         confirm_cmd "Sync tests/ and ci/tools/ into $SOS_DIR, then commit and push to sos-git branch $SOS_BRANCH" \
-            "cp tests/ ci/tools/ → $SOS_DIR  &&  git commit  &&  git push origin $SOS_BRANCH" || return 1
+            "cp tests/ ci/tools/ → $SOS_DIR  &&  GIT_MASTER=1 git commit  &&  GIT_MASTER=1 git push origin HEAD:$SOS_BRANCH" || return 1
 
         # Sync tests/sys/amd/ibs/
         log_verbose "Syncing tests/sys/amd/ibs/ ..."
@@ -2081,24 +2239,24 @@ commit_to_sos() {
         cd "$SOS_DIR" || exit 1
 
         # Stage only tests and ci/tools -no kernel files, no personal docs
-        git add tests/sys/amd/ibs/ tests/sys/amd/pmc/ ci/tools/
+        GIT_MASTER=1 git add tests/sys/amd/ibs/ tests/sys/amd/pmc/ ci/tools/
 
         # Check if there is anything new to commit
-        if git diff --cached --quiet; then
+        if GIT_MASTER=1 git diff --cached --quiet; then
             log_info "Nothing to commit -sos-git is already up to date"
             return 0
         fi
 
         COMMIT_MSG="amd: update tests and ci tools -$COMMIT_DATE"
-        git commit -m "$COMMIT_MSG" || {
+        GIT_MASTER=1 git commit -m "$COMMIT_MSG" || {
             log_error "Failed to create commit"
             exit 1
         }
         log_verbose "Committed: $COMMIT_MSG"
 
         confirm_cmd "Push to remote sos-git (irreversible)" \
-            "git push origin $SOS_BRANCH" || return 1
-        git push origin "HEAD:$SOS_BRANCH" || {
+            "GIT_MASTER=1 git push origin HEAD:$SOS_BRANCH" || return 1
+        GIT_MASTER=1 git push origin "HEAD:$SOS_BRANCH" || {
             log_error "Failed to push to sos-git"
             exit 1
         }
@@ -2110,64 +2268,94 @@ commit_to_sos() {
     fi
 }
 
-# Fetch / push the freebsd-ci-actions repo itself (origin = github.com/ojanerif/freebsd-ci-actions)
-fetch_from_remote() {
-    log_info "Fetching from origin (github.com/ojanerif/freebsd-ci-actions main)..."
+# Fetch / push this freebsd-ci-actions repo itself.
+resolve_self_remote_ref() {
+    SELF_BRANCH=$(GIT_MASTER=1 git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || printf '')
+    case "$SELF_BRANCH" in
+        ''|HEAD)
+            log_error "Cannot resolve current branch in $SCRIPT_DIR"
+            return 1
+            ;;
+    esac
 
+    SELF_REMOTE_REF=$(GIT_MASTER=1 git -C "$SCRIPT_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || printf 'origin/%s' "$SELF_BRANCH")
+    case "$SELF_REMOTE_REF" in
+        */*) SELF_REMOTE=${SELF_REMOTE_REF%%/*}; SELF_BRANCH=${SELF_REMOTE_REF#*/} ;;
+        *)   SELF_REMOTE=origin; SELF_BRANCH=$SELF_REMOTE_REF; SELF_REMOTE_REF="origin/$SELF_BRANCH" ;;
+    esac
+}
+
+fetch_from_remote() {
     if [ ! -d "$SCRIPT_DIR/.git" ]; then
         log_error "Not a git repository: $SCRIPT_DIR"
         exit 1
     fi
 
+    resolve_self_remote_ref || return 1
+    log_info "Fetching from ${SELF_REMOTE_REF}..."
+
     if [ $DRY_RUN -eq 0 ]; then
-        _before=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null)
-        confirm_cmd "Pull origin main into $SCRIPT_DIR" \
-            "git -C $SCRIPT_DIR pull origin main" || return 1
-        git -C "$SCRIPT_DIR" pull origin main || {
+        _before=$(GIT_MASTER=1 git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null)
+        confirm_cmd "Pull ${SELF_REMOTE_REF} into $SCRIPT_DIR" \
+            "GIT_MASTER=1 git -C $(shell_quote "$SCRIPT_DIR") pull --ff-only $(shell_quote "$SELF_REMOTE") $(shell_quote "$SELF_BRANCH")" || return 1
+        GIT_MASTER=1 git -C "$SCRIPT_DIR" pull --ff-only "$SELF_REMOTE" "$SELF_BRANCH" || {
             log_error "Failed to pull from origin"
             exit 1
         }
-        _after=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null)
+        _after=$(GIT_MASTER=1 git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null)
         if [ "$_before" = "$_after" ]; then
             log_info "Already up to date ($_before)"
         else
             log_success "Updated $_before → $_after"
-            git -C "$SCRIPT_DIR" log --oneline "${_before}..HEAD" 2>/dev/null | \
+            GIT_MASTER=1 git -C "$SCRIPT_DIR" log --oneline "${_before}..HEAD" 2>/dev/null | \
                 while IFS= read -r line; do printf "  %s\n" "$line"; done
         fi
     else
-        log_info "Would pull from origin main (dry run)"
+        log_info "Would pull from $SELF_REMOTE_REF (dry run)"
     fi
 }
 
 push_to_remote() {
-    log_info "Pushing to origin (github.com/ojanerif/freebsd-ci-actions main)..."
-
     if [ ! -d "$SCRIPT_DIR/.git" ]; then
         log_error "Not a git repository: $SCRIPT_DIR"
         exit 1
     fi
 
+    resolve_self_remote_ref || return 1
+    log_info "Pushing to ${SELF_REMOTE_REF}..."
+
     if [ $DRY_RUN -eq 0 ]; then
         # Fetch remote state so the ahead count is current
-        git -C "$SCRIPT_DIR" fetch origin main 2>/dev/null || true
-        _ahead=$(git -C "$SCRIPT_DIR" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
+        GIT_MASTER=1 git -C "$SCRIPT_DIR" fetch "$SELF_REMOTE" "$SELF_BRANCH:refs/remotes/${SELF_REMOTE}/${SELF_BRANCH}" || {
+            log_error "Failed to fetch $SELF_REMOTE_REF; refusing stale ahead check"
+            return 1
+        }
+        if GIT_MASTER=1 git -C "$SCRIPT_DIR" show-ref --verify --quiet "refs/remotes/${SELF_REMOTE}/${SELF_BRANCH}"; then
+            if ! GIT_MASTER=1 git -C "$SCRIPT_DIR" merge-base --is-ancestor "$SELF_REMOTE_REF" HEAD; then
+                log_error "Cannot push: $SELF_REMOTE_REF has commits not in local HEAD. Run --fetch/rebase first."
+                return 1
+            fi
+            _ahead=$(GIT_MASTER=1 git -C "$SCRIPT_DIR" rev-list --count "${SELF_REMOTE_REF}..HEAD" 2>/dev/null || echo 0)
+        else
+            _ahead=$(GIT_MASTER=1 git -C "$SCRIPT_DIR" rev-list --count HEAD 2>/dev/null || echo 1)
+            log_warning "Remote ref ${SELF_REMOTE_REF} not found; push will create it"
+        fi
         if [ "${_ahead:-0}" -eq 0 ]; then
-            log_info "Nothing to push -local main is already up to date with origin/main"
+            log_info "Nothing to push -local branch is already up to date with $SELF_REMOTE_REF"
             return 0
         fi
-        log_info "$_ahead commit(s) ahead of origin/main:"
-        git -C "$SCRIPT_DIR" log --oneline origin/main..HEAD 2>/dev/null | \
+        log_info "$_ahead commit(s) ahead of $SELF_REMOTE_REF:"
+        GIT_MASTER=1 git -C "$SCRIPT_DIR" log --oneline "${SELF_REMOTE_REF}..HEAD" 2>/dev/null | \
             while IFS= read -r line; do printf "  %s\n" "$line"; done
-        confirm_cmd "Push local main to origin (irreversible)" \
-            "git -C $SCRIPT_DIR push origin main" || return 1
-        git -C "$SCRIPT_DIR" push origin main || {
+        confirm_cmd "Push HEAD to $SELF_REMOTE_REF (irreversible)" \
+            "GIT_MASTER=1 git -C $(shell_quote "$SCRIPT_DIR") push $(shell_quote "$SELF_REMOTE") $(shell_quote "HEAD:$SELF_BRANCH")" || return 1
+        GIT_MASTER=1 git -C "$SCRIPT_DIR" push "$SELF_REMOTE" "HEAD:$SELF_BRANCH" || {
             log_error "Failed to push to origin"
             exit 1
         }
-        log_success "Pushed $_ahead commit(s) to origin/main"
+        log_success "Pushed $_ahead commit(s) to $SELF_REMOTE_REF"
     else
-        log_info "Would push to origin main (dry run)"
+        log_info "Would push to $SELF_REMOTE_REF (dry run)"
     fi
 }
 
@@ -2466,6 +2654,20 @@ generate_html_index() {
     _hostname=$(hostname)
     _now=$(date)
 
+    if [ $DRY_RUN -eq 1 ]; then
+        log_info "Would regenerate HTML index: $_idx_file (dry run)"
+        return 0
+    fi
+
+    if [ ! -d "$HTML_DIR" ]; then
+        log_error "HTML_DIR does not exist: $HTML_DIR"
+        return 1
+    fi
+    if [ ! -w "$HTML_DIR" ]; then
+        log_error "HTML_DIR is not writable: $HTML_DIR"
+        return 1
+    fi
+
     # Scan all results dirs, newest first by name (datetime names sort correctly)
     _rows=""
     # Use find + sort (reverse alpha = newest first since names are timestamped)
@@ -2533,7 +2735,7 @@ generate_html_index() {
     done < /tmp/ibs_idx_$$.tmp
     rm -f /tmp/ibs_idx_$$.tmp
 
-    cat > "$_idx_file" << IDXEOF
+    if ! cat > "$_idx_file" << IDXEOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2599,6 +2801,10 @@ ${_rows}
 </body>
 </html>
 IDXEOF
+    then
+        log_error "Failed to write HTML index: $_idx_file"
+        return 1
+    fi
 
     log_success "HTML index   : ${_idx_file}"
 }
@@ -2615,13 +2821,22 @@ generate_html_skipped_report() {
     _sk_html="$_sk_dir/report.html"
     _sk_date=$(date)
     _sk_run=$(basename "$_sk_dir")
+    _sk_suite_label=$(suite_label_from_list "${SUITE_LIST:-$SUITE}")
 
-    mkdir -p "$_sk_dir"
+    if [ $DRY_RUN -eq 1 ]; then
+        log_info "Would generate skipped report: $_sk_dir (dry run)"
+        return 0
+    fi
+
+    mkdir -p "$_sk_dir" || {
+        log_error "Failed to create skipped report directory: $_sk_dir"
+        return 1
+    }
 
     # Plain-text report -format matches what generate_html_index parses
-    cat > "$_sk_txt" << SKIPTXTEOF
+    if ! cat > "$_sk_txt" << SKIPTXTEOF
 AMD PMU CI -Kernel Up To Date
-Suite      : ${SUITE}
+Suite      : ${_sk_suite_label}
 Kernel     : ${AUTO_KERNCONF}
 Host       : $(uname -n)  ($(uname -r))
 Generated  : ${_sk_date}
@@ -2634,12 +2849,20 @@ Repo       : ${REPO_URL}
 
 Nothing to do -no build or reboot was started.
 SKIPTXTEOF
+    then
+        log_error "Failed to write skipped report: $_sk_txt"
+        return 1
+    fi
 
     # Minimal JUnit XML so the index links don't 404
-    cat > "$_sk_dir/report.xml" << SKIPXMLEOF
+    if ! cat > "$_sk_dir/report.xml" << SKIPXMLEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <testsuites><testsuite name="skipped" tests="0" skipped="0" failures="0" errors="0"/></testsuites>
 SKIPXMLEOF
+    then
+        log_error "Failed to write skipped XML report: $_sk_dir/report.xml"
+        return 1
+    fi
 
     _sk_date_esc=$(_he "$_sk_date")
     _sk_sys_esc=$(_he "$(uname -srm)")
@@ -2647,8 +2870,9 @@ SKIPXMLEOF
     _sk_branch_esc=$(_he "$_sk_branch")
     _sk_repo_esc=$(_he "$REPO_URL")
     _sk_host_esc=$(_he "$(hostname) ($(uname -r))")
+    _sk_suite_esc=$(_he "$_sk_suite_label")
 
-    cat > "$_sk_html" << SKIPHTMLEOF
+    if ! cat > "$_sk_html" << SKIPHTMLEOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2690,7 +2914,7 @@ footer{background:#161b22;border-top:1px solid #30363d;padding:16px 32px;color:#
 <tr><td>Branch</td><td>${_sk_branch_esc}</td></tr>
 <tr><td>Commit</td><td>${_sk_commit_esc}</td></tr>
 <tr><td>Repo</td><td>${_sk_repo_esc}</td></tr>
-<tr><td>Suite</td><td>${SUITE}</td></tr>
+<tr><td>Suite</td><td>${_sk_suite_esc}</td></tr>
 <tr><td>Kernel conf</td><td>${AUTO_KERNCONF}</td></tr>
 <tr><td>Host</td><td>${_sk_host_esc}</td></tr>
 <tr><td>Generated</td><td>${_sk_date_esc}</td></tr>
@@ -2705,8 +2929,12 @@ footer{background:#161b22;border-top:1px solid #30363d;padding:16px 32px;color:#
 </body>
 </html>
 SKIPHTMLEOF
+    then
+        log_error "Failed to write skipped HTML report: $_sk_html"
+        return 1
+    fi
 
-    generate_html_index
+    generate_html_index || return 1
     log_success "Skipped HTML report: ${_sk_html}"
 }
 
@@ -2812,6 +3040,7 @@ _run_suite_once() {
     # Confirm + run kyua
     confirm_cmd "Run${_rs_cat_label} $_rs_suite tests in $TESTS_INSTALL_DIR (parallelism: $_rs_par)" \
         "kyua -v parallelism=$_rs_par test${_rs_kyuafile_opt:+ $_rs_kyuafile_opt}" || {
+        [ -n "$_rs_kf" ] && rm -f "$_rs_kf"
         if [ -n "$_rs_sm_pid" ]; then
             kill "$_rs_sm_pid" 2>/dev/null
             _STRESS_MON_PID=""
@@ -3620,8 +3849,9 @@ TC-PMCAPI TC-PMCSTAT TC-TSC-DET TC-TSC-DRF TC-TSC-INV TC-TSC-DDL TC-DET-L3 TC-UN
             grep -q "VERDICT: CONDITIONAL"  "$REPORT_TXT" 2>/dev/null && _rt_verdict="CONDITIONAL"
             grep -q "VERDICT: NOT APPROVED" "$REPORT_TXT" 2>/dev/null && _rt_verdict="NOT APPROVED"
             log_info "Sending report email to: $REPORT_EMAIL"
-            send_report_email "$REPORT_TXT" "$_rt_verdict" "$REPORT_EMAIL"
+            send_report_email "$REPORT_TXT" "$_rt_verdict" "$REPORT_EMAIL" || TEST_EXIT_CODE=1
         fi
+        return "$TEST_EXIT_CODE"
     fi
 }
 
@@ -4047,7 +4277,7 @@ show_status() {
     # Check source repository status
     if [ -d "$SRC_DIR/.git" ]; then
         cd "$SRC_DIR" || true
-        LAST_COMMIT=$(git log -1 --format="%h - %s (%cd)" --date=format:'%Y-%m-%d %H:%M')
+        LAST_COMMIT=$(GIT_MASTER=1 git log -1 --format="%h - %s (%cd)" --date=format:'%Y-%m-%d %H:%M')
         echo "GitHub fork : synced -$LAST_COMMIT"
     else
         echo "GitHub fork : not synced (run --download)"
@@ -4056,7 +4286,7 @@ show_status() {
     # Check sos-git status
     if [ -d "$SOS_DIR/.git" ]; then
         cd "$SOS_DIR" || true
-        SOS_COMMIT=$(git log -1 --format="%h - %s (%cd)" --date=format:'%Y-%m-%d %H:%M')
+        SOS_COMMIT=$(GIT_MASTER=1 git log -1 --format="%h - %s (%cd)" --date=format:'%Y-%m-%d %H:%M')
         echo "sos-git     : $SOS_COMMIT"
     else
         echo "sos-git     : not found at $SOS_DIR"
@@ -4213,7 +4443,7 @@ show_menu() {
 
         # Source location
         if [ -d "$SRC_DIR/.git" ]; then
-            _commit=$(git -C "$SRC_DIR" log -1 --format="%h %cd" --date=format:'%Y-%m-%d' 2>/dev/null)
+            _commit=$(GIT_MASTER=1 git -C "$SRC_DIR" log -1 --format="%h %cd" --date=format:'%Y-%m-%d' 2>/dev/null)
             printf "  Source : dev/freebsd synced (%s)\n" "$_commit"
         else
             printf "  Source : local tests/ (repo checkout)\n"
@@ -4231,9 +4461,10 @@ show_menu() {
         printf '  %s7)%s Show status\n'                    "$BOLD" "$NC"
         printf '  %s8)%s List tests\n'                     "$BOLD" "$NC"
         printf '  %sr)%s View last report\n'               "$BOLD" "$NC"
+        printf '  %si)%s Rebuild HTML index\n'             "$BOLD" "$NC"
         printf '  %s9)%s Commit to sos-git\n'              "$BOLD" "$NC"
-        printf '  %sf)%s Fetch from GitHub (origin main)\n' "$BOLD" "$NC"
-        printf '  %sp)%s Push to GitHub (origin main)\n'   "$BOLD" "$NC"
+        printf '  %sf)%s Fetch from configured upstream\n' "$BOLD" "$NC"
+        printf '  %sp)%s Push to configured upstream\n'    "$BOLD" "$NC"
         printf '  %sa)%s AUTO: build kernel + reboot + test + email\n' "$BOLD" "$NC"
         printf '  %s0)%s Exit\n'                           "$BOLD" "$NC"
         printf '\n'
@@ -4325,6 +4556,11 @@ show_menu() {
                 printf '\nPress Enter to return to menu...'
                 read -r _dummy
                 ;;
+            i|I)
+                generate_html_index
+                printf '\nPress Enter to return to menu...'
+                read -r _dummy
+                ;;
             9)
                 commit_to_sos
                 printf '\nPress Enter to return to menu...'
@@ -4365,6 +4601,11 @@ show_menu() {
 }
 
 # Main argument parsing
+ORIGINAL_ARGS=""
+for _arg do
+    ORIGINAL_ARGS="${ORIGINAL_ARGS} $(shell_quote "$_arg")"
+done
+
 COMMAND=""
 while [ $# -gt 0 ]; do
     case $1 in
@@ -4427,6 +4668,10 @@ while [ $# -gt 0 ]; do
                 log_error "--branch requires a branch name"
                 exit 1
             fi
+            if ! GIT_MASTER=1 git check-ref-format --branch "$1" >/dev/null 2>&1; then
+                log_error "--branch: invalid git branch name '$1'"
+                exit 1
+            fi
             BRANCH="$1"
             ;;
         --repo)
@@ -4435,6 +4680,12 @@ while [ $# -gt 0 ]; do
                 log_error "--repo requires a URL"
                 exit 1
             fi
+            case "$1" in
+                -*|*[![:print:]]*)
+                    log_error "--repo: invalid URL '$1'"
+                    exit 1
+                    ;;
+            esac
             REPO_URL="$1"
             ;;
         --suite)
@@ -4464,6 +4715,10 @@ while [ $# -gt 0 ]; do
             shift
             if [ $# -eq 0 ]; then
                 log_error "--email requires an address"
+                exit 1
+            fi
+            if ! valid_email_list "$1"; then
+                log_error "--email: invalid recipient list"
                 exit 1
             fi
             REPORT_EMAIL="$1"
@@ -4497,7 +4752,7 @@ while [ $# -gt 0 ]; do
             fi
             PARALLELISM="$1"
             case "$PARALLELISM" in
-                ''|*[!0-9]*) log_error "--parallelism requires a positive integer, got: '$PARALLELISM'"; exit 1 ;;
+                ''|*[!0-9]*|0) log_error "--parallelism requires a positive integer, got: '$PARALLELISM'"; exit 1 ;;
             esac
             ;;
         --results-dir)
@@ -4518,6 +4773,17 @@ while [ $# -gt 0 ]; do
                 exit 1
             fi
             SAFE_IBS_RATE="$1"
+            case "$SAFE_IBS_RATE" in
+                0x*) _rate_digits=${SAFE_IBS_RATE#0x}; _rate_class='0-9A-Fa-f' ;;
+                *)   _rate_digits=$SAFE_IBS_RATE; _rate_class='0-9' ;;
+            esac
+            case "$_rate_digits" in
+                ''|*[!$_rate_class]*) log_error "--safe-ibs-rate requires a positive decimal or 0x hex period, got: '$SAFE_IBS_RATE'"; exit 1 ;;
+            esac
+            if [ -z "$(printf '%s' "$_rate_digits" | tr -d '0')" ]; then
+                log_error "--safe-ibs-rate requires a non-zero period, got: '$SAFE_IBS_RATE'"
+                exit 1
+            fi
             ;;
         --last-test)
             COMMAND="last-test"
@@ -4538,16 +4804,32 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+case "$PARALLELISM" in
+    ''|*[!0-9]*|0)
+        log_error "parallelism must be a positive integer, got: '$PARALLELISM'"
+        exit 1
+        ;;
+esac
+
 # Derive per-branch paths when --branch/--repo override the defaults.
 # Default branch uses the existing hardcoded paths (no behaviour change).
 _DEFAULT_REPO="https://github.com/AMDESE/freebsd-src.git"
 _DEFAULT_BRANCH="amdese/integration/main"
 if [ "$REPO_URL" != "$_DEFAULT_REPO" ] || [ "$BRANCH" != "$_DEFAULT_BRANCH" ]; then
-    _branch_tag=$(printf '%s' "$BRANCH" | tr '/' '-' | tr -cd 'a-zA-Z0-9-' | cut -c1-20)
+    _branch_prefix=$(printf '%s' "$BRANCH" | tr '/._' '---' | tr -cd 'a-zA-Z0-9-' | cut -c1-32)
+    if [ -z "$_branch_prefix" ]; then
+        log_error "--branch '$BRANCH' does not produce a usable path tag"
+        exit 1
+    fi
+    _branch_hash=$(printf '%s\n%s\n' "$REPO_URL" "$BRANCH" | cksum | awk '{print $1}')
+    _branch_tag="${_branch_prefix}-${_branch_hash}"
+    _rcd_branch_tag=$(printf '%s' "$_branch_tag" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
     SRC_DIR="${SCRIPT_DIR}/dev/freebsd-${_branch_tag}"
     AUTOTEST_SENTINEL="/var/db/ibs-autotest-sentinel-${_branch_tag}"
     LAST_COMMIT_FILE="/var/db/ibs-autotest-last-commit-${_branch_tag}"
-    RCD_SERVICE="/usr/local/etc/rc.d/ibs_autotest_${_branch_tag}"
+    AUTOTEST_RCD_NAME="ibs_autotest_${_rcd_branch_tag}"
+    RCD_SERVICE="/usr/local/etc/rc.d/${AUTOTEST_RCD_NAME}"
+    AUTOTEST_LOG="/var/log/ibs-autotest-${_branch_tag}.log"
 else
     _branch_tag="main"
 fi
