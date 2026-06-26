@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Author: Davi Chaves Azevedo
+# Author: davi.chavesazevedo@amd.com
 #
 # Purpose:
 #   Verify pmcstat(8) repeated-event counting behavior.  The default cases use

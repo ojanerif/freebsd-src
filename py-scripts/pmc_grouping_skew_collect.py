@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Author: Davi Chaves Azevedo
+# Author: davi.chavesazevedo@amd.com
 # Special thanks: ojanerif@amd.com for identifying deterministic
 # sequential-grouping behavior in the PMC skew measurements.
 #

@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2026 Advanced Micro Devices, Inc.
  *
- * Author: Davi Chaves Azevedo
+ * Author: davi.chavesazevedo@amd.com
  *
  * Purpose:
  *   Read AMD Zen core PMC MSRs through cpuctl(4) for ATF characterization.

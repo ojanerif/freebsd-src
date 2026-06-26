@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Sponsored by: Advanced Micro Devices, Inc.
- * Author: Davi Chaves Azevedo
+ * Author: davi.chavesazevedo@amd.com
  *
  * Tests for hwpmc/libpmc IBS class discovery and visibility.
  */

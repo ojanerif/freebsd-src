@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Author: Davi Chaves Azevedo
+# Author: davi.chavesazevedo@amd.com
 #
 # Purpose:
 #   Terminal logging, ANSI color policy, and live progress rendering helpers.

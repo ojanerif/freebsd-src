@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Author: Davi Chaves Azevedo
+# Author: davi.chavesazevedo@amd.com
 #
 # Purpose:
 #   Validate pmcstat(8) -b brace-list grouping on AMD Zen core PMCs without

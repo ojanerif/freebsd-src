@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2026 Advanced Micro Devices, Inc.
  *
- * Author: Davi Chaves Azevedo
+ * Author: davi.chavesazevedo@amd.com
  *
  * Purpose:
  *   Small libpmc-backed snapshot helper for AMD hwpmc(4) allocation tests.

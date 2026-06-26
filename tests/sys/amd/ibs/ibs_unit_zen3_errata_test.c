@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Author: Davi Chaves Azevedo
+ * Author: davi.chavesazevedo@amd.com
  *
  * [TC-UNIT-ZEN3ERR] — Software-only AMD Zen 3 IBS errata decode tests.
  *

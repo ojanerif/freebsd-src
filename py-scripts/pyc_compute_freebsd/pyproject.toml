@@ -3,7 +3,7 @@
 #
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 #
-# Author: Davi Chaves Azevedo
+# Author: davi.chavesazevedo@amd.com
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -17,7 +17,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "BSD-2-Clause" }
 authors = [
-  { name = "Davi Chaves Azevedo" }
+  { name = "Davi Chaves Azevedo", email = "davi.chavesazevedo@amd.com" }
 ]
 
 [tool.setuptools]

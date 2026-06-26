@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Sponsored by: Advanced Micro Devices, Inc.
- * Author: Davi Chaves Azevedo
+ * Author: davi.chavesazevedo@amd.com
  */
 
 #ifndef _IBS_HWPMC_UTILS_H_

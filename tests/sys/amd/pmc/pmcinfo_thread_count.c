@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2026 Advanced Micro Devices, Inc.
  *
- * Author: Davi Chaves Azevedo
+ * Author: davi.chavesazevedo@amd.com
  *
  * Purpose:
  *   Small helper for shell ATF tests that need a real libpmc row-state oracle.

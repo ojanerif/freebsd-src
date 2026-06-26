@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Author: Davi Chaves Azevedo
+# Author: davi.chavesazevedo@amd.com
 #
 # Purpose:
 #   Parse FreeBSD hwpmc CPUID strings and map AMD family/model to Zen metadata.

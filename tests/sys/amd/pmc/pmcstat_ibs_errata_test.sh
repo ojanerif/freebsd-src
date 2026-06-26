@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Author: Davi Chaves Azevedo
+# Author: davi.chavesazevedo@amd.com
 #
 # Purpose:
 #   Validate the real pmcstat(8) offline IBS decode path for AMD Zen 3 B0

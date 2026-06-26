@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2026 Advanced Micro Devices, Inc.
  *
- * Author: Davi Chaves Azevedo
+ * Author: davi.chavesazevedo@amd.com
  *
  * Purpose:
  *   Validate the FreeBSD hwpmc(4) PMU grouping ABI on AMD Zen core PMCs.

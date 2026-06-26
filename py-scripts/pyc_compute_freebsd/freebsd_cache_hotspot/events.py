@@ -3,7 +3,7 @@
 #
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 #
-# Author: Davi Chaves Azevedo
+# Author: davi.chavesazevedo@amd.com
 
 from __future__ import annotations
 

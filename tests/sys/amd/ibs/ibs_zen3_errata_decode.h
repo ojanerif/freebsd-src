@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Author: Davi Chaves Azevedo
+ * Author: davi.chavesazevedo@amd.com
  *
  * Pure software model for validating pmcstat's AMD Zen 3 IBS errata decode
  * policy.  This header intentionally has no hardware I/O and never consults
