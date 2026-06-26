@@ -50,7 +50,6 @@ pmcstat_errata_check_support()
 	if [ "$(uname -m)" != "amd64" ]; then
 		atf_skip "synthetic IBS pmclog layout is amd64-specific"
 	fi
-	command -v cc > /dev/null 2>&1 || atf_skip "cc not found in PATH"
 }
 
 pmcstat_errata_build_writer()

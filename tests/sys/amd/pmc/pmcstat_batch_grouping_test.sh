@@ -113,7 +113,7 @@ pmcstat_batch_event_available()
 	local event="$1"
 
 	pmcstat -C -q -p "$event" -o /dev/null -- /usr/bin/true \
-	    > /dev/null 2>pmcstat-event.err
+	    > /dev/null 2>/dev/null
 }
 
 pmcstat_batch_require_event()
@@ -270,7 +270,6 @@ brace_process_group_three_events_counts_body()
 brace_process_group_three_events_counts_cleanup()
 {
 	rm -f pmcstat-b-three.out pmcstat.err pmcstat-b-support.err
-	rm -f pmcstat-event.err
 }
 
 atf_test_case two_brace_process_groups_fit_without_mux cleanup
@@ -313,7 +312,6 @@ two_brace_process_groups_fit_without_mux_body()
 two_brace_process_groups_fit_without_mux_cleanup()
 {
 	rm -f pmcstat-b-two-groups.out pmcstat.err pmcstat-b-support.err
-	rm -f pmcstat-event.err
 }
 
 atf_test_case mixed_brace_and_plain_process_events cleanup
@@ -347,7 +345,6 @@ mixed_brace_and_plain_process_events_body()
 mixed_brace_and_plain_process_events_cleanup()
 {
 	rm -f pmcstat-b-mixed.out pmcstat.err pmcstat-b-support.err
-	rm -f pmcstat-event.err
 }
 
 atf_test_case malformed_brace_group_rejected cleanup
@@ -379,7 +376,6 @@ malformed_brace_group_rejected_body()
 malformed_brace_group_rejected_cleanup()
 {
 	rm -f pmcstat-b-malformed.out pmcstat.err pmcstat-b-support.err
-	rm -f pmcstat-event.err
 }
 
 atf_init_test_cases()

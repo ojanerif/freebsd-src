@@ -68,7 +68,7 @@ pmcstat_event_available()
 	local event="$1"
 
 	pmcstat -C -q -p "$event" -o /dev/null -- /usr/bin/true \
-	    > /dev/null 2>pmcstat-event.err
+	    > /dev/null 2>/dev/null
 }
 
 pmcstat_require_event()
@@ -270,7 +270,6 @@ multiple_system_events_are_independent_columns_body()
 multiple_system_events_are_independent_columns_cleanup()
 {
 	rm -f pmcstat.out pmcstat.err
-	rm -f pmcstat-event.err
 }
 
 atf_test_case same_system_event_group_has_same_count cleanup
@@ -333,7 +332,6 @@ same_system_event_group_has_same_count_body()
 same_system_event_group_has_same_count_cleanup()
 {
 	rm -f pmcstat-same.out pmcstat.err
-	rm -f pmcstat-event.err
 }
 
 atf_test_case repeated_process_cycles_have_bounded_skew cleanup
@@ -395,7 +393,6 @@ repeated_process_cycles_have_bounded_skew_body()
 repeated_process_cycles_have_bounded_skew_cleanup()
 {
 	rm -f pmcstat-cycles-skew.out pmcstat.err
-	rm -f pmcstat-event.err
 }
 
 atf_test_case repeated_sleep_cycles_have_bounded_skew cleanup
@@ -453,7 +450,6 @@ repeated_sleep_cycles_have_bounded_skew_body()
 repeated_sleep_cycles_have_bounded_skew_cleanup()
 {
 	rm -f pmcstat-cycles-skew-sleep.out pmcstat.err
-	rm -f pmcstat-event.err
 }
 
 atf_test_case mixed_cycles_instructions_are_independent_columns cleanup
@@ -495,7 +491,6 @@ mixed_cycles_instructions_are_independent_columns_body()
 mixed_cycles_instructions_are_independent_columns_cleanup()
 {
 	rm -f pmcstat-mixed-ipc.out pmcstat.err
-	rm -f pmcstat-event.err
 }
 
 atf_test_case mixed_cache_cycles_are_independent_columns cleanup
@@ -539,7 +534,6 @@ mixed_cache_cycles_are_independent_columns_body()
 mixed_cache_cycles_are_independent_columns_cleanup()
 {
 	rm -f pmcstat-mixed-cache.out pmcstat.err
-	rm -f pmcstat-event.err
 }
 
 atf_test_case oversubscribed_process_cycles_fail_cleanly cleanup
@@ -590,7 +584,6 @@ oversubscribed_process_cycles_fail_cleanly_body()
 oversubscribed_process_cycles_fail_cleanly_cleanup()
 {
 	rm -f pmcstat-oversub.out pmcstat.err
-	rm -f pmcstat-event.err
 }
 
 atf_init_test_cases()

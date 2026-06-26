@@ -34,18 +34,6 @@ pmc_atomicity_check_runtime_enabled()
 	fi
 }
 
-pmc_atomicity_check_amd_cpuid()
-{
-	local cpuid
-
-	cpuid=$(sysctl -n kern.hwpmc.cpuid 2>/dev/null) || \
-	    atf_skip "kern.hwpmc.cpuid is unavailable"
-	case "$cpuid" in
-	AuthenticAMD-*) ;;
-	*) atf_skip "AMD core PMC runtime requires AuthenticAMD CPU, got $cpuid" ;;
-	esac
-}
-
 pmc_atomicity_check_known_zen()
 {
 	local cpuid family model oldifs stepping vendor zen
@@ -126,7 +114,7 @@ pmc_atomicity_event_available()
 	local event="$1"
 
 	pmcstat -C -q -p "$event" -o /dev/null -- /usr/bin/true \
-	    > /dev/null 2>pmcstat-event.err
+	    > /dev/null 2>/dev/null
 }
 
 pmc_atomicity_require_event()
@@ -155,7 +143,7 @@ pmc_atomicity_read_k8_thread_rows()
 	out="$1"
 	err="$2"
 	helper=$(pmc_atomicity_helper)
-	if ! "$helper" k8-thread > "$out" 2> "$err"; then
+	if ! "$helper" > "$out" 2> "$err"; then
 		return 1
 	fi
 	lines=$(awk 'END { print NR + 0 }' "$out") || return 1
@@ -181,7 +169,7 @@ pmc_atomicity_assert_k8_thread_baseline()
 	out="$2"
 	err="$3"
 	count=$(pmc_atomicity_read_k8_thread_rows "$out" "$err") || \
-	    atf_fail "pmcinfo_thread_count k8-thread failed; see $err"
+	    atf_fail "pmcinfo_thread_count K8 THREAD row count failed; see $err"
 	if [ "$count" -ne "$baseline" ]; then
 		atf_fail "AMD PMC THREAD row count changed from baseline $baseline to $count; see $out"
 	fi
@@ -303,7 +291,6 @@ concurrent_process_allocations_no_residue_body()
 
 	pmc_atomicity_check_support
 	pmc_atomicity_check_runtime_enabled
-	pmc_atomicity_check_amd_cpuid
 	pmc_atomicity_check_known_zen
 	event="ls_not_halted_cyc"
 	pmc_atomicity_require_event "$event"
@@ -323,7 +310,7 @@ concurrent_process_allocations_no_residue_body()
 	printf '%s\n' "$lockdir/owner" > pmc_atomicity.lock.owner
 	baseline=$(pmc_atomicity_read_k8_thread_rows \
 	    pmcinfo-baseline.out pmcinfo-baseline.err) || \
-	    atf_fail "pmcinfo_thread_count k8-thread failed before race; see pmcinfo-baseline.err"
+	    atf_fail "pmcinfo_thread_count K8 THREAD row count failed before race; see pmcinfo-baseline.err"
 	successes=0
 
 	for i in $(jot "$iterations"); do
@@ -393,8 +380,7 @@ concurrent_process_allocations_no_residue_cleanup()
 	pmc_atomicity_cleanup_lock
 	# Keep baseline and per-iteration pmcinfo outputs under this prefix.
 	rm -f start.*.fifo ready.*.fifo pmcstat-a.*.out pmcstat-b.*.out \
-	    pmcstat-a.*.err pmcstat-b.*.err pmcinfo*.out pmcinfo*.err \
-	    pmcstat-event.err
+	    pmcstat-a.*.err pmcstat-b.*.err pmcinfo*.out pmcinfo*.err
 }
 
 atf_init_test_cases()
