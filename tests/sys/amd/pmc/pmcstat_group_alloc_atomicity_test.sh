@@ -44,10 +44,13 @@ pmc_atomicity_check_known_zen()
 	IFS=-
 	set -- $cpuid
 	IFS=$oldifs
+	if [ "$#" -ne 4 ]; then
+		atf_skip "cannot parse kern.hwpmc.cpuid=$cpuid; expected vendor-family-model-stepping"
+	fi
 	vendor=$1
 	family=$2
-	model=$3
-	stepping=$4
+	model=$(printf '%s\n' "$3" | tr '[:lower:]' '[:upper:]')
+	stepping=$(printf '%s\n' "$4" | tr '[:lower:]' '[:upper:]')
 	if [ "$vendor" != "AuthenticAMD" ]; then
 		atf_skip "AMD core PMC runtime requires AuthenticAMD CPU, got $cpuid"
 	fi
@@ -71,12 +74,6 @@ pmc_atomicity_check_known_zen()
 	# already-validated range still runs the atomicity case instead of
 	# being skipped as "not in the validated Zen map".
 	#
-	# Notable inclusions:
-	#   Family 17h model 70h  - Matisse-class Zen 2 (Ryzen 9 3900-series)
-	#   Family 1Ah model 3xh  - reserved Zen 5 desktop/embedded range that
-	#                           sits between the published 00h-2Fh and
-	#                           40h-4Fh windows
-	#
 	zen=
 	case "$family" in
 	23)
@@ -95,7 +92,7 @@ pmc_atomicity_check_known_zen()
 		;;
 	26)
 		case "$model" in
-		0[0-9A-F]|1[0-9A-F]|2[0-9A-F]|3[0-9A-F]|4[0-9A-F]|6[0-9A-F]|7[0-9A-F])
+		0[0-9A-F]|1[0-9A-F]|2[0-9A-F]|4[0-9A-F]|6[0-9A-F]|7[0-9A-F])
 			zen="Zen 5" ;;
 		5[0-9A-F]|8[0-9A-F]|9[0-9A-F]|A[0-9A-F]|C[0-9A-F])
 			zen="Zen 6" ;;
@@ -103,6 +100,9 @@ pmc_atomicity_check_known_zen()
 		;;
 	esac
 	if [ -z "$zen" ]; then
+		if [ "$family" = 26 ]; then
+			atf_skip "AMD Family 1Ah Model ${model} is outside the validated Zen 5/6 model ranges; check the current PPR before enabling PMC grouping runtime"
+		fi
 		atf_skip "AMD Family ${family} Model ${model} is not in the validated Zen map"
 	fi
 	printf 'AMD core PMC runtime target: %s family=%s model=%s stepping=%s\n' \
@@ -267,15 +267,22 @@ pmc_atomicity_release_start()
 
 pmc_atomicity_cleanup_lock()
 {
-	local owner
+	local lockdir owner
+
+	lockdir="/var/run/pmc_atomicity.lock.d"
 
 	if [ -f pmc_atomicity.lock.owner ]; then
 		if read owner < pmc_atomicity.lock.owner; then
-			rm -f "$owner"
+			if [ "$owner" = "$lockdir/owner" ]; then
+				rm -f "$owner"
+			else
+				printf 'not removing unexpected PMC atomicity lock owner path: %s\n' \
+				    "$owner" >&2
+			fi
 		fi
 		rm -f pmc_atomicity.lock.owner
 	fi
-	rmdir /var/run/pmc_atomicity.lock.d 2>/dev/null || true
+	rmdir "$lockdir" 2>/dev/null || true
 }
 
 atf_test_case concurrent_process_allocations_no_residue cleanup

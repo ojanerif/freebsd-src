@@ -13,6 +13,8 @@
 
 pmcstat_batch_check_support()
 {
+	local err
+
 	if ! kldstat -n hwpmc > /dev/null 2>&1 &&
 	    ! sysctl -n kern.hwpmc.cpuid > /dev/null 2>&1; then
 		atf_skip "hwpmc unavailable: no hwpmc KLD and no kern.hwpmc.cpuid"
@@ -27,7 +29,11 @@ pmcstat_batch_check_support()
 		if grep -qi 'illegal option' pmcstat-b-support.err; then
 			atf_skip "pmcstat -b is not available on this userland"
 		fi
-		atf_skip "pmcstat -b -L failed; see pmcstat-b-support.err"
+		err=$(cat pmcstat-b-support.err)
+		if [ -z "$err" ]; then
+			err="no stderr; see pmcstat-b-support.err"
+		fi
+		atf_skip "pmcstat -b -L failed: $err"
 	fi
 }
 
@@ -48,10 +54,13 @@ pmcstat_batch_check_known_zen()
 	IFS=-
 	set -- $cpuid
 	IFS=$oldifs
+	if [ "$#" -ne 4 ]; then
+		atf_skip "cannot parse kern.hwpmc.cpuid=$cpuid; expected vendor-family-model-stepping"
+	fi
 	vendor=$1
 	family=$2
-	model=$3
-	stepping=$4
+	model=$(printf '%s\n' "$3" | tr '[:lower:]' '[:upper:]')
+	stepping=$(printf '%s\n' "$4" | tr '[:lower:]' '[:upper:]')
 	if [ "$vendor" != "AuthenticAMD" ]; then
 		atf_skip "AMD core grouping runtime requires AuthenticAMD CPU, got $cpuid"
 	fi
@@ -87,7 +96,7 @@ pmcstat_batch_check_known_zen()
 		;;
 	26)
 		case "$model" in
-		0[0-9A-F]|1[0-9A-F]|2[0-9A-F]|3[0-9A-F]|4[0-9A-F]|6[0-9A-F]|7[0-9A-F])
+		0[0-9A-F]|1[0-9A-F]|2[0-9A-F]|4[0-9A-F]|6[0-9A-F]|7[0-9A-F])
 			zen="Zen 5" ;;
 		5[0-9A-F]|8[0-9A-F]|9[0-9A-F]|A[0-9A-F]|C[0-9A-F])
 			zen="Zen 6" ;;
@@ -95,6 +104,9 @@ pmcstat_batch_check_known_zen()
 		;;
 	esac
 	if [ -z "$zen" ]; then
+		if [ "$family" = 26 ]; then
+			atf_skip "AMD Family 1Ah Model ${model} is outside the validated Zen 5/6 model ranges; check the current PPR before enabling pmcstat -b grouping runtime"
+		fi
 		atf_skip "AMD Family ${family} Model ${model} is not in the validated Zen map"
 	fi
 	printf 'AMD core PMC grouping target: %s family=%s model=%s stepping=%s\n' \

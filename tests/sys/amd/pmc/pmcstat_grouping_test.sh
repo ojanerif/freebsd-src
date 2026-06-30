@@ -22,6 +22,18 @@ pmcstat_check_support()
 	fi
 }
 
+pmcstat_stderr_or_note()
+{
+	local err
+	local file="$1"
+
+	err=$(cat "$file")
+	if [ -z "$err" ]; then
+		err="no stderr; see $file"
+	fi
+	printf '%s\n' "$err"
+}
+
 pmcstat_check_grouping_runtime_enabled()
 {
 	if [ "$(atf_config_get amd.pmc.grouping.runtime false)" != "true" ]; then
@@ -104,7 +116,7 @@ pmcstat_capture_two_events()
 	duration="${4:-2}"
 	if ! pmcstat -c 0 -s "$event_a" -s "$event_b" -w 1 \
 	    -o "$out" sleep "$duration" > /dev/null 2>pmcstat.err; then
-		err=$(cat pmcstat.err)
+		err=$(pmcstat_stderr_or_note pmcstat.err)
 		atf_fail "pmcstat failed with $event_a,$event_b: $err"
 	fi
 	if [ ! -s "$out" ]; then
@@ -123,7 +135,7 @@ pmcstat_capture_process_two_events()
 	duration="${4:-2}"
 	if ! pmcstat -C -q -p "$event_a" -p "$event_b" -o "$out" -- \
 	    sleep "$duration" > /dev/null 2>pmcstat.err; then
-		err=$(cat pmcstat.err)
+		err=$(pmcstat_stderr_or_note pmcstat.err)
 		atf_fail "pmcstat failed with $event_a,$event_b: $err"
 	fi
 	if [ ! -s "$out" ]; then
@@ -152,7 +164,7 @@ pmcstat_capture_process_two_events_cpubound()
 	if ! cpuset -l 0 pmcstat -C -q -p "$event_a" -p "$event_b" \
 	    -o "$out" -- dd if=/dev/zero of=/dev/null bs=4096 \
 	    count="$block_count" > /dev/null 2>pmcstat.err; then
-		err=$(cat pmcstat.err)
+		err=$(pmcstat_stderr_or_note pmcstat.err)
 		atf_fail "pmcstat failed with $event_a,$event_b (cpu-bound): $err"
 	fi
 	if [ ! -s "$out" ]; then
@@ -577,7 +589,7 @@ oversubscribed_process_cycles_fail_cleanly_body()
 		if [ ! -s pmcstat.err ]; then
 			atf_fail "oversubscribed pmcstat run failed without diagnostics"
 		fi
-		err=$(cat pmcstat.err)
+		err=$(pmcstat_stderr_or_note pmcstat.err)
 		printf 'oversubscribed duplicate cycles failed cleanly: %s\n' "$err"
 	fi
 }
