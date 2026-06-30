@@ -149,7 +149,7 @@ def cmd_ibs(args: argparse.Namespace) -> None:
     if args.ldlat and not topo.pmc.ibs_ldlat:
         raise SystemExit(
             "IBS load-latency filter (--ldlat) requires CPUID 0x8000001B EAX[12]; "
-            "available on Zen 5 only"
+            "not advertised by this CPU"
         )
     result = run_pmcstat_ibs(
         args.command,
