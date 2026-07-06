@@ -98,15 +98,20 @@ ATF_TC_BODY(ibs_detect_msr_access, tc)
 		ATF_REQUIRE(read_msr(cpu, MSR_AMD64_ICIBSEXTDCTL, &val) == 0);
 
 		/*
-		 * MSR_AMD64_IBSOPDATA4 is a read-only status register that is
+		 * MSR_AMD64_IBSOPDATA4 is a read-only status register
 		 * populated by hardware only during active IBS Op sampling.
-		 * Attempting to read it when IBS Op is not active generates a
-		 * hardware error.  Skip rather than fail in that case.
+		 * Check IbsOpEn (IBSOPCTL bit 17) before attempting the read;
+		 * skip with a precise message if the Op engine is not active
+		 * rather than falling through on EFAULT.
 		 */
+		ATF_REQUIRE(read_msr(cpu, MSR_AMD64_IBSOPCTL, &val) == 0);
+		if (!(val & IBS_OP_EN))
+			atf_tc_skip("MSR_AMD64_IBSOPDATA4 requires active IBS "
+			    "Op sampling (IbsOpEn=0); not exercised in this run");
 		r = read_msr(cpu, MSR_AMD64_IBSOPDATA4, &val);
 		if (r != 0)
-			atf_tc_skip("MSR_AMD64_IBSOPDATA4 not accessible "
-			    "without active IBS Op sampling: %s", strerror(r));
+			atf_tc_skip("MSR_AMD64_IBSOPDATA4 not accessible: %s",
+			    strerror(r));
 	}
 }
 

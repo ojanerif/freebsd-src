@@ -449,7 +449,7 @@ ATF_TC_HEAD(ibs_op_data4_zen4, tc)
 
 ATF_TC_BODY(ibs_op_data4_zen4, tc)
 {
-	uint64_t original, written, readback;
+	uint64_t original, written, readback, opctl;
 	int error;
 
 	if (!cpu_supports_ibs())
@@ -457,6 +457,17 @@ ATF_TC_BODY(ibs_op_data4_zen4, tc)
 
 	if (!cpu_is_zen4())
 		atf_tc_skip("CPU is not Zen 4+ (Op Data 4 not supported)");
+
+	/*
+	 * MSR_AMD64_IBSOPDATA4 is populated by hardware only during active
+	 * IBS Op sampling.  Check IbsOpEn (IBSOPCTL bit 17) before
+	 * attempting the read; skip with a precise message if the Op engine
+	 * is not active rather than falling through on EFAULT.
+	 */
+	error = read_msr(0, MSR_AMD64_IBSOPCTL, &opctl);
+	if (error != 0 || !(opctl & IBS_OP_EN))
+		atf_tc_skip("MSR_AMD64_IBSOPDATA4 requires active IBS Op "
+		    "sampling (IbsOpEn=0); skipping field verification");
 
 	error = read_msr(0, MSR_AMD64_IBSOPDATA4, &original);
 	if (error != 0)
