@@ -30,6 +30,7 @@
 #include <atf-c.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -154,6 +155,22 @@ sev_leaf_reachable(void)
 	return (regs[0] >= CPUID_AMD_SEV_INFO);
 }
 
+/*
+ * Combined prerequisite guard for TC-02, TC-03, TC-04.
+ * Calls atf_tc_skip() (which uses longjmp) if either condition fails,
+ * so callers return immediately without further fd opens or CPUID calls.
+ * TC-01 is excluded because it tests the leaf presence itself.
+ */
+static void
+sev_require_prereqs(void)
+{
+	if (!sev_is_amd())
+		atf_tc_skip("CPU is not AuthenticAMD");
+	if (!sev_leaf_reachable())
+		atf_tc_skip("CPUID leaf 0x8000001F not available on this CPU "
+		    "(pre-Naples or too old)");
+}
+
 /* -------------------------------------------------------------------------
  * TC-DET-SEV-01  sev_cpuid_leaf_present
  *
@@ -199,17 +216,21 @@ ATF_TC_BODY(sev_cpuid_leaf_present, tc)
  *   ECX — maximum simultaneous encrypted guests
  *   EDX — minimum SEV ASID
  *
- * Asserts at least one of SME or SEV is advertised.  A CPU that reaches
- * leaf 0x8000001F but reports neither is unexpected and likely a firmware
- * defect.
+ * Asserts:
+ *   - At least one of SME or SEV is advertised (Naples+ invariant).
+ *   - PhysAddrReduction (EBX[11:6]) >= 1 when SME or SEV is present.
+ *   - ECX (max encrypted guests) > 0 when SEV is advertised.
+ *   - EDX (min SEV ASID) <= ECX (ASID range invariant from AMD APM).
+ *   - VMPL is set when SEV-SNP is advertised (architectural dependency).
  * ---------------------------------------------------------------------- */
 ATF_TC(sev_capability_probe);
 ATF_TC_HEAD(sev_capability_probe, tc)
 {
 	atf_tc_set_md_var(tc, "descr",
 	    "Read CPUID 0x8000001F and report AMD memory encryption capabilities. "
-	    "Verifies SME or SEV is advertised on Naples+ hardware. "
-	    "Pure CPUID discovery — no MSR access, no hardware state changed.");
+	    "Verifies SME or SEV is advertised on Naples+ hardware, "
+	    "PhysAddrReduction >= 1, ECX/EDX ASID range invariant, and "
+	    "SEV-SNP implies VMPL. Pure CPUID — no MSR access, no state changed.");
 	atf_tc_set_md_var(tc, "require.user", "root");
 }
 
@@ -219,12 +240,7 @@ ATF_TC_BODY(sev_capability_probe, tc)
 	uint32_t cbitpos, reduced_phys;
 	int error;
 
-	if (!sev_is_amd())
-		atf_tc_skip("CPU is not AuthenticAMD");
-
-	if (!sev_leaf_reachable())
-		atf_tc_skip("CPUID leaf 0x8000001F not available on this CPU "
-		    "(pre-Naples or too old)");
+	sev_require_prereqs();
 
 	error = sev_do_cpuid(CPUID_AMD_SEV_INFO, regs);
 	ATF_REQUIRE_MSG(error == 0,
@@ -242,14 +258,54 @@ ATF_TC_BODY(sev_capability_probe, tc)
 	printf("  SEV-ES:  %s\n", (regs[0] & AMDID_SEV_ES)  ? "yes" : "no");
 	printf("  SEV-SNP: %s\n", (regs[0] & AMDID_SEV_SNP) ? "yes" : "no");
 	printf("  VMPL:    %s\n", (regs[0] & AMDID_VMPL)    ? "yes" : "no");
-	printf("  C-bit position:        %u\n", cbitpos);
+	printf("  C-bit position:          %u\n", cbitpos);
 	printf("  Physical addr reduction: %u bits\n", reduced_phys);
-	printf("  Max encrypted guests:  %u\n", regs[2]);
-	printf("  Min SEV ASID:          %u\n", regs[3]);
+	printf("  Max encrypted guests:    %u\n", regs[2]);
+	printf("  Min SEV ASID:            %u\n", regs[3]);
 
 	ATF_CHECK_MSG((regs[0] & (AMDID_SME | AMDID_SEV)) != 0,
 	    "CPUID 0x8000001F EAX=0x%08x: neither SME nor SEV advertised — "
 	    "unexpected on Naples+ hardware; possible firmware defect", regs[0]);
+
+	/*
+	 * PhysAddrReduction must be >= 1 when memory encryption is present.
+	 * Zero means no address bit is repurposed as C-bit, which is
+	 * architecturally invalid for any SME/SEV-capable CPU.
+	 * Reference: AMD64 APM Vol. 2, Section 15.34.1.
+	 */
+	if (regs[0] & (AMDID_SME | AMDID_SEV))
+		ATF_CHECK_MSG(reduced_phys >= 1,
+		    "EBX[11:6] PhysAddrReduction=%u is 0 but SME/SEV is "
+		    "advertised — architecturally invalid; firmware defect",
+		    reduced_phys);
+
+	/*
+	 * ECX reports the maximum number of simultaneously encrypted guests
+	 * (i.e., the number of SEV ASIDs).  Must be > 0 if SEV is present.
+	 * EDX reports the minimum ASID usable for SEV; ASIDs below EDX are
+	 * reserved for SME.  AMD APM invariant: EDX <= ECX.
+	 * Reference: AMD64 APM Vol. 2, Section 15.34.10.
+	 */
+	if (regs[0] & AMDID_SEV) {
+		ATF_CHECK_MSG(regs[2] > 0,
+		    "ECX (max encrypted guests) = 0 but SEV is advertised — "
+		    "firmware defect");
+		ATF_CHECK_MSG(regs[3] <= regs[2],
+		    "EDX (min SEV ASID) %u > ECX (max encrypted guests) %u — "
+		    "ASID range invariant violated; firmware defect",
+		    regs[3], regs[2]);
+	}
+
+	/*
+	 * SEV-SNP requires VM Permission Levels (VMPL); the two features
+	 * were introduced together in Zen 3 and VMPL is architecturally
+	 * mandated when SNP is present.
+	 * Reference: AMD64 APM Vol. 2, Section 15.36.
+	 */
+	if (regs[0] & AMDID_SEV_SNP)
+		ATF_CHECK_MSG((regs[0] & AMDID_VMPL) != 0,
+		    "EAX=0x%08x: SEV-SNP advertised but VMPL is not set — "
+		    "architecturally invalid; firmware defect", regs[0]);
 }
 
 /* -------------------------------------------------------------------------
@@ -262,8 +318,10 @@ ATF_TC_BODY(sev_capability_probe, tc)
  * hypervisor cannot forge its value.  On bare metal or a non-SEV VM, all
  * bits read as 0, which is also a valid result.
  *
- * Consistency check: if the MSR reports SEV active (bit 0), CPUID EAX[1]
- * must also be set.  A mismatch indicates a firmware or hypervisor defect.
+ * Consistency checks (AMD APM Vol. 2, Section 15.34.10):
+ *   - SEV active     → CPUID EAX[1] (SEV capability) must be set.
+ *   - SEV-ES active  → SEV must also be active (strict hierarchy).
+ *   - SEV-SNP active → SEV-ES must also be active (strict hierarchy).
  * ---------------------------------------------------------------------- */
 ATF_TC(sev_status_msr_read);
 ATF_TC_HEAD(sev_status_msr_read, tc)
@@ -271,7 +329,8 @@ ATF_TC_HEAD(sev_status_msr_read, tc)
 	atf_tc_set_md_var(tc, "descr",
 	    "Read MSR 0xC0010131 (SEV_STATUS) via cpuctl(4) and report active "
 	    "SEV/SEV-ES/SEV-SNP state.  A value of 0 is valid on bare metal or "
-	    "in a non-SEV VM.  Checks consistency against CPUID 0x8000001F EAX.");
+	    "in a non-SEV VM.  Checks MSR-vs-CPUID consistency and enforces the "
+	    "SEV < SEV-ES < SEV-SNP activation hierarchy.");
 	atf_tc_set_md_var(tc, "require.user", "root");
 }
 
@@ -281,11 +340,7 @@ ATF_TC_BODY(sev_status_msr_read, tc)
 	uint64_t sev_status;
 	int error;
 
-	if (!sev_is_amd())
-		atf_tc_skip("CPU is not AuthenticAMD");
-
-	if (!sev_leaf_reachable())
-		atf_tc_skip("CPUID leaf 0x8000001F not available on this CPU");
+	sev_require_prereqs();
 
 	error = sev_read_msr(MSR_AMD64_SEV, &sev_status);
 	if (error == ENODEV || error == ENXIO)
@@ -294,8 +349,7 @@ ATF_TC_BODY(sev_status_msr_read, tc)
 	ATF_REQUIRE_MSG(error == 0,
 	    "RDMSR(0xC0010131) failed: %s", strerror(error));
 
-	printf("MSR 0xC0010131 (SEV_STATUS): 0x%016llx\n",
-	    (unsigned long long)sev_status);
+	printf("MSR 0xC0010131 (SEV_STATUS): 0x%016" PRIx64 "\n", sev_status);
 	printf("  SEV active:     %s\n",
 	    (sev_status & MSR_AMD64_SEV_ENABLED)     ? "yes" : "no");
 	printf("  SEV-ES active:  %s\n",
@@ -304,7 +358,7 @@ ATF_TC_BODY(sev_status_msr_read, tc)
 	    (sev_status & MSR_AMD64_SEV_SNP_ENABLED) ? "yes" : "no");
 
 	/*
-	 * Consistency check: MSR active implies CPUID capability set.
+	 * MSR active implies CPUID capability set.
 	 * The reverse is not required — capability present does not mean
 	 * the feature is currently active on this VM/host.
 	 */
@@ -317,6 +371,22 @@ ATF_TC_BODY(sev_status_msr_read, tc)
 		    "Consistency fail: MSR SEV_STATUS[0]=1 but CPUID "
 		    "0x8000001F EAX[1]=0 — firmware or hypervisor defect");
 	}
+
+	/*
+	 * Activation hierarchy: SEV-ES requires SEV; SEV-SNP requires SEV-ES.
+	 * A guest cannot be in SEV-ES mode without being in SEV mode, and
+	 * cannot be in SEV-SNP mode without being in SEV-ES mode.
+	 * Any deviation is an impossible hardware/hypervisor state.
+	 */
+	if (sev_status & MSR_AMD64_SEV_ES_ENABLED)
+		ATF_CHECK_MSG((sev_status & MSR_AMD64_SEV_ENABLED) != 0,
+		    "Hierarchy violation: SEV-ES active (bit 1) but SEV not "
+		    "active (bit 0) — impossible hardware state");
+
+	if (sev_status & MSR_AMD64_SEV_SNP_ENABLED)
+		ATF_CHECK_MSG((sev_status & MSR_AMD64_SEV_ES_ENABLED) != 0,
+		    "Hierarchy violation: SEV-SNP active (bit 2) but SEV-ES "
+		    "not active (bit 1) — impossible hardware state");
 }
 
 /* -------------------------------------------------------------------------
@@ -347,11 +417,7 @@ ATF_TC_BODY(sev_cbitpos_valid, tc)
 	uint32_t cbitpos;
 	int error;
 
-	if (!sev_is_amd())
-		atf_tc_skip("CPU is not AuthenticAMD");
-
-	if (!sev_leaf_reachable())
-		atf_tc_skip("CPUID leaf 0x8000001F not available on this CPU");
+	sev_require_prereqs();
 
 	error = sev_do_cpuid(CPUID_AMD_SEV_INFO, regs);
 	ATF_REQUIRE_MSG(error == 0,
