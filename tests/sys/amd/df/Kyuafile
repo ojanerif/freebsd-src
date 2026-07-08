@@ -1,0 +1,8 @@
+syntax(2)
+
+test_suite("FreeBSD")
+
+atf_test_program{name="df_detect_test", }
+atf_test_program{name="df_interconnect_test", }
+atf_test_program{name="df_smp_test", }
+atf_test_program{name="df_stress_test", }
