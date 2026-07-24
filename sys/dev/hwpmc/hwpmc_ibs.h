@@ -276,9 +276,13 @@ struct pmc_md_ibs_pmc {
 #define IBS_PMC_CAPS			(PMC_CAP_INTERRUPT | PMC_CAP_USER | \
 	PMC_CAP_SYSTEM | PMC_CAP_EDGE | PMC_CAP_QUALIFIER | PMC_CAP_PRECISE)
 
+struct pmc_process; /* forward declaration for thread csw prototypes */
+
 int	pmc_ibs_initialize(struct pmc_mdep *md, int ncpu);
 void	pmc_ibs_finalize(struct pmc_mdep *md);
 int	pmc_ibs_intr(struct trapframe *tf);
+void	pmc_ibs_thread_csw_in(int cpu, struct pmc_process *pp);
+void	pmc_ibs_thread_csw_out(int cpu, struct pmc_process *pp);
 
 #endif /* _KERNEL */
 #endif /* _DEV_HWPMC_IBS_H_ */

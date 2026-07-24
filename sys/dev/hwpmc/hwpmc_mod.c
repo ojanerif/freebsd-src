@@ -1450,6 +1450,7 @@ pmc_process_csw_in(struct thread *td)
 	struct pmc_thread *pt;
 	struct proc *p;
 	pmc_value_t newvalue;
+	uint64_t group_pending;	/* bitmask: ri of group leaders pending start */
 	int cpu;
 	u_int adjri, ri;
 
@@ -1472,6 +1473,7 @@ pmc_process_csw_in(struct thread *td)
 	    ("[pmc,%d] weird CPU id %d", __LINE__, cpu));
 
 	pc = pmc_pcpu[cpu];
+	group_pending = 0;
 	for (ri = 0; ri < md->pmd_npmc; ri++) {
 		if ((pm = pp->pp_pmcs[ri].pp_pmc) == NULL)
 			continue;
@@ -1581,8 +1583,75 @@ pmc_process_csw_in(struct thread *td)
 		/* Indicate that we desire this to run. */
 		pm->pm_pcpu_state[cpu].pps_cpustate = 1;
 
-		/* Start the PMC. */
-		(void)pcd->pcd_start_pmc(cpu, adjri, pm);
+		/*
+		 * Group-aware start.  Group members are written above but
+		 * their hardware start is deferred so the whole group fires
+		 * atomically in the second pass below.
+		 */
+		if (PMC_IS_GROUP_MEMBER(pm)) {
+			/*
+			 * Sibling: written above; defer hardware start to the
+			 * second pass so the whole group fires atomically.
+			 * However, if the group leader is not attached to this
+			 * process the second pass will never fire for that ri,
+			 * so we must start this PMC immediately as ungrouped to
+			 * avoid a runcount-increment-but-never-started leak.
+			 */
+			u_int lri = PMC_TO_ROWINDEX(pm->pm_group_leader);
+			if (pp->pp_pmcs[lri].pp_pmc != pm->pm_group_leader) {
+				/* Leader absent from this process — start now */
+				(void)pcd->pcd_start_pmc(cpu, adjri, pm);
+			}
+			/* else: leader present; second pass starts this PMC */
+		} else if (PMC_IS_GROUP_LEADER(pm)) {
+			/* leader: defer start; record in bitmask */
+			KASSERT(ri < 64,
+			    ("[pmc,%d] ri %u too large for group_pending",
+			    __LINE__, ri));
+			group_pending |= (1ULL << ri);
+		} else {
+			/* ungrouped PMC: start immediately as before */
+			(void)pcd->pcd_start_pmc(cpu, adjri, pm);
+		}
+	}
+
+	/*
+	 * Second pass: start grouped PMCs atomically.  All group PMCs have
+	 * been configured and written above.  Start siblings first, then the
+	 * leader, to minimise leader→sibling skew.  We are still inside the
+	 * critical section so preemption is disabled.
+	 */
+	while (group_pending != 0) {
+		struct pmc *leader, *sib;
+		struct pmc_classdep *lpcd;
+		u_int ladjri, sri;
+
+		ri = (u_int)ffsll((long long)group_pending) - 1;
+		group_pending &= ~(1ULL << ri);
+
+		leader = pp->pp_pmcs[ri].pp_pmc;
+		if (leader == NULL || leader->pm_state != PMC_STATE_RUNNING)
+			continue;
+
+		/* Start siblings first — only those attached to this process */
+		LIST_FOREACH(sib, &leader->pm_group_siblings, pm_group_next) {
+			sri = PMC_TO_ROWINDEX(sib);
+			/*
+			 * A sibling may belong to this group but not be attached
+			 * to this process or not be running.  Only start it if it
+			 * was configured in the first pass above (i.e., it appears
+			 * in pp->pp_pmcs[sri] and is RUNNING).
+			 */
+			if (pp->pp_pmcs[sri].pp_pmc != sib)
+				continue;
+			if (sib->pm_state != PMC_STATE_RUNNING)
+				continue;
+			lpcd = pmc_ri_to_classdep(md, sri, &ladjri);
+			(void)lpcd->pcd_start_pmc(cpu, ladjri, sib);
+		}
+		/* Start leader last */
+		lpcd = pmc_ri_to_classdep(md, ri, &ladjri);
+		(void)lpcd->pcd_start_pmc(cpu, ladjri, leader);
 	}
 
 	/*
@@ -1671,10 +1740,61 @@ pmc_process_csw_out(struct thread *td)
 		 * This two-step dance should avoid race conditions where
 		 * an interrupt re-enables the PMC after this code has
 		 * already checked the pm_stalled flag.
+		 *
+		 * For grouped PMCs, the leader stops itself and all siblings
+		 * atomically.  Siblings that appear first in the loop are
+		 * marked inactive but not stopped here; the leader handles them.
 		 */
 		pm->pm_pcpu_state[cpu].pps_cpustate = 0;
-		if (pm->pm_pcpu_state[cpu].pps_stalled == 0)
-			(void)pcd->pcd_stop_pmc(cpu, adjri, pm);
+		if (pm->pm_pcpu_state[cpu].pps_stalled == 0) {
+			if (PMC_IS_GROUP_MEMBER(pm)) {
+				/*
+				 * Sibling: normally the group leader's stop
+				 * path handles all siblings atomically.
+				 * However, if the leader is absent from this
+				 * process (or the process is exiting), the
+				 * leader's stop path will never run, so we
+				 * must stop this sibling directly — mirroring
+				 * the csw_in fallback that started it alone.
+				 */
+				u_int lri = PMC_TO_ROWINDEX(pm->pm_group_leader);
+				if (pp == NULL ||
+				    pp->pp_pmcs[lri].pp_pmc !=
+				    pm->pm_group_leader) {
+					(void)pcd->pcd_stop_pmc(cpu, adjri, pm);
+				}
+				/* else: leader's stop code handles this PMC */
+			} else if (PMC_IS_GROUP_LEADER(pm)) {
+				struct pmc *sib;
+				u_int sri, sadjri;
+				struct pmc_classdep *spcd;
+
+				/* Stop leader first */
+				(void)pcd->pcd_stop_pmc(cpu, adjri, pm);
+				/* Stop non-stalled siblings attached to this process */
+				LIST_FOREACH(sib, &pm->pm_group_siblings,
+				    pm_group_next) {
+					sri = PMC_TO_ROWINDEX(sib);
+					/*
+					 * Only stop siblings actually running in
+					 * this process's context.  A sibling may
+					 * be attached to a different process.
+					 */
+					if (pp == NULL ||
+					    pp->pp_pmcs[sri].pp_pmc != sib)
+						continue;
+					if (sib->pm_pcpu_state[cpu].pps_stalled)
+						continue;
+					spcd = pmc_ri_to_classdep(md, sri,
+					    &sadjri);
+					(void)spcd->pcd_stop_pmc(cpu, sadjri,
+					    sib);
+				}
+			} else {
+				/* ungrouped PMC: original behaviour */
+				(void)pcd->pcd_stop_pmc(cpu, adjri, pm);
+			}
+		}
 
 		KASSERT(counter_u64_fetch(pm->pm_runcount) > 0,
 		    ("[pmc,%d] pm=%p runcount %ju", __LINE__, pm,
@@ -2644,6 +2764,8 @@ pmc_allocate_pmc_descriptor(void)
 	pmc->pm_runcount = counter_u64_alloc(M_WAITOK);
 	pmc->pm_pcpu_state = malloc(sizeof(struct pmc_pcpu_state) * mp_ncpus,
 	    M_PMC, M_WAITOK | M_ZERO);
+	LIST_INIT(&pmc->pm_group_siblings);
+	/* pm_group_leader, pm_group_next, pm_group_size zeroed by M_ZERO */
 	PMCDBG1(PMC,ALL,1, "allocate-pmc -> pmc=%p", pmc);
 
 	return (pmc);
@@ -2730,6 +2852,25 @@ pmc_release_pmc_descriptor(struct pmc *pm)
 
 	PMCDBG3(PMC,REL,1, "release-pmc pmc=%p ri=%d mode=%d", pm, ri,
 	    mode);
+
+	/*
+	 * Unlink from PMC group before touching hardware.  The sx lock
+	 * (SX_XLOCKED) protects the group list linkage.
+	 */
+	if (PMC_IS_GROUP_MEMBER(pm)) {
+		struct pmc *leader = pm->pm_group_leader;
+		LIST_REMOVE(pm, pm_group_next);
+		leader->pm_group_size--;
+		pm->pm_group_leader = NULL;
+	}
+	if (PMC_IS_GROUP_LEADER(pm)) {
+		struct pmc *s;
+		/* Orphan all siblings; they keep running ungrouped */
+		LIST_FOREACH(s, &pm->pm_group_siblings, pm_group_next)
+			s->pm_group_leader = NULL;
+		LIST_INIT(&pm->pm_group_siblings);
+		pm->pm_group_size = 0;
+	}
 
 	/*
 	 * First, we take the PMC off hardware.
@@ -4244,6 +4385,56 @@ pmc_syscall_handler(struct thread *td, void *syscall_args)
 			break;
 
 		error = pmc_do_op_pmcattach(td, a);
+	}
+	break;
+
+	/*
+	 * Link two PMCs into an atomic group.
+	 */
+	case PMC_OP_PMCGROUPLINK:
+	{
+		struct pmc *leader, *member;
+		struct pmc_op_pmcgrouplink gl;
+
+		if ((error = copyin(arg, &gl, sizeof(gl))) != 0)
+			break;
+
+		if ((error = pmc_find_pmc(gl.pm_leader, &leader)) != 0)
+			break;
+		if ((error = pmc_find_pmc(gl.pm_member, &member)) != 0)
+			break;
+
+		/* leader and member must be distinct */
+		if (leader == member) {
+			error = EINVAL;
+			break;
+		}
+
+		/* Neither can be running when grouped */
+		if (leader->pm_state == PMC_STATE_RUNNING ||
+		    member->pm_state == PMC_STATE_RUNNING) {
+			error = EBUSY;
+			break;
+		}
+
+		/* leader must not already be a sibling of another group */
+		if (PMC_IS_GROUP_MEMBER(leader)) {
+			error = EINVAL;
+			break;
+		}
+
+		/* member must not already belong to any group */
+		if (PMC_IS_GROUP_MEMBER(member) ||
+		    PMC_IS_GROUP_LEADER(member)) {
+			error = EINVAL;
+			break;
+		}
+
+		/* Link member into leader's sibling list */
+		member->pm_group_leader = leader;
+		LIST_INSERT_HEAD(&leader->pm_group_siblings, member,
+		    pm_group_next);
+		leader->pm_group_size++;
 	}
 	break;
 

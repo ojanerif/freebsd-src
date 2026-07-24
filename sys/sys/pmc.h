@@ -349,7 +349,8 @@ enum pmc_event {
 	__PMC_OP(WRITELOG, "Write a cookie to the log file")		\
 	__PMC_OP(CLOSELOG, "Close log file")				\
 	__PMC_OP(GETDYNEVENTINFO, "Get dynamic events list")		\
-	__PMC_OP(GETCAPS, "Get capabilities")
+	__PMC_OP(GETCAPS, "Get capabilities")				\
+	__PMC_OP(PMCGROUPLINK, "Link PMCs into an atomic group")
 
 enum pmc_ops {
 #undef	__PMC_OP
@@ -486,6 +487,15 @@ struct pmc_op_pmcattach {
 struct pmc_op_pmcsetcount {
 	pmc_value_t	pm_count;	/* initial/sample count */
 	pmc_id_t	pm_pmcid;	/* PMC id to set */
+};
+
+/*
+ * Link two PMCs into an atomic group.  The leader is started and stopped
+ * together with all its siblings during context switches.
+ */
+struct pmc_op_pmcgrouplink {
+	pmc_id_t	pm_leader;	/* PMC ID of group leader */
+	pmc_id_t	pm_member;	/* PMC ID to add as sibling */
 };
 
 /*
@@ -798,6 +808,17 @@ struct pmc {
 	pmc_id_t	pm_id;		/* allocated PMC id */
 	enum pmc_class pm_class;
 
+	/*
+	 * Group linkage fields.  A group is a set of PMCs that are started
+	 * and stopped atomically during context switches.  pm_group_leader is
+	 * NULL for the leader itself and for ungrouped PMCs.  Only the leader
+	 * carries the pm_group_siblings list.
+	 */
+	struct pmc		*pm_group_leader;   /* NULL: self is leader or ungrouped */
+	LIST_HEAD(,pmc)	 pm_group_siblings; /* leader: list of sibling PMCs */
+	LIST_ENTRY(pmc)	 pm_group_next;     /* siblings list linkage */
+	uint8_t		 pm_group_size;     /* #PMCs in group (leader only) */
+
 	/* md extensions */
 	union pmc_md_pmc	pm_md;
 };
@@ -810,6 +831,10 @@ struct pmc {
 #define	PMC_TO_CLASS(P)		PMC_ID_TO_CLASS((P)->pm_id)
 #define	PMC_TO_ROWINDEX(P)	PMC_ID_TO_ROWINDEX((P)->pm_id)
 #define	PMC_TO_CPU(P)		PMC_ID_TO_CPU((P)->pm_id)
+
+/* PMC group membership helpers */
+#define	PMC_IS_GROUP_LEADER(P)	(!LIST_EMPTY(&(P)->pm_group_siblings))
+#define	PMC_IS_GROUP_MEMBER(P)	((P)->pm_group_leader != NULL)
 
 /*
  * struct pmc_threadpmcstate

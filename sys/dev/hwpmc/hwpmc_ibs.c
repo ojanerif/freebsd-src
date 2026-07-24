@@ -65,6 +65,8 @@ static uint64_t ibs_op_ctl2_allowed_mask;
 static bool ibs_fetch_ctl2_supported;
 static bool ibs_op_ctl2_supported;
 
+static int	ibs_first_ri;	/* first row-index for IBS PMCs (adjri base) */
+
 static uint64_t ibs_fetch_extra_mask;
 static uint64_t ibs_fetch_ctl2_extra_mask;
 static uint64_t ibs_op_extra_mask;
@@ -866,6 +868,7 @@ pmc_ibs_initialize(struct pmc_mdep *pmc_mdep, int ncpus)
 	pcd->pcd_caps		= IBS_PMC_CAPS;
 	pcd->pcd_class		= PMC_CLASS_IBS;
 	pcd->pcd_num		= IBS_NPMCS;
+	ibs_first_ri		= (int)pmc_mdep->pmd_npmc;
 	pcd->pcd_ri		= pmc_mdep->pmd_npmc;
 	pcd->pcd_width		= 0;
 
@@ -913,4 +916,61 @@ pmc_ibs_finalize(struct pmc_mdep *md)
 
 	free(ibs_pcpu, M_PMC);
 	ibs_pcpu = NULL;
+}
+
+/*
+ * IBS thread-virtual context switch IN.
+ *
+ * Called from amd_switch_in() when a thread with virtual-mode IBS PMCs is
+ * being scheduled onto 'cpu'.  Arms IBS on the current CPU for each running
+ * IBS PMC that is attached to the incoming process.
+ *
+ * Must be called from within a critical section (no preemption).
+ */
+void
+pmc_ibs_thread_csw_in(int cpu, struct pmc_process *pp)
+{
+	struct pmc *pm;
+	int n;
+
+	for (n = 0; n < IBS_NPMCS; n++) {
+		pm = pp->pp_pmcs[ibs_first_ri + n].pp_pmc;
+		if (pm == NULL)
+			continue;
+		if (pm->pm_class != PMC_CLASS_IBS)
+			continue;
+		if (!PMC_IS_VIRTUAL_MODE(PMC_TO_MODE(pm)))
+			continue;
+		if (pm->pm_state != PMC_STATE_RUNNING)
+			continue;
+		(void)ibs_start_pmc(cpu, n, pm);
+	}
+}
+
+/*
+ * IBS thread-virtual context switch OUT.
+ *
+ * Called from amd_switch_out() when a thread with virtual-mode IBS PMCs is
+ * being descheduled from 'cpu'.  Disarms IBS on the current CPU.
+ *
+ * Must be called from within a critical section (no preemption).
+ */
+void
+pmc_ibs_thread_csw_out(int cpu, struct pmc_process *pp)
+{
+	struct pmc *pm;
+	int n;
+
+	for (n = 0; n < IBS_NPMCS; n++) {
+		pm = pp->pp_pmcs[ibs_first_ri + n].pp_pmc;
+		if (pm == NULL)
+			continue;
+		if (pm->pm_class != PMC_CLASS_IBS)
+			continue;
+		if (!PMC_IS_VIRTUAL_MODE(PMC_TO_MODE(pm)))
+			continue;
+		if (pm->pm_state != PMC_STATE_RUNNING)
+			continue;
+		(void)ibs_stop_pmc(cpu, n, pm);
+	}
 }

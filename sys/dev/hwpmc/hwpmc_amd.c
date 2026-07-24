@@ -48,6 +48,8 @@
 #include <machine/md_var.h>
 #include <machine/specialreg.h>
 
+#include "hwpmc_ibs.h"
+
 #define	OVERFLOW_WAIT_COUNT	50
 
 DPCPU_DEFINE_STATIC(uint32_t, nmi_counter);
@@ -359,6 +361,9 @@ amd_switch_in(struct pmc_cpu *pc __pmcdbg_used, struct pmc_process *pp)
 	if (pp->pp_flags & PMC_PP_ENABLE_MSR_ACCESS)
 		load_cr4(rcr4() | CR4_PCE);
 
+	/* Phase 2: arm thread-virtual IBS PMCs for the incoming thread */
+	pmc_ibs_thread_csw_in(curcpu, pp);
+
 	return (0);
 }
 
@@ -367,14 +372,17 @@ amd_switch_in(struct pmc_cpu *pc __pmcdbg_used, struct pmc_process *pp)
  * thread.
  */
 static int
-amd_switch_out(struct pmc_cpu *pc __pmcdbg_used,
-    struct pmc_process *pp __pmcdbg_used)
+amd_switch_out(struct pmc_cpu *pc __pmcdbg_used, struct pmc_process *pp)
 {
 	PMCDBG3(MDP, SWO, 1, "pc=%p pp=%p enable-msr=%d", pc, pp, pp ?
 	    (pp->pp_flags & PMC_PP_ENABLE_MSR_ACCESS) == 1 : 0);
 
 	/* always turn off the RDPMC instruction */
 	load_cr4(rcr4() & ~CR4_PCE);
+
+	/* Phase 2: disarm thread-virtual IBS PMCs for the outgoing thread */
+	if (pp != NULL)
+		pmc_ibs_thread_csw_out(curcpu, pp);
 
 	return (0);
 }
