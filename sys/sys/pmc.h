@@ -350,7 +350,9 @@ enum pmc_event {
 	__PMC_OP(CLOSELOG, "Close log file")				\
 	__PMC_OP(GETDYNEVENTINFO, "Get dynamic events list")		\
 	__PMC_OP(GETCAPS, "Get capabilities")				\
-	__PMC_OP(PMCGROUPLINK, "Link PMCs into an atomic group")
+	__PMC_OP(PMCGROUPLINK, "Link PMCs into an atomic group")	\
+	__PMC_OP(PMCGROUPDEFER, "Mark PMC as deferred group leader")	\
+	__PMC_OP(PMCGROUPCOMMIT, "Commit a single-member deferred PMC group")
 
 enum pmc_ops {
 #undef	__PMC_OP
@@ -385,6 +387,7 @@ enum pmc_ops {
 #define	PMC_F_ATTACHED_TO_OWNER	0x00010000 /*attached to owner*/
 #define	PMC_F_NEEDS_LOGFILE	0x00020000 /*needs log file */
 #define	PMC_F_ATTACH_DONE	0x00040000 /*attached at least once */
+#define	PMC_F_GROUP_DEFER	0x00080000 /*deferred group leader (not yet committed)*/
 
 #define	PMC_CALLCHAIN_DEPTH_MAX	512
 
@@ -496,6 +499,24 @@ struct pmc_op_pmcsetcount {
 struct pmc_op_pmcgrouplink {
 	pmc_id_t	pm_leader;	/* PMC ID of group leader */
 	pmc_id_t	pm_member;	/* PMC ID to add as sibling */
+};
+
+/*
+ * Mark a PMC as a deferred group leader.  This sets PMC_F_GROUP_DEFER so
+ * that pmc_start(2) on this PMC returns EDOOFUS until pmc_group_commit() is
+ * called (which issues PMC_OP_PMCGROUPLINK and clears the flag).
+ */
+struct pmc_op_pmcgroupdefer {
+	pmc_id_t	pm_pmcid;	/* PMC ID to mark as deferred leader */
+};
+
+/*
+ * Commit a single-member deferred PMC group.  Clears PMC_F_GROUP_DEFER on the
+ * leader without requiring a sibling link.  Used when pmc_group_commit() is
+ * called on a group that has no members beyond the leader itself.
+ */
+struct pmc_op_pmcgroupcommit {
+	pmc_id_t	pm_pmcid;	/* PMC ID of the deferred leader to commit */
 };
 
 /*

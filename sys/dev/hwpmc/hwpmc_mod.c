@@ -3234,10 +3234,33 @@ pmc_start(struct pmc *pm)
 
 	if (PMC_IS_VIRTUAL_MODE(mode)) {
 		/*
+		 * Reject pmc_start(2) on a deferred group leader that has not
+		 * yet been committed via pmc_group_commit().  PMC_F_GROUP_DEFER
+		 * is set by PMC_OP_PMCGROUPDEFER when userspace designates this
+		 * PMC as a group leader; PMC_OP_PMCGROUPLINK (commit) clears it.
+		 * Starting an uncommitted deferred group is a programming error:
+		 * the sibling PMCs have not been linked, so the csw_in two-pass
+		 * logic would never activate them atomically.
+		 */
+		if ((pm->pm_flags & PMC_F_GROUP_DEFER) != 0 &&
+		    !PMC_IS_GROUP_LEADER(pm))
+			return (EDOOFUS);
+
+		/*
 		 * If a PMCATTACH has never been done on this PMC,
 		 * attach it to its owner process.
 		 */
 		if (LIST_EMPTY(&pm->pm_targets)) {
+			/*
+			 * Group leaders must be explicitly attached via
+			 * pmc_attach(2) before pmc_start(2): auto-attaching a
+			 * group leader would leave its siblings unattached,
+			 * causing csw_in to start the leader on a different
+			 * target than the siblings.
+			 */
+			if (PMC_IS_GROUP_LEADER(pm) &&
+			    (pm->pm_flags & PMC_F_ATTACH_DONE) == 0)
+				return (EINVAL);
 			error = (pm->pm_flags & PMC_F_ATTACH_DONE) != 0 ?
 			    ESRCH : pmc_attach_process(po->po_owner, pm);
 		}
@@ -3248,6 +3271,18 @@ pmc_start(struct pmc *pm)
 		 */
 		if (error == 0) {
 			pm->pm_state = PMC_STATE_RUNNING;
+			/*
+			 * Propagate RUNNING state to all group siblings so that
+			 * the csw_in two-pass group-start logic will include them
+			 * when the process is next scheduled.  The siblings are
+			 * not individually pmc_start()ed; only the leader is.
+			 */
+			if (PMC_IS_GROUP_LEADER(pm)) {
+				struct pmc *sib;
+				LIST_FOREACH(sib, &pm->pm_group_siblings,
+				    pm_group_next)
+					sib->pm_state = PMC_STATE_RUNNING;
+			}
 			if ((pm->pm_flags & PMC_F_ATTACHED_TO_OWNER) != 0)
 				pmc_force_context_switch();
 		}
@@ -4435,6 +4470,69 @@ pmc_syscall_handler(struct thread *td, void *syscall_args)
 		LIST_INSERT_HEAD(&leader->pm_group_siblings, member,
 		    pm_group_next);
 		leader->pm_group_size++;
+
+		/*
+		 * Linking constitutes a partial commit; clear the deferred-
+		 * leader guard so pmc_start() allows the leader once all
+		 * siblings have been linked (pm_group_siblings is non-empty).
+		 */
+		leader->pm_flags &= ~PMC_F_GROUP_DEFER;
+	}
+	break;
+
+	/*
+	 * Mark a PMC as a deferred group leader.  Until the group is
+	 * committed via PMC_OP_PMCGROUPLINK, pmc_start(2) on this PMC
+	 * returns EDOOFUS.  This catches the programming error of starting
+	 * a group that was never fully linked.
+	 */
+	case PMC_OP_PMCGROUPDEFER:
+	{
+		struct pmc *pm_defer;
+		struct pmc_op_pmcgroupdefer gd;
+
+		if ((error = copyin(arg, &gd, sizeof(gd))) != 0)
+			break;
+		if ((error = pmc_find_pmc(gd.pm_pmcid, &pm_defer)) != 0)
+			break;
+
+		/* Cannot defer a PMC that is already running or a sibling */
+		if (pm_defer->pm_state == PMC_STATE_RUNNING) {
+			error = EBUSY;
+			break;
+		}
+		if (PMC_IS_GROUP_MEMBER(pm_defer)) {
+			error = EINVAL;
+			break;
+		}
+
+		pm_defer->pm_flags |= PMC_F_GROUP_DEFER;
+	}
+	break;
+
+	/*
+	 * Commit a single-member deferred PMC group.  Clears PMC_F_GROUP_DEFER
+	 * on the leader without requiring a sibling link.  This is the
+	 * counterpart to PMC_OP_PMCGROUPDEFER for groups that have only one
+	 * PMC (no siblings); pmc_start(2) is unblocked after this call.
+	 */
+	case PMC_OP_PMCGROUPCOMMIT:
+	{
+		struct pmc *pm_commit;
+		struct pmc_op_pmcgroupcommit gc;
+
+		if ((error = copyin(arg, &gc, sizeof(gc))) != 0)
+			break;
+		if ((error = pmc_find_pmc(gc.pm_pmcid, &pm_commit)) != 0)
+			break;
+
+		/* Only a deferred leader can be committed this way */
+		if ((pm_commit->pm_flags & PMC_F_GROUP_DEFER) == 0) {
+			error = EINVAL;
+			break;
+		}
+
+		pm_commit->pm_flags &= ~PMC_F_GROUP_DEFER;
 	}
 	break;
 
