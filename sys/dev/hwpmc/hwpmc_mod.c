@@ -4465,6 +4465,24 @@ pmc_syscall_handler(struct thread *td, void *syscall_args)
 			break;
 		}
 
+		/* leader and member must have the same PMC mode */
+		if (PMC_TO_MODE(leader) != PMC_TO_MODE(member)) {
+			error = EINVAL;
+			break;
+		}
+
+		/*
+		 * System-wide sampling (SS) PMCs are started system-wide and
+		 * never go through csw_in; the atomic second-pass start in
+		 * pmc_process_csw_in() would never fire for them.  Reject SS
+		 * grouping here to prevent silent misbehaviour.
+		 */
+		if (PMC_IS_SAMPLING_MODE(PMC_TO_MODE(leader)) &&
+		    PMC_IS_SYSTEM_MODE(PMC_TO_MODE(leader))) {
+			error = EINVAL;
+			break;
+		}
+
 		/* Link member into leader's sibling list */
 		member->pm_group_leader = leader;
 		LIST_INSERT_HEAD(&leader->pm_group_siblings, member,
