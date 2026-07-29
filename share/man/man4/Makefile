@@ -17,6 +17,7 @@ MAN=	aac.4 \
 	${_acpi_asus.4} \
 	${_acpi_asus_wmi.4} \
 	${_acpi_dock.4} \
+	acpi_einj.4 \
 	${_acpi_fujitsu.4} \
 	${_acpi_hp.4} \
 	${_acpi_ibm.4} \
@@ -177,6 +178,9 @@ MAN=	aac.4 \
 	ffs.4 \
 	filemon.4 \
 	firewire.4 \
+	fwcam.4 \
+	fwdv.4 \
+	fwisound.4 \
 	${_ftgpio.4} \
 	${_ftwd.4} \
 	full.4 \
@@ -209,6 +213,7 @@ MAN=	aac.4 \
 	hidbus.4 \
 	hidquirk.4 \
 	hidraw.4 \
+	hidwacom.4 \
 	hkbd.4 \
 	hms.4 \
 	hmt.4 \
@@ -219,6 +224,7 @@ MAN=	aac.4 \
 	${_hptmv.4} \
 	${_hptnr.4} \
 	${_hptrr.4} \
+	hrfkill.4 \
 	hsctrl.4 \
 	htu21.4 \
 	${_hv_kvp.4} \
@@ -596,6 +602,7 @@ MAN=	aac.4 \
 	tarfs.4 \
 	targ.4 \
 	tcp.4 \
+	tcp_bblog.4 \
 	tcp_bbr.4 \
 	tcp_rack.4 \
 	tdfx.4 \
