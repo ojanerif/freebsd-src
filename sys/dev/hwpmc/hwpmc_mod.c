@@ -5367,7 +5367,13 @@ pmc_capture_user_callchain(int cpu, int ring, struct trapframe *tf)
 	pass = 0;
 	start_ticks = ticks;
 
-	KASSERT(td->td_pflags & TDP_CALLCHAIN,
+	/*
+	 * The PMC_UR ring is driven from userret() via td_pmcpend, which
+	 * pmc_process_interrupt_mp() sets without going through
+	 * pmc_post_callchain_callback(); only the PMC_HR and PMC_SR rings
+	 * are reached via that callback and so have TDP_CALLCHAIN set.
+	 */
+	KASSERT(ring == PMC_UR || (td->td_pflags & TDP_CALLCHAIN) != 0,
 	    ("[pmc,%d] Retrieving callchain for thread that doesn't want it",
 	    __LINE__));
 restart:
