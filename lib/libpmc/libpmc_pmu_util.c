@@ -592,6 +592,12 @@ pmc_pmu_amd_pmcallocate(const char *event_name, struct pmc_op_pmcallocate *pm,
 			amd->pm_amd_config |=
 			    AMD_PMC_DF2_TO_UNITMASK(ped->ped_umask);
 		}
+	} else if (strcmp("amd_umc", pe->pmu) == 0) {
+		amd->pm_amd_sub_class = PMC_AMD_SUB_CLASS_UMC;
+		amd->pm_amd_config |= AMD_PMC_UMC_TO_EVENTMASK(ped->ped_event);
+		if (ped->ped_rdwrmask)
+			amd->pm_amd_config |=
+			    AMD_PMC_UMC_TO_RDWRMASK(ped->ped_rdwrmask);
 	} else {
 		printf("PMC pmu '%s' is not supported!\n", pe->pmu);
 		return (EOPNOTSUPP);
