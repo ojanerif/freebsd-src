@@ -1106,7 +1106,7 @@ amd_get_msr(int ri, uint32_t *msr)
 	} else if (ri < amd_core_npmcs + amd_l3_npmcs) {
 		/* ECX 10-15: L3 Cache counters */
 		*msr = 10 + (ri - amd_core_npmcs);
-	} else {
+	} else if (ri < amd_core_npmcs + amd_l3_npmcs + amd_df_npmcs) {
 		/* ECX 6-9: DF counters 0-3
 		 * ECX 16-27: DF counters 4-15 */
 		df_idx = ri - amd_core_npmcs - amd_l3_npmcs;
@@ -1116,6 +1116,9 @@ amd_get_msr(int ri, uint32_t *msr)
 			*msr = 16 + (df_idx - 4);
 		else
 			return (EINVAL);
+	} else {
+		/* UMC counters are not accessible via RDPMC. */
+		return (EINVAL);
 	}
 	return (0);
 }
@@ -1493,6 +1496,8 @@ pmc_amd_initialize(void)
 		 */
 		amd_umc_nodes = (regs[2] != 0) ? popcntq(regs[2]) : 1;
 		amd_umc_per_node = amd_umc_npmcs / amd_umc_nodes;
+		if (amd_umc_per_node == 0)
+			amd_umc_per_node = amd_umc_npmcs;
 		for (i = 0; i < amd_umc_npmcs; i++) {
 			d = &amd_pmcdesc[amd_npmcs + i];
 			snprintf(d->pm_descr.pd_name, PMC_NAME_MAX,
