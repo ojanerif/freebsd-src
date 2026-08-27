@@ -67,7 +67,7 @@ struct amd_descr {
 };
 
 static int amd_npmcs;
-static int amd_core_npmcs, amd_l3_npmcs, amd_df_npmcs;
+static int amd_core_npmcs, amd_l3_npmcs, amd_df_npmcs, amd_umc_npmcs;
 static bool amd_perfmon_v2;		/* PerfMonV2 global-control path active */
 static uint64_t amd_global_cntr_mask;	/* one bit per core counter */
 static struct amd_descr amd_pmcdesc[AMD_NPMCS_MAX];
@@ -198,6 +198,8 @@ static uint64_t amd_df_allowed_mask;
 static uint64_t amd_core_extra_mask;
 static uint64_t amd_l3_extra_mask;
 static uint64_t amd_df_extra_mask;
+static uint64_t amd_umc_allowed_mask;
+static uint64_t amd_umc_extra_mask;
 
 SYSCTL_DECL(_kern_hwpmc);
 
@@ -212,6 +214,10 @@ SYSCTL_U64(_kern_hwpmc, OID_AUTO, amd_l3_extra_mask, CTLFLAG_RDTUN,
 SYSCTL_U64(_kern_hwpmc, OID_AUTO, amd_df_extra_mask, CTLFLAG_RDTUN,
     &amd_df_extra_mask, 0,
     "Extra allowed bits in AMD DF PMU control (override; default 0)");
+
+SYSCTL_U64(_kern_hwpmc, OID_AUTO, amd_umc_extra_mask, CTLFLAG_RDTUN,
+    &amd_umc_extra_mask, 0,
+    "Extra allowed bits in AMD UMC PMU control (override; default 0)");
 
 SYSCTL_BOOL(_kern_hwpmc, OID_AUTO, amd_perfmon_v2, CTLFLAG_RD,
     &amd_perfmon_v2, 0,
@@ -231,6 +237,8 @@ amd_init_policy(void)
 
 	amd_df_allowed_mask = (family <= 0x19) ?
 	    AMD_PMC_DF_FAMILY17_MASK : AMD_PMC_DF_FAMILY1A_MASK;
+
+	amd_umc_allowed_mask = AMD_PMC_UMC_MASK;
 }
 
 static uint64_t
@@ -246,6 +254,8 @@ amd_config_mask(enum sub_class subclass, uint64_t caps)
 		return (amd_l3_allowed_mask | amd_l3_extra_mask);
 	case PMC_AMD_SUB_CLASS_DATA_FABRIC:
 		return (amd_df_allowed_mask | amd_df_extra_mask);
+	case PMC_AMD_SUB_CLASS_UMC:
+		return (amd_umc_allowed_mask | amd_umc_extra_mask);
 	default:
 		return (0);
 	}
@@ -676,13 +686,20 @@ amd_start_pmc(int cpu __diagused, int ri, struct pmc *pm)
 	 * Triggered by DF counters because all DF MSRs are shared.  We need to
 	 * change the code to honor the per-package flag in the JSON event
 	 * definitions.
+	 *
+	 * UMC counters use a different stopped check (enable bit at bit 31).
 	 */
-	KASSERT(AMD_PMC_IS_STOPPED(pd->pm_evsel),
-	    ("[amd,%d] pmc%d,cpu%d: Starting active PMC \"%s\"", __LINE__,
-	    ri, cpu, pd->pm_descr.pd_name));
-
-	/* turn on the PMC ENABLE bit */
-	config = pm->pm_md.pm_amd.pm_amd_evsel | AMD_PMC_ENABLE;
+	if (pd->pm_subclass == PMC_AMD_SUB_CLASS_UMC) {
+		KASSERT(AMD_PMC_UMC_IS_STOPPED(pd->pm_evsel),
+		    ("[amd,%d] pmc%d,cpu%d: Starting active UMC PMC \"%s\"",
+		    __LINE__, ri, cpu, pd->pm_descr.pd_name));
+		config = pm->pm_md.pm_amd.pm_amd_evsel | AMD_PMC_UMC_ENABLE;
+	} else {
+		KASSERT(AMD_PMC_IS_STOPPED(pd->pm_evsel),
+		    ("[amd,%d] pmc%d,cpu%d: Starting active PMC \"%s\"",
+		    __LINE__, ri, cpu, pd->pm_descr.pd_name));
+		config = pm->pm_md.pm_amd.pm_amd_evsel | AMD_PMC_ENABLE;
+	}
 
 	PMCDBG1(MDP, STA, 2, "amd-start config=0x%x", config);
 
@@ -707,6 +724,10 @@ amd_start_pmc_v2(int cpu __diagused, int ri, struct pmc *pm)
 	mode = PMC_TO_MODE(pm);
 
 	PMCDBG2(MDP, STA, 1, "amd-start-v2 cpu=%d ri=%d", cpu, ri);
+
+	/* UMC counters do not use PerfMonV2 GLOBAL_CTL; use legacy path. */
+	if (pd->pm_subclass == PMC_AMD_SUB_CLASS_UMC)
+		return (amd_start_pmc(cpu, ri, pm));
 
 	if (pd->pm_subclass == PMC_AMD_SUB_CLASS_CORE &&
 	    PMC_IS_VIRTUAL_MODE(mode))
@@ -743,11 +764,21 @@ amd_stop_pmc(int cpu __diagused, int ri, struct pmc *pm)
 
 	pd = &amd_pmcdesc[ri];
 
+	PMCDBG1(MDP, STO, 1, "amd-stop ri=%d", ri);
+
+	if (pd->pm_subclass == PMC_AMD_SUB_CLASS_UMC) {
+		KASSERT(!AMD_PMC_UMC_IS_STOPPED(pd->pm_evsel),
+		    ("[amd,%d] UMC PMC%d, CPU%d \"%s\" already stopped",
+		    __LINE__, ri, cpu, pd->pm_descr.pd_name));
+		/* UMC counters do not trigger overflow NMI; stop is immediate. */
+		config = pm->pm_md.pm_amd.pm_amd_evsel & ~AMD_PMC_UMC_ENABLE;
+		wrmsr(pd->pm_evsel, config);
+		return (0);
+	}
+
 	KASSERT(!AMD_PMC_IS_STOPPED(pd->pm_evsel),
 	    ("[amd,%d] PMC%d, CPU%d \"%s\" already stopped",
 		__LINE__, ri, cpu, pd->pm_descr.pd_name));
-
-	PMCDBG1(MDP, STO, 1, "amd-stop ri=%d", ri);
 
 	/* turn off the PMC ENABLE bit */
 	config = pm->pm_md.pm_amd.pm_amd_evsel & ~AMD_PMC_ENABLE;
@@ -787,6 +818,10 @@ amd_stop_pmc_v2(int cpu __diagused, int ri, struct pmc *pm)
 	mode = PMC_TO_MODE(pm);
 
 	PMCDBG1(MDP, STO, 1, "amd-stop-v2 ri=%d", ri);
+
+	/* UMC counters do not use PerfMonV2 GLOBAL_CTL; use legacy path. */
+	if (pd->pm_subclass == PMC_AMD_SUB_CLASS_UMC)
+		return (amd_stop_pmc(cpu, ri, pm));
 
 	if (pd->pm_subclass == PMC_AMD_SUB_CLASS_CORE &&
 	    PMC_IS_SYSTEM_MODE(mode)) {
@@ -1380,6 +1415,7 @@ pmc_amd_initialize(void)
 		if (regs[1] != 0) {
 			amd_core_npmcs = EXTPERFMON_CORE_PMCS(regs[1]);
 			amd_df_npmcs = EXTPERFMON_DF_PMCS(regs[1]);
+			amd_umc_npmcs = EXTPERFMON_UMC_PMCS(regs[1]);
 		}
 		/* EAX bit 0 is the PerfMonV2 flag. */
 		if (EXTPERFMON_PERFMONV2(regs[0]) && family >= 0x19)
@@ -1446,6 +1482,22 @@ pmc_amd_initialize(void)
 			d->pm_subclass = PMC_AMD_SUB_CLASS_DATA_FABRIC;
 		}
 		amd_npmcs += amd_df_npmcs;
+	}
+
+	if (amd_umc_npmcs > 0) {
+		/* Enable the UMC (memory controller) counters */
+		for (i = 0; i < amd_umc_npmcs; i++) {
+			d = &amd_pmcdesc[amd_npmcs + i];
+			snprintf(d->pm_descr.pd_name, PMC_NAME_MAX,
+			    "K8-UMC-%d", i);
+			d->pm_descr.pd_class = PMC_CLASS_K8;
+			d->pm_descr.pd_caps = AMD_PMC_UMC_CAPS;
+			d->pm_descr.pd_width = 48;
+			d->pm_evsel = AMD_PMC_UMC_BASE + 2 * i;
+			d->pm_perfctr = AMD_PMC_UMC_BASE + 2 * i + 1;
+			d->pm_subclass = PMC_AMD_SUB_CLASS_UMC;
+		}
+		amd_npmcs += amd_umc_npmcs;
 	}
 
 	/*
