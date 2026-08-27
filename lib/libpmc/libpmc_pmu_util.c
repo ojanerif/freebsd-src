@@ -231,6 +231,7 @@ struct pmu_event_desc {
 	uint32_t ped_allsources;
 	uint32_t ped_allcores;
 	uint32_t ped_event;
+	uint32_t ped_rdwrmask;
 	uint32_t ped_frontend;
 	uint32_t ped_ldlat;
 	uint32_t ped_config1;
@@ -378,6 +379,8 @@ pmu_parse_event(struct pmu_event_desc *ped, const char *eventin)
 			ped->ped_allcores = strtol(value, NULL, 10);
 		else if (strcmp(key, "allsources") == 0)
 			ped->ped_allsources = strtol(value, NULL, 10);
+		else if (strcmp(key, "rdwrmask") == 0)
+			ped->ped_rdwrmask = strtol(value, NULL, 16);
 		else if (strcmp(key, "pebs") == 0)
 			ped->ped_pebs = strtol(value, NULL, 10);
 		else {
