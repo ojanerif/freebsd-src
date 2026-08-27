@@ -323,6 +323,14 @@ pmc_pmu_event_get_by_idx(const char *cpuid, int idx)
 	return (pme->table[idx].name);
 }
 
+static void
+pmu_init_event(struct pmu_event_desc *ped)
+{
+	bzero(ped, sizeof(*ped));
+	ped->ped_period = DEFAULT_SAMPLE_COUNT;
+	ped->ped_umask = -1;
+}
+
 static int
 pmu_parse_event(struct pmu_event_desc *ped, const char *eventin)
 {
@@ -333,9 +341,6 @@ pmu_parse_event(struct pmu_event_desc *ped, const char *eventin)
 	if ((event = strdup(eventin)) == NULL)
 		return (ENOMEM);
 	r = event;
-	bzero(ped, sizeof(*ped));
-	ped->ped_period = DEFAULT_SAMPLE_COUNT;
-	ped->ped_umask = -1;
 	while ((kvp = strsep(&event, ",")) != NULL) {
 		key = strsep(&kvp, "=");
 		if (key == NULL)
@@ -404,6 +409,7 @@ pmc_pmu_sample_rate_get(const char *event_name)
 		return (DEFAULT_SAMPLE_COUNT);
 	if (pe->event == NULL)
 		return (DEFAULT_SAMPLE_COUNT);
+	pmu_init_event(&ped);
 	if (pmu_parse_event(&ped, pe->event))
 		return (DEFAULT_SAMPLE_COUNT);
 	return (ped.ped_period);
@@ -438,8 +444,10 @@ pmc_pmu_print_counters(const char *event_name)
 		if (event_name != NULL && strcasestr(pe->name, event_name) == NULL)
 			continue;
 		printf("\t%s\n", pe->name);
-		if (do_debug)
+		if (do_debug) {
+			pmu_init_event(&ped);
 			pmu_parse_event(&ped, pe->event);
+		}
 	}
 }
 
@@ -663,33 +671,59 @@ pmc_pmu_intel_pmcallocate(const char *event_name, struct pmc_op_pmcallocate *pm,
 }
 
 static int
-pmc_pmu_pmcallocate_md(const char *event_name, struct pmc_op_pmcallocate *pm)
+pmc_pmu_pmcallocate_md(const char *ctrspec, struct pmc_op_pmcallocate *pm)
 {
 	const struct pmu_event *pe;
 	struct pmu_event_desc ped;
+	const char *event_name;
+	char *spec_copy, *ctrmodifier;
 	pmu_mfr_t mfr;
 	int idx = -1;
+	int error;
 
 	if ((mfr = pmu_events_mfr()) == PMU_INVALID)
 		return (ENOENT);
 
+	/* Split "event,key=val,..." into event name and optional modifiers. */
+	if ((spec_copy = strdup(ctrspec)) == NULL)
+		return (ENOMEM);
+	ctrmodifier = spec_copy;
+	event_name = strsep(&ctrmodifier, ",");
+	event_name = pmu_alias_get(event_name);
+
+	if ((pe = pmu_event_get(NULL, event_name, &idx)) == NULL) {
+		free(spec_copy);
+		return (ENOENT);
+	}
+	assert(idx >= 0);
+
 	bzero(&pm->pm_md, sizeof(pm->pm_md));
 	pm->pm_caps |= (PMC_CAP_READ | PMC_CAP_WRITE);
-	event_name = pmu_alias_get(event_name);
-	if ((pe = pmu_event_get(NULL, event_name, &idx)) == NULL)
-		return (ENOENT);
-	assert(idx >= 0);
 	pm->pm_ev = idx;
 
-	if (pe->event == NULL)
+	if (pe->event == NULL) {
+		free(spec_copy);
 		return (ENOENT);
-	if (pmu_parse_event(&ped, pe->event))
+	}
+
+	/* First pass: load JSON-defined defaults for this event. */
+	pmu_init_event(&ped);
+	if (pmu_parse_event(&ped, pe->event)) {
+		free(spec_copy);
 		return (ENOENT);
+	}
+
+	/* Second pass: apply any user-supplied overrides. */
+	if (ctrmodifier != NULL)
+		pmu_parse_event(&ped, ctrmodifier);
 
 	if (mfr == PMU_INTEL)
-		return (pmc_pmu_intel_pmcallocate(event_name, pm, &ped));
+		error = pmc_pmu_intel_pmcallocate(event_name, pm, &ped);
 	else
-		return (pmc_pmu_amd_pmcallocate(event_name, pm, &ped));
+		error = pmc_pmu_amd_pmcallocate(event_name, pm, &ped);
+
+	free(spec_copy);
+	return (error);
 }
 
 #elif defined(__powerpc64__)
@@ -709,6 +743,7 @@ pmc_pmu_pmcallocate_md(const char *event_name, struct pmc_op_pmcallocate *pm)
 		return (ENOENT);
 	if (pe->event == NULL)
 		return (ENOENT);
+	pmu_init_event(&ped);
 	if (pmu_parse_event(&ped, pe->event))
 		return (ENOENT);
 
@@ -732,6 +767,7 @@ pmc_pmu_pmcallocate_md(const char *event_name, struct pmc_op_pmcallocate *pm)
 		return (ENOENT);
 	if (pe->event == NULL)
 		return (ENOENT);
+	pmu_init_event(&ped);
 	if (pmu_parse_event(&ped, pe->event))
 		return (ENOENT);
 
