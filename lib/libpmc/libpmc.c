@@ -1279,9 +1279,6 @@ pmc_allocate(const char *ctrspec, enum pmc_mode mode,
 			goto out;
 	}
 
-	r = spec_copy = strdup(ctrspec);
-	ctrname = strsep(&r, ",");
-
 	/* replace an event alias with the canonical event specifier */
 	if (pmc_mdep_event_aliases)
 		for (alias = pmc_mdep_event_aliases; alias->pm_alias; alias++)
