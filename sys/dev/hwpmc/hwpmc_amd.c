@@ -1365,6 +1365,7 @@ pmc_amd_initialize(void)
 	enum pmc_cputype cputype;
 	int ncpus, nclasses, i;
 	int family, model, stepping;
+	int amd_umc_nodes, amd_umc_per_node;
 	int error;
 
 	/*
@@ -1485,11 +1486,18 @@ pmc_amd_initialize(void)
 	}
 
 	if (amd_umc_npmcs > 0) {
-		/* Enable the UMC (memory controller) counters */
+		/*
+		 * UMC counters are per Data Fabric node. regs[2] (ECX of
+		 * CPUID 0x80000022) is a bitmask of nodes present; popcntq()
+		 * gives the node count.  Divide total PMCs evenly per node.
+		 */
+		amd_umc_nodes = (regs[2] != 0) ? popcntq(regs[2]) : 1;
+		amd_umc_per_node = amd_umc_npmcs / amd_umc_nodes;
 		for (i = 0; i < amd_umc_npmcs; i++) {
 			d = &amd_pmcdesc[amd_npmcs + i];
 			snprintf(d->pm_descr.pd_name, PMC_NAME_MAX,
-			    "K8-UMC-%d", i);
+			    "K8-UMC%d-%d", i / amd_umc_per_node,
+			    i % amd_umc_per_node);
 			d->pm_descr.pd_class = PMC_CLASS_K8;
 			d->pm_descr.pd_caps = AMD_PMC_UMC_CAPS;
 			d->pm_descr.pd_width = 48;
