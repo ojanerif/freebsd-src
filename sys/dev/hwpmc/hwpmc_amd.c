@@ -1115,10 +1115,10 @@ amd_get_msr(int ri, uint32_t *msr)
 		else if (df_idx < 16)
 			*msr = 16 + (df_idx - 4);
 		else
-			return (EINVAL);
+			return (-1);
 	} else {
 		/* UMC counters are not accessible via RDPMC. */
-		return (EINVAL);
+		return (-1);
 	}
 	return (0);
 }
