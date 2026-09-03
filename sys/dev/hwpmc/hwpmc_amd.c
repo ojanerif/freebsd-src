@@ -1530,6 +1530,17 @@ pmc_amd_initialize(void)
 	}
 
 	/*
+	 * Verify that the descriptor table is exactly right-sized.
+	 * npmcs_total was computed from the same four per-class counts before
+	 * the registration loops; amd_npmcs is their running sum after.  They
+	 * must be equal.  If they diverge, a new counter family was added to
+	 * the loops without updating npmcs_total, and amd_pmcdesc is undersized.
+	 */
+	KASSERT(amd_npmcs == npmcs_total,
+	    ("%s: npmcs_total=%d amd_npmcs=%d mismatch — update npmcs_total",
+	    __func__, npmcs_total, amd_npmcs));
+
+	/*
 	 * Sanity check that the hardware is safe to use.  Do not read or write
 	 * any of the PMC MSRs until after this check passes.
 	 */
@@ -1627,8 +1638,9 @@ error:
 	 * amd_pcpu is allocated before pmc_mdep_alloc(); its per-CPU
 	 * pc_amdpmcs arrays are allocated in amd_pcpu_init(), which has
 	 * not been called yet at this error point, so there are no inner
-	 * arrays to walk.  free(NULL, M_PMC) is a no-op if amd_pcpu was
-	 * never allocated (e.g. an early failure before the malloc below).
+	 * arrays to walk.  free(NULL, M_PMC) is a no-op for both amd_pcpu
+	 * (if not yet allocated) and amd_pmcdesc (if already freed by the
+	 * amd_hwcheck() failure path above).
 	 */
 	free(pmc_mdep, M_PMC);
 	free(amd_pcpu, M_PMC);

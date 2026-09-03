@@ -207,8 +207,7 @@
 #define	AMD_PMC_UMC_TO_RDWRMASK(x)	(((x) & 0x3) << 8)
 
 #define	AMD_NPMCS_K8		4
-/* Compile-time upper bound used for index validation; hwpmc_amd.c allocates
- * amd_pmcdesc dynamically to the count reported by CPUID 0x80000022. */
+/* Compile-time upper bound used for PMC row-index validation. */
 #define	AMD_NPMCS_MAX		(AMD_PMC_CORE_MAX + AMD_PMC_L3_MAX + \
 				 AMD_PMC_DF_MAX + AMD_PMC_UMC_MAX)
 
