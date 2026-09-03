@@ -49,6 +49,7 @@
 #include <fs/nfs/nfsport.h>
 #include <sys/extattr.h>
 #include <sys/filio.h>
+#include <rpc/krpc.h>
 
 /* Global vars */
 extern u_int32_t newnfs_false, newnfs_true;
@@ -407,7 +408,7 @@ nfsrvd_setattr(struct nfsrv_descript *nd, __unused int isdgram,
 	int preat_ret = 1, postat_ret = 1, gcheck = 0, error = 0;
 	int gotproxystateid;
 	struct timespec guard = { 0, 0 };
-	nfsattrbit_t attrbits, retbits;
+	nfsattrbit_t atimeonly, attrbits, retbits;
 	nfsv4stateid_t stateid;
 	NFSACL_T *aclp = NULL, *daclp = NULL;
 	struct thread *p = curthread;
@@ -481,9 +482,28 @@ nfsrvd_setattr(struct nfsrv_descript *nd, __unused int isdgram,
 	 */
 	if (!nd->nd_repstat) {
 		if (NFSVNO_NOTSETSIZE(&nva)) {
+			/*
+			 * For an NFSv4.2 Setattr of atime only that fails with
+			 * EROFS, pretend the operation succeeded.  This makes
+			 * the semantics of copying files from a ZFS snapshot
+			 * the same over NFSv4.2 as it is locally.
+			 * Without this "hack", the copy will fail
+			 * with EROFS unless the NFSv4.2 mount has the
+			 * "noatime" mount option.
+			 */
+			NFSZERO_ATTRBIT(&atimeonly);
+			NFSSETBIT_ATTRBIT(&atimeonly, NFSATTRBIT_TIMEACCESSSET);
 			if (NFSVNO_EXRDONLY(exp) ||
-			    (vp->v_mount->mnt_flag & MNT_RDONLY))
-				nd->nd_repstat = EROFS;
+			    (vp->v_mount->mnt_flag & MNT_RDONLY)) {
+				if ((nd->nd_flag & ND_NFSV42) != 0 &&
+				    NFSEQUAL_ATTRBIT(&attrbits, &atimeonly)) {
+					NFSCLRBIT_ATTRBIT(&attrbits,
+					    NFSATTRBIT_TIMEACCESSSET);
+					NFSSETBIT_ATTRBIT(&retbits,
+					    NFSATTRBIT_TIMEACCESSSET);
+				} else
+					nd->nd_repstat = EROFS;
+			}
 		} else {
 			if (vp->v_type != VREG)
 				nd->nd_repstat = EINVAL;
@@ -560,6 +580,16 @@ nfsrvd_setattr(struct nfsrv_descript *nd, __unused int isdgram,
 		NFSVNO_SETATTRVAL(&nva2, btime, nva.na_btime);
 		nd->nd_repstat = nfsvno_setattr(vp, &nva2, nd->nd_cred, p,
 		    exp);
+		/*
+		 * ZFS stores with early versions do not support va_birthtime
+		 * and will reply EINVAL when setting is attempted.  This
+		 * breaks the MacOS NFSv4 client, so pretend it succeeded if
+		 * ctime and/or mtime were set as well.
+		 */
+		if (nd->nd_repstat == EINVAL &&
+		    (NFSISSET_ATTRBIT(&retbits, NFSATTRBIT_TIMEACCESSSET) ||
+		     NFSISSET_ATTRBIT(&retbits, NFSATTRBIT_TIMEMODIFYSET)))
+			nd->nd_repstat = 0;
 		if (!nd->nd_repstat)
 		    NFSSETBIT_ATTRBIT(&retbits, NFSATTRBIT_TIMECREATE);
 	    }
@@ -843,7 +873,7 @@ nfsrvd_readlink(struct nfsrv_descript *nd, __unused int isdgram,
 		nd->nd_mb = mpend;
 		if ((mpend->m_flags & M_EXTPG) != 0) {
 			nd->nd_bextpg = mpend->m_epg_npgs - 1;
-			nd->nd_bpos = (char *)(void *)
+			nd->nd_bpos =
 			    PHYS_TO_DMAP(mpend->m_epg_pa[nd->nd_bextpg]);
 			off = (nd->nd_bextpg == 0) ? mpend->m_epg_1st_off : 0;
 			nd->nd_bpos += off + mpend->m_epg_last_len;
@@ -999,13 +1029,16 @@ nfsrvd_read(struct nfsrv_descript *nd, __unused int isdgram,
 	if (cnt > 0) {
 		/*
 		 * If cnt > MCLBYTES and the reply will not be saved, use
-		 * ext_pgs mbufs for TLS.
+		 * ext_pgs mbufs for TLS of if enabled via
+		 * vfs.nfsd.enable_mextpg.
 		 * For NFSv4.0, we do not know for sure if the reply will
 		 * be saved, so do not use ext_pgs mbufs for NFSv4.0.
 		 * Always use ext_pgs mbufs if ND_EXTPG is set.
 		 */
 		if ((nd->nd_flag & ND_EXTPG) != 0 || (cnt > MCLBYTES &&
-		    (nd->nd_flag & (ND_TLS | ND_SAVEREPLY)) == ND_TLS &&
+		    ((nd->nd_flag & (ND_TLS | ND_SAVEREPLY)) == ND_TLS ||
+		     (nd->nd_flag & (ND_CANEXTPG | ND_SAVEREPLY)) ==
+		      ND_CANEXTPG) &&
 		    (nd->nd_flag & (ND_NFSV4 | ND_NFSV41)) != ND_NFSV4))
 			nd->nd_repstat = nfsvno_read(vp, off, cnt, nd->nd_cred,
 			    nd->nd_maxextsiz, p, &m3, &m2);
@@ -1044,13 +1077,26 @@ nfsrvd_read(struct nfsrv_descript *nd, __unused int isdgram,
 	}
 	*tl = txdr_unsigned(cnt);
 	if (m3) {
+		/*
+		 * For RDMA, inform the server side rdma the reduction's
+		 * position.
+		 */
+		if ((nd->nd_flag & ND_RDMA) != 0 && nd->nd_xprt != NULL) {
+			KASSERT(cnt > 0,
+			    ("nfsrvd_read: m3 != NULL when cnt == 0"));
+			struct rpcrdma_reduce ddp;
+
+			ddp.xid = nd->nd_retxid;
+			ddp.off = (uint32_t)m_length(nd->nd_mreq, NULL);
+			ddp.len = (uint32_t)cnt;
+			(void)SVC_CONTROL(nd->nd_xprt, SVCSET_READDDP, &ddp);
+		}
 		nd->nd_mb->m_next = m3;
 		nd->nd_mb = m2;
 		if ((m2->m_flags & M_EXTPG) != 0) {
 			nd->nd_flag |= ND_EXTPG;
 			nd->nd_bextpg = m2->m_epg_npgs - 1;
-			nd->nd_bpos = (char *)(void *)
-			    PHYS_TO_DMAP(m2->m_epg_pa[nd->nd_bextpg]);
+			nd->nd_bpos = PHYS_TO_DMAP(m2->m_epg_pa[nd->nd_bextpg]);
 			poff = (nd->nd_bextpg == 0) ? m2->m_epg_1st_off : 0;
 			nd->nd_bpos += poff + m2->m_epg_last_len;
 			nd->nd_bextpgsiz = PAGE_SIZE - m2->m_epg_last_len -
@@ -4251,7 +4297,7 @@ nfsrvd_setclientid(struct nfsrv_descript *nd, __unused int isdgram,
 	/* Allocated large enough for an AF_INET or AF_INET6 socket. */
 	clp->lc_req.nr_nam = malloc(sizeof(struct sockaddr_in6), M_SONAME,
 	    M_WAITOK | M_ZERO);
-	clp->lc_req.nr_cred = NULL;
+	clp->lc_req.nr_cred = crhold(nd->nd_cred);
 	NFSBCOPY(verf, clp->lc_verf, NFSX_VERF);
 	clp->lc_idlen = idlen;
 	error = nfsrv_mtostr(nd, clp->lc_id, idlen);
@@ -4341,6 +4387,7 @@ nfsrvd_setclientid(struct nfsrv_descript *nd, __unused int isdgram,
 	if (clp) {
 		free(clp->lc_req.nr_nam, M_SONAME);
 		NFSFREEMUTEX(&clp->lc_req.nr_mtx);
+		crfree(clp->lc_req.nr_cred);
 		free(clp->lc_stateid, M_NFSDCLIENT);
 		free(clp, M_NFSDCLIENT);
 	}
@@ -4359,6 +4406,7 @@ nfsmout:
 	if (clp) {
 		free(clp->lc_req.nr_nam, M_SONAME);
 		NFSFREEMUTEX(&clp->lc_req.nr_mtx);
+		crfree(clp->lc_req.nr_cred);
 		free(clp->lc_stateid, M_NFSDCLIENT);
 		free(clp, M_NFSDCLIENT);
 	}
@@ -4616,7 +4664,7 @@ nfsrvd_exchangeid(struct nfsrv_descript *nd, __unused int isdgram,
 		break;
 #endif
 	}
-	clp->lc_req.nr_cred = NULL;
+	clp->lc_req.nr_cred = crhold(nd->nd_cred);
 	NFSBCOPY(verf, clp->lc_verf, NFSX_VERF);
 	clp->lc_idlen = idlen;
 	error = nfsrv_mtostr(nd, clp->lc_id, idlen);
@@ -4689,6 +4737,7 @@ nfsrvd_exchangeid(struct nfsrv_descript *nd, __unused int isdgram,
 	if (clp != NULL) {
 		free(clp->lc_req.nr_nam, M_SONAME);
 		NFSFREEMUTEX(&clp->lc_req.nr_mtx);
+		crfree(clp->lc_req.nr_cred);
 		free(clp->lc_stateid, M_NFSDCLIENT);
 		free(clp, M_NFSDCLIENT);
 	}
@@ -4732,6 +4781,7 @@ nfsmout:
 	if (clp != NULL) {
 		free(clp->lc_req.nr_nam, M_SONAME);
 		NFSFREEMUTEX(&clp->lc_req.nr_mtx);
+		crfree(clp->lc_req.nr_cred);
 		free(clp->lc_stateid, M_NFSDCLIENT);
 		free(clp, M_NFSDCLIENT);
 	}
@@ -4847,6 +4897,14 @@ nfsrvd_createsession(struct nfsrv_descript *nd, __unused int isdgram,
 		*tl++ = txdr_unsigned(sep->sess_cbsess.nfsess_foreslots);
 		*tl++ = txdr_unsigned(1);
 		*tl = txdr_unsigned(0);			/* No RDMA. */
+		/*
+		 * Although the client accepts slot#s up to
+		 * sess_cbsess.nfsess_foreslots, the server can only use
+		 * a maximum of NFSV4_SLOTS, so clip it to avoid ever using
+		 * too high a slot.
+		 */
+		if (sep->sess_cbsess.nfsess_foreslots > NFSV4_SLOTS)
+			sep->sess_cbsess.nfsess_foreslots = NFSV4_SLOTS;
 	}
 nfsmout:
 	if (nd->nd_repstat != 0 && sep != NULL)
@@ -5103,11 +5161,15 @@ nfsrvd_layoutget(struct nfsrv_descript *nd, __unused int isdgram,
 	}
 
 	layp = NULL;
+#ifdef notnow
 	if (layouttype == NFSLAYOUT_NFSV4_1_FILES && nfsrv_maxpnfsmirror == 1)
 		layp = malloc(NFSX_V4FILELAYOUT, M_TEMP, M_WAITOK);
 	else if (layouttype == NFSLAYOUT_FLEXFILE)
-		layp = malloc(NFSX_V4FLEXLAYOUT(nfsrv_maxpnfsmirror), M_TEMP,
-		    M_WAITOK);
+#else
+	if (layouttype == NFSLAYOUT_FLEXFILE)
+#endif
+		layp = malloc(NFSX_V4FLEXLAYOUT(NFSDEV_MAXMIRRORS,
+		    NFSDEV_MAXSTRIPE), M_TEMP, M_WAITOK);
 	else
 		nd->nd_repstat = NFSERR_UNKNLAYOUTTYPE;
 	if (layp != NULL)
@@ -5662,7 +5724,7 @@ nfsrvd_allocate(struct nfsrv_descript *nd, __unused int isdgram,
 	nfsquad_t clientid;
 	nfsattrbit_t attrbits;
 
-	if (!nfsrv_doallocate) {
+	if (!nfsrv_doallocate || nfsrv_devidcnt > 0) {
 		/*
 		 * If any exported file system, such as a ZFS one, cannot
 		 * do VOP_ALLOCATE(), this operation cannot be supported
@@ -5794,9 +5856,9 @@ nfsrvd_deallocate(struct nfsrv_descript *nd, __unused int isdgram,
 	}
 	stp->ls_stateid.other[2] = *tl++;
 	/*
-	 * Don't allow this to be done for a DS.
+	 * Don't allow this to be done for a DS or MDS.
 	 */
-	if ((nd->nd_flag & ND_DSSERVER) != 0)
+	if ((nd->nd_flag & ND_DSSERVER) != 0 || nfsrv_devidcnt > 0)
 		nd->nd_repstat = NFSERR_NOTSUPP;
 	/* However, allow the proxy stateid. */
 	if (stp->ls_stateid.seqid == 0xffffffff &&
@@ -6331,6 +6393,8 @@ nfsrvd_seek(struct nfsrv_descript *nd, __unused int isdgram,
 		nd->nd_repstat = NFSERR_WRONGTYPE;
 	if (nd->nd_repstat == 0 && off < 0)
 		nd->nd_repstat = NFSERR_NXIO;
+	if (nd->nd_repstat == 0 && nfsrv_devidcnt > 0)
+		nd->nd_repstat = NFSERR_NOTSUPP;
 	if (nd->nd_repstat == 0) {
 		/* Check permissions for the input file. */
 		NFSZERO_ATTRBIT(&attrbits);
@@ -6412,7 +6476,7 @@ nfsrvd_getxattr(struct nfsrv_descript *nd, __unused int isdgram,
 			if ((mpend->m_flags & M_EXTPG) != 0) {
 				nd->nd_flag |= ND_EXTPG;
 				nd->nd_bextpg = mpend->m_epg_npgs - 1;
-				nd->nd_bpos = (char *)(void *)
+				nd->nd_bpos =
 				   PHYS_TO_DMAP(mpend->m_epg_pa[nd->nd_bextpg]);
 				off = (nd->nd_bextpg == 0) ?
 				    mpend->m_epg_1st_off : 0;

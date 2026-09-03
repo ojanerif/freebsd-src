@@ -1,24 +1,14 @@
 #! /bin/ksh -p
 # SPDX-License-Identifier: CDDL-1.0
 #
-# CDDL HEADER START
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
 #
-# The contents of this file are subject to the terms of the
-# Common Development and Distribution License (the "License").
-# You may not use this file except in compliance with the License.
-#
-# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or https://opensource.org/licenses/CDDL-1.0.
-# See the License for the specific language governing permissions
-# and limitations under the License.
-#
-# When distributing Covered Code, include this CDDL HEADER in each
-# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
-# If applicable, add the following below this CDDL HEADER, with the
-# fields enclosed by brackets "[]" replaced with your own identifying
-# information: Portions Copyright [yyyy] [name of copyright owner]
-#
-# CDDL HEADER END
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# https://opensource.org/license/CDDL-1.0.
 #
 
 #
@@ -91,6 +81,7 @@ log_must eval "[[ $(stat_mtime $tfs_snapdir) == 0 ]]"
 
 # Create snapshots for filesystems and check snapshots_changed reports correct time
 curr_time=$(date '+%s')
+log_must sleep 1
 log_must zfs snapshot $snap_testpool
 snap_changed_testpool=$(zfs get -H -o value -p snapshots_changed $TESTPOOL)
 snap_changed_nsecs_testpool=$(zfs get -H -o value -p snapshots_changed_nsecs $TESTPOOL)
@@ -103,6 +94,7 @@ log_must eval "[[ $list_changed_nsecs_testpool == $snap_changed_nsecs_testpool ]
 log_must eval "[[ $(stat_mtime $tpool_snapdir) ==  $snap_changed_testpool ]]"
 
 curr_time=$(date '+%s')
+log_must sleep 1
 log_must zfs snapshot $snap_testfsv1
 snap_changed_testfs=$(zfs get -H -o value -p snapshots_changed $TESTPOOL/$TESTFS)
 snap_changed_nsecs_testfs=$(zfs get -H -o value -p snapshots_changed_nsecs $TESTPOOL/$TESTFS)
@@ -121,6 +113,7 @@ log_must eval "[[ $(zfs get -H -o value -p snapshots_changed_nsecs $TESTPOOL/$TE
 
 # Create snapshot while unmounted
 curr_time=$(date '+%s')
+log_must sleep 1
 log_must zfs snapshot $snap_testfsv2
 snap_changed_testfs=$(zfs get -H -o value -p snapshots_changed $TESTPOOL/$TESTFS)
 snap_changed_nsecs_testfs=$(zfs get -H -o value -p snapshots_changed_nsecs $TESTPOOL/$TESTFS)
@@ -144,6 +137,7 @@ log_must eval "[[ $(stat_mtime $tfs_snapdir) ==  $snap_changed_testfs ]]"
 
 # Destroy the snapshots and check snapshots_changed shows correct time
 curr_time=$(date '+%s')
+log_must sleep 1
 log_must zfs destroy $snap_testfsv1
 snap_changed_testfs=$(zfs get -H -o value -p snapshots_changed $TESTPOOL/$TESTFS)
 snap_changed_nsecs_testfs=$(zfs get -H -o value -p snapshots_changed_nsecs $TESTPOOL/$TESTFS)
@@ -152,6 +146,7 @@ log_must eval "[[ $((snap_changed_nsecs_testfs / 1000000000)) == $snap_changed_t
 log_must eval "[[ $(stat_mtime $tfs_snapdir) ==  $snap_changed_testfs ]]"
 
 curr_time=$(date '+%s')
+log_must sleep 1
 log_must zfs destroy $snap_testpool
 snap_changed_testpool=$(zfs get -H -o value -p snapshots_changed $TESTPOOL)
 snap_changed_nsecs_testpool=$(zfs get -H -o value -p snapshots_changed_nsecs $TESTPOOL)

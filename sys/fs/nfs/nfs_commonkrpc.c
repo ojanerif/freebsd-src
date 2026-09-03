@@ -261,7 +261,7 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 	CLIENT *client;
 	struct netconfig *nconf;
 	struct socket *so;
-	int one = 1, retries, error = 0;
+	int one = 1, retries, error = 0, val;
 	struct thread *td = curthread;
 	SVCXPRT *xprt;
 	struct timeval timo;
@@ -289,93 +289,101 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 		td->td_ucred = cred;
 	saddr = nrp->nr_nam;
 
-	if (saddr->sa_family == AF_INET)
-		if (nrp->nr_sotype == SOCK_DGRAM)
+	if (saddr->sa_family == AF_INET) {
+		if (nmp != NULL && NFSHASRDMA(nmp))
+			nconf = getnetconfigent("rdma");
+		else if (nrp->nr_sotype == SOCK_DGRAM)
 			nconf = getnetconfigent("udp");
 		else
 			nconf = getnetconfigent("tcp");
-	else
-		if (nrp->nr_sotype == SOCK_DGRAM)
+	} else {
+		if (nmp != NULL && NFSHASRDMA(nmp))
+			nconf = getnetconfigent("rdma6");
+		else if (nrp->nr_sotype == SOCK_DGRAM)
 			nconf = getnetconfigent("udp6");
 		else
 			nconf = getnetconfigent("tcp6");
+	}
 			
-	pktscale = nfs_bufpackets;
-	if (pktscale < 2)
-		pktscale = 2;
-	if (pktscale > 64)
-		pktscale = 64;
-	pktscalesav = pktscale;
-	/*
-	 * soreserve() can fail if sb_max is too small, so shrink pktscale
-	 * and try again if there is an error.
-	 * Print a log message suggesting increasing sb_max.
-	 * Creating a socket and doing this is necessary since, if the
-	 * reservation sizes are too large and will make soreserve() fail,
-	 * the connection will work until a large send is attempted and
-	 * then it will loop in the krpc code.
-	 */
-	so = NULL;
-	saddr = NFSSOCKADDR(nrp->nr_nam, struct sockaddr *);
-	error = socreate(saddr->sa_family, &so, nrp->nr_sotype, 
-	    nrp->nr_soproto, td->td_ucred, td);
-	if (error != 0)
-		goto out;
-	do {
-	    if (error != 0 && pktscale > 2) {
-		if (nmp != NULL && nrp->nr_sotype == SOCK_STREAM &&
-		    pktscale == pktscalesav) {
-		    /*
-		     * Suggest vfs.nfs.bufpackets * maximum RPC message,
-		     * adjusted for the sb_max->sb_max_adj conversion of
-		     * MCLBYTES / (MSIZE + MCLBYTES) as the minimum setting
-		     * for kern.ipc.maxsockbuf.
-		     */
-		    tval = (NFS_MAXBSIZE + NFS_MAXXDR) * nfs_bufpackets;
-		    tval *= MSIZE + MCLBYTES;
-		    tval += MCLBYTES - 1; /* Round up divide by MCLBYTES. */
-		    tval /= MCLBYTES;
-		    printf("Consider increasing kern.ipc.maxsockbuf to a "
-			"minimum of %ju to support %ubyte NFS I/O\n",
-			(uintmax_t)tval, NFS_MAXBSIZE);
-		}
-		pktscale--;
-	    }
-	    if (nrp->nr_sotype == SOCK_DGRAM) {
-		if (nmp != NULL) {
-			sndreserve = (NFS_MAXDGRAMDATA + NFS_MAXPKTHDR) *
-			    pktscale;
-			rcvreserve = (NFS_MAXDGRAMDATA + NFS_MAXPKTHDR) *
-			    pktscale;
-		} else {
-			sndreserve = rcvreserve = 1024 * pktscale;
-		}
-	    } else {
-		if (nrp->nr_sotype != SOCK_STREAM)
-			panic("nfscon sotype");
-		if (nmp != NULL) {
-			sndreserve = (NFS_MAXBSIZE + NFS_MAXXDR) *
-			    pktscale;
-			rcvreserve = (NFS_MAXBSIZE + NFS_MAXXDR) *
-			    pktscale;
-		} else {
-			sndreserve = rcvreserve = 1024 * pktscale;
-		}
-	    }
-	    error = soreserve(so, sndreserve, rcvreserve);
-	    if (error != 0 && nmp != NULL && nrp->nr_sotype == SOCK_STREAM &&
-		pktscale <= 2)
-		printf("Must increase kern.ipc.maxsockbuf or reduce"
-		    " rsize, wsize\n");
-	} while (error != 0 && pktscale > 2);
-	soclose(so);
+	sndreserve = rcvreserve = 0;
+	if (nmp == NULL || !NFSHASRDMA(nmp)) {
+		pktscale = nfs_bufpackets;
+		if (pktscale < 2)
+			pktscale = 2;
+		if (pktscale > 64)
+			pktscale = 64;
+		pktscalesav = pktscale;
+		/*
+		 * soreserve() can fail if sb_max is too small, so shrink
+		 * pktscale and try again if there is an error.
+		 * Print a log message suggesting increasing sb_max.
+		 * Creating a socket and doing this is necessary since, if the
+		 * reservation sizes are too large and will make soreserve()
+		 * fail, the connection will work until a large send is
+		 * attempted and then it will loop in the krpc code.
+		 */
+		so = NULL;
+		saddr = NFSSOCKADDR(nrp->nr_nam, struct sockaddr *);
+		error = socreate(saddr->sa_family, &so, nrp->nr_sotype,
+		    nrp->nr_soproto, td->td_ucred, td);
+		if (error != 0)
+			goto out;
+		do {
+		    if (error != 0 && pktscale > 2) {
+			if (nmp != NULL && nrp->nr_sotype == SOCK_STREAM &&
+			    pktscale == pktscalesav) {
+			    /*
+			     * Suggest vfs.nfs.bufpackets * maximum RPC message,
+			     * adjusted for the sb_max->sb_max_adj conversion of
+			     * MCLBYTES / (MSIZE + MCLBYTES) as the minimum
+			     * setting for kern.ipc.maxsockbuf.
+			     */
+			    tval = (NFS_MAXBSIZE + NFS_MAXXDR) * nfs_bufpackets;
+			    tval *= MSIZE + MCLBYTES;
+			    tval += MCLBYTES - 1; /* Round up divide. */
+			    tval /= MCLBYTES;
+			    printf("Consider increasing kern.ipc.maxsockbuf to "
+				"a minimum of %ju to support %ubyte NFS I/O\n",
+				(uintmax_t)tval, NFS_MAXBSIZE);
+			}
+			pktscale--;
+		    }
+		    if (nrp->nr_sotype == SOCK_DGRAM) {
+			if (nmp != NULL) {
+				sndreserve = (NFS_MAXDGRAMDATA +
+				    NFS_MAXPKTHDR) * pktscale;
+				rcvreserve = (NFS_MAXDGRAMDATA +
+				    NFS_MAXPKTHDR) * pktscale;
+			} else {
+				sndreserve = rcvreserve = 1024 * pktscale;
+			}
+		    } else {
+			if (nrp->nr_sotype != SOCK_STREAM)
+				panic("nfscon sotype");
+			if (nmp != NULL) {
+				sndreserve = (NFS_MAXBSIZE + NFS_MAXXDR) *
+				    pktscale;
+				rcvreserve = (NFS_MAXBSIZE + NFS_MAXXDR) *
+				    pktscale;
+			} else {
+				sndreserve = rcvreserve = 1024 * pktscale;
+			}
+		    }
+		    error = soreserve(so, sndreserve, rcvreserve);
+		    if (error != 0 && nmp != NULL &&
+			nrp->nr_sotype == SOCK_STREAM && pktscale <= 2)
+			printf("Must increase kern.ipc.maxsockbuf or reduce"
+			    " rsize, wsize\n");
+		} while (error != 0 && pktscale > 2);
+		soclose(so);
+	}
 	if (error != 0)
 		goto out;
 
 	client = clnt_reconnect_create(nconf, saddr, nrp->nr_prog,
 	    nrp->nr_vers, sndreserve, rcvreserve);
 	CLNT_CONTROL(client, CLSET_WAITCHAN, "nfsreq");
-	if (nmp != NULL) {
+	if (nmp != NULL && !NFSHASRDMA(nmp)) {
 		if ((nmp->nm_flag & NFSMNT_INT))
 			CLNT_CONTROL(client, CLSET_INTERRUPTIBLE, &one);
 		if ((nmp->nm_flag & NFSMNT_RESVPORT))
@@ -466,7 +474,7 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 				retries = nfs_dsretries;
 			}
 		}
-	} else {
+	} else if (nmp == NULL) {
 		/*
 		 * Three cases:
 		 * - Null RPC callback to client
@@ -481,6 +489,41 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 		}
 		if (dotls)
 			CLNT_CONTROL(client, CLSET_TLS, &one);
+	} else {
+		/* RDMA. */
+		if (NFSHASNFSV4N(nmp) && cred != NULL) {
+			/*
+			 * Set up the backchannel. svc_vc_create_backchannel()
+			 * is sufficient.  The rdma boolean in conn_cf will get
+			 * set by the CLSET_BACKCHANNEL control.
+			 */
+			/*
+			 * Make sure the nfscbd_pool doesn't get
+			 * destroyed while doing this.
+			 */
+			NFSD_LOCK();
+			if (nfs_numnfscbd > 0) {
+				nfs_numnfscbd++;
+				NFSD_UNLOCK();
+				xprt = svc_vc_create_backchannel(nfscbd_pool);
+				CLNT_CONTROL(client, CLSET_BACKCHANNEL, xprt);
+				NFSD_LOCK();
+				nfs_numnfscbd--;
+				if (nfs_numnfscbd == 0)
+					wakeup(&nfs_numnfscbd);
+			}
+			NFSD_UNLOCK();
+		}
+
+		/* Set the small reply size for a Readdir. */
+		val = NFS_DIRBLKSIZ + PAGE_SIZE;
+		CLNT_CONTROL(client, CLSET_RDMASMALL_REPLY, &val);
+		val = NFSV4_CBSLOTS;
+		CLNT_CONTROL(client, CLSET_RDMA_CBSLOTS, &val);
+		if (NFSHASSOFT(nmp))
+			retries = nmp->nm_retry;
+		else
+			retries = INT_MAX;
 	}
 	CLNT_CONTROL(client, CLSET_RETRIES, &retries);
 
@@ -561,7 +604,9 @@ newnfs_disconnect(struct nfsmount *nmp, struct nfssockreq *nrp)
 			}
 		}
 		mtx_unlock(&nrp->nr_mtx);
+		CURVNET_SET_QUIET(CRED_TO_VNET(nrp->nr_cred));
 		rpc_gss_secpurge_call(client);
+		CURVNET_RESTORE();
 		CLNT_CLOSE(client);
 		CLNT_RELEASE(client);
 		if (nmp != NULL && nmp->nm_aconnect > 0) {
@@ -685,7 +730,7 @@ newnfs_request(struct nfsrv_descript *nd, struct nfsmount *nmp,
 	struct nfsreq *rep = NULL;
 	char *srv_principal = NULL, *clnt_principal = NULL;
 	sigset_t oldset;
-	struct ucred *authcred;
+	struct ucred *authcred, *savcred;
 	struct nfsclsession *sep;
 	uint8_t sessionid[NFSX_V4SESSIONID];
 	bool nextconn_set;
@@ -832,6 +877,11 @@ newnfs_request(struct nfsrv_descript *nd, struct nfsmount *nmp,
 		    ((nmp->nm_tprintf_delay)-(nmp->nm_tprintf_initial_delay));
 	}
 
+	/*
+	 * For Kerberos, the upcall needs to be done to the gssd daemon
+	 * running in the correct vnet.
+	 */
+	CURVNET_SET_QUIET(CRED_TO_VNET(authcred));
 	if (nd->nd_procnum == NFSPROC_NULL)
 		auth = authnone_create();
 	else if (usegssname) {
@@ -849,8 +899,9 @@ newnfs_request(struct nfsrv_descript *nd, struct nfsmount *nmp,
 	} else
 		auth = nfs_getauth(nrp, secflavour, NULL,
 		    srv_principal, NULL, authcred);
-	crfree(authcred);
+	CURVNET_RESTORE();
 	if (auth == NULL) {
+		crfree(authcred);
 		m_freem(nd->nd_mreq);
 		if (set_sigset)
 			newnfs_restore_sigmask(td, &oldset);
@@ -967,6 +1018,13 @@ tryagain:
 		}
 	}
 
+	/*
+	 * In case CLNT_CALL_MBUF()/clnt_bck_call() does an AUTH_REFRESH(),
+	 * the thread's credentials need to be set to authcred, so that the
+	 * correct vnet will be set.
+	 */
+	savcred = curthread->td_ucred;
+	curthread->td_ucred = authcred;
 	nd->nd_mrep = NULL;
 	if (clp != NULL && sep != NULL)
 		stat = clnt_bck_call(nrp->nr_client, &ext, procnum,
@@ -988,6 +1046,7 @@ tryagain:
 		stat = CLNT_CALL_MBUF(nrp->nr_client, &ext, procnum,
 		    nd->nd_mreq, &nd->nd_mrep, timo);
 	NFSCL_DEBUG(2, "clnt call=%d\n", stat);
+	curthread->td_ucred = savcred;
 
 	if (rep != NULL) {
 		/*
@@ -1069,6 +1128,7 @@ tryagain:
 		error = EACCES;
 	}
 	if (error) {
+		crfree(authcred);
 		m_freem(nd->nd_mreq);
 		if (usegssname == 0)
 			AUTH_DESTROY(auth);
@@ -1128,7 +1188,20 @@ tryagain:
 			if ((nmp != NULL && i == NFSV4OP_SEQUENCE && j != 0) ||
 			   (clp != NULL && i == NFSV4OP_CBSEQUENCE && j != 0)) {
 				NFSCL_DEBUG(1, "failed seq=%d\n", j);
-				if (sep != NULL && i == NFSV4OP_SEQUENCE &&
+				KASSERT(slot == -1, ("newnfs_request: slot not"
+				    " -1"));
+				/*
+				 * RFC8881 (unlike RFC5661) specifies that a
+				 * NFSERR_DELAY reply to SEQUENCE is handled
+				 * by a retry with same slot/sequence#.
+				 * (Although not explicit, I will assume this
+				 *  applies to CB_SEQUENCE as well.)
+				 */
+				if (j == NFSERR_DELAY) {
+					nd->nd_repstat =
+					    NFSERR_RETRYUNCACHEDREP;
+				} else if (sep != NULL &&
+				    i == NFSV4OP_SEQUENCE &&
 				    j == NFSERR_SEQMISORDERED) {
 					mtx_lock(&sep->nfsess_mtx);
 					sep->nfsess_badslots |=
@@ -1248,19 +1321,29 @@ tryagain:
 					goto out;
 				}
 				sep = NFSMNT_MDSSESSION(nmp);
-				if (bcmp(sep->nfsess_sessionid, nd->nd_sequence,
-				    NFSX_V4SESSIONID) == 0) {
-					printf("Initiate recovery. If server "
-					    "has not rebooted, "
-					    "check NFS clients for unique "
-					    "/etc/hostid's\n");
-					/* Initiate recovery. */
+				if (bcmp(sep->nfsess_sessionid,
+				    nd->nd_sessionid, NFSX_V4SESSIONID) == 0) {
+					/*
+					 * Initiate recovery.  Even if
+					 * nfsess_defunct is already set,
+					 * another recovery may be needed.
+					 * NFSCLFLAGS_RECVRINPRG |
+					 * NFSCLFLAGS_RECOVER should avoid
+					 * recovery storms.
+					 */
 					sep->nfsess_defunct = 1;
 					NFSCL_DEBUG(1, "Marked defunct\n");
-					if (nmp->nm_clp != NULL) {
+					if (nmp->nm_clp != NULL &&
+					    (nmp->nm_clp->nfsc_flags &
+					     (NFSCLFLAGS_RECVRINPROG |
+					      NFSCLFLAGS_RECOVER)) == 0) {
 						nmp->nm_clp->nfsc_flags |=
 						    NFSCLFLAGS_RECOVER;
 						wakeup(nmp->nm_clp);
+						printf("Initiate recovery. If "
+						    "server has not rebooted, "
+						    "check NFS clients for "
+						    "unique /etc/hostid's\n");
 					}
 				}
 				NFSUNLOCKCLSTATE();
@@ -1429,6 +1512,7 @@ tryagain:
 		}
 	}
 out:
+	crfree(authcred);
 
 #ifdef KDTRACE_HOOKS
 	if (nmp != NULL && dtrace_nfscl_nfs234_done_probe != NULL) {
@@ -1460,6 +1544,7 @@ out:
 		newnfs_restore_sigmask(td, &oldset);
 	return (0);
 nfsmout:
+	crfree(authcred);
 	m_freem(nd->nd_mrep);
 	m_freem(nd->nd_mreq);
 	if (usegssname == 0)

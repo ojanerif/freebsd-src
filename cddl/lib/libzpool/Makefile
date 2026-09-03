@@ -163,6 +163,8 @@ KERNEL_C = \
 	vdev_root.c \
 	vdev_trim.c \
 	zap.c \
+	zap_fat.c \
+	zap_impl.c \
 	zap_leaf.c \
 	zap_micro.c \
 	zcp.c \
@@ -215,12 +217,12 @@ ARCH_C += 	vdev_raidz_math_sse2.c \
 		vdev_raidz_math_ssse3.c \
 		zfs_fletcher_intel.c \
 		zfs_fletcher_sse.c 
-CFLAGS +=  -DHAVE_SSE2 	-DHAVE_SSE3
+CFLAGS +=  -DHAVE_TOOLCHAIN_SSE2 -DHAVE_TOOLCHAIN_SSSE3
 .endif
 .if ${MACHINE_ARCH} == "amd64"
 ARCH_C +=	zfs_fletcher_avx512.c
-CFLAGS+= -DHAVE_AVX2 -DHAVE_AVX -D__x86_64 -DHAVE_AVX512F \
-	-DHAVE_AVX512BW
+CFLAGS+= -D__x86_64 -DHAVE_TOOLCHAIN_AVX2 -DHAVE_TOOLCHAIN_AVX \
+	-DHAVE_TOOLCHAIN_AVX512F -DHAVE_TOOLCHAIN_AVX512BW
 .endif
 .if ${MACHINE_CPUARCH} == "aarch64"
 ARCH_C +=	zfs_fletcher_aarch64_neon.c
@@ -272,7 +274,7 @@ CFLAGS+= \
 	-include ${SRCTOP}/sys/modules/zfs/zfs_config.h \
 	-I${SRCTOP}/sys/modules/zfs \
 	-I${ZFSTOP}/include/os/freebsd/zfs \
-	-DLIB_ZPOOL_BUILD -DZFS_DEBUG \
+	-DLIB_ZPOOL_BUILD -DZFS_DEBUG -DXXH_INLINE_ALL \
 
 # XXX: pthread doesn't have mutex_owned() equivalent, so we need to look
 #      into libthr private structures. That's sooo evil, but it's only for
@@ -281,7 +283,6 @@ CFLAGS+=	-DWANTS_MUTEX_OWNED
 CFLAGS+=	-I${SRCTOP}/lib/libpthread/thread
 CFLAGS+=	-I${SRCTOP}/lib/libpthread/sys
 CFLAGS+=	-I${SRCTOP}/lib/libthr/arch/${MACHINE_CPUARCH}/include
-CFLAGS.gcc+=	-fms-extensions
 
 LIBADD=		md pthread z spl icp nvpair avl umem
 
@@ -293,6 +294,11 @@ CSTD=	c99
 CFLAGS+=	-g -DDEBUG=1
 
 CFLAGS.gcc+=	-Wno-pointer-to-int-cast
+
+# Some versions of LLVM contain duplicate typedefs in the <*intrin.h> headers,
+# which are not allowed prior to C11; since libzpool is built with C99, make
+# this not be an error.
+CFLAGS.clang+=	-Wno-error=typedef-redefinition
 
 # Pointer values are used as debugging "tags" to mark reference count
 # ownerships and in some cases the tag reference is dropped after an

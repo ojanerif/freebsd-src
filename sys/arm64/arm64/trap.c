@@ -94,6 +94,7 @@ typedef void (abort_handler)(struct thread *, struct trapframe *, uint64_t,
 static abort_handler align_abort;
 static abort_handler data_abort;
 static abort_handler external_abort;
+static abort_handler tag_check_abort;
 
 static abort_handler *abort_handlers[] = {
 	[ISS_DATA_DFSC_TF_L0] = data_abort,
@@ -106,6 +107,7 @@ static abort_handler *abort_handlers[] = {
 	[ISS_DATA_DFSC_PF_L1] = data_abort,
 	[ISS_DATA_DFSC_PF_L2] = data_abort,
 	[ISS_DATA_DFSC_PF_L3] = data_abort,
+	[ISS_DATA_DFSC_TAG] = tag_check_abort,
 	[ISS_DATA_DFSC_ALIGN] = align_abort,
 	[ISS_DATA_DFSC_EXT] =  external_abort,
 	[ISS_DATA_DFSC_EXT_L0] =  external_abort,
@@ -129,6 +131,7 @@ call_trapsignal(struct thread *td, int sig, int code, void *addr, int trapno)
 	ksi.ksi_code = code;
 	ksi.ksi_addr = addr;
 	ksi.ksi_trapno = trapno;
+	ksi.ksi_flags |= KSI_EXCEPT;
 	trapsignal(td, &ksi);
 }
 
@@ -214,6 +217,17 @@ align_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
     uint64_t far, int lower)
 {
 	if (!lower) {
+		/*
+		 * Accessing unaligned memory may fault when using atomics.
+		 * Make sure we don't panic if we're doing an unaligned
+		 * access to userland memory, as can happen with _umtx_op()
+		 */
+		if (td->td_intr_nesting_level == 0 &&
+		    td->td_pcb->pcb_onfault != 0) {
+			frame->tf_elr = td->td_pcb->pcb_onfault;
+			return;
+		}
+
 		print_registers(frame);
 		print_gp_register("far", far);
 		printf(" esr: 0x%.16lx\n", esr);
@@ -248,6 +262,34 @@ external_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
 	print_gp_register("far", far);
 	printf(" esr: 0x%.16lx\n", esr);
 	panic("Unhandled external data abort");
+}
+
+static void
+tag_check_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
+    uint64_t far, int lower)
+{
+	/*
+	 * A Tag Check Fault should be handled as a SIGSEGV if it occurs
+	 * at EL0 and a kernel panic if at EL1.
+	 */
+	if (!lower) {
+		/*
+		 * If we have a fault handler, let it decide what to do.
+		 */
+		if (td->td_intr_nesting_level == 0 &&
+		    td->td_pcb->pcb_onfault != 0) {
+			frame->tf_elr = td->td_pcb->pcb_onfault;
+			return;
+		}
+		print_registers(frame);
+		print_gp_register("far", far);
+		printf(" esr: 0x%.16lx\n", esr);
+		panic("Tag Check Fault");
+	}
+
+	call_trapsignal(td, SIGSEGV, SEGV_MTESERR, (void *)far,
+	    ESR_ELx_EXCEPTION(frame->tf_esr));
+	userret(td, frame);
 }
 
 /*

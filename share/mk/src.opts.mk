@@ -73,7 +73,6 @@ __DEFAULT_YES_OPTIONS = \
     BOOTPD \
     BSDINSTALL \
     BSNMP \
-    BZIP2 \
     CALENDAR \
     CAROOT \
     CCD \
@@ -125,15 +124,17 @@ __DEFAULT_YES_OPTIONS = \
     LLVM_ASSERTIONS \
     LLVM_BINUTILS \
     LLVM_BINUTILS_BOOTSTRAP \
-    LLVM_COV \
+    LOADER_BIOS \
     LOADER_BIOS_TEXTONLY \
     LOADER_GELI \
+    LOADER_IA32 \
     LOADER_KBOOT \
     LOADER_LUA \
     LOADER_OFW \
     LOADER_PXEBOOT \
     LOADER_UBOOT \
-    LOADER_IA32 \
+    LOADER_USERBOOT \
+    LOADER_ZFS \
     LOCALES \
     LOCATE \
     LPR \
@@ -157,6 +158,7 @@ __DEFAULT_YES_OPTIONS = \
     PAM \
     PF \
     PKGBOOTSTRAP \
+    PKGCONF \
     PKGSERVE \
     PMC \
     PPP \
@@ -193,7 +195,6 @@ __DEFAULT_YES_OPTIONS = \
     WPA_SUPPLICANT_EAPOL \
     ZFS \
     ZFS_TESTS \
-    LOADER_ZFS \
     ZONEINFO
 
 __DEFAULT_NO_OPTIONS = \
@@ -202,18 +203,17 @@ __DEFAULT_NO_OPTIONS = \
     CLANG_EXTRAS \
     CLANG_FORMAT \
     CLEAN \
-    DIALOG \
     DETECT_TZ_CHANGES \
     DISK_IMAGE_TOOLS_BOOTSTRAP \
     DTRACE_ASAN \
     DTRACE_TESTS \
-    EXPERIMENTAL \
     HESIOD \
     IPFILTER_IPFS \
-    LOADER_VERBOSE \
-    LOADER_VERIEXEC_PASS_MANIFEST \
     LLVM_FULL_DEBUGINFO \
     LLVM_LINK_STATIC_LIBRARIES \
+    LOADER_USB \
+    LOADER_VERBOSE \
+    LOADER_VERIEXEC_PASS_MANIFEST \
     MALLOC_PRODUCTION \
     OFED_EXTRA \
     OPENLDAP \
@@ -246,7 +246,6 @@ __LIBC_MALLOC_DEFAULT=	jemalloc
 .for var in \
     BLACKLIST \
     BLOCKLIST \
-    BZIP2 \
     INET \
     INET6 \
     KERBEROS \
@@ -347,8 +346,8 @@ BROKEN_OPTIONS+=LOADER_IA32
 BROKEN_OPTIONS+=LOADER_GELI LOADER_LUA
 .endif
 
-# Kernel TLS is enabled by default on amd64, aarch64 and powerpc64*
-.if ${__T} == "aarch64" || ${__T} == "amd64" || ${__T:Mpowerpc64*} != ""
+# Kernel TLS is enabled by default on amd64, aarch64, powerpc64*, and riscv64*
+.if ${__T} == "aarch64" || ${__T} == "amd64" || ${__T:Mpowerpc64*} != "" || ${__T:Mriscv64*} != ""
 __DEFAULT_YES_OPTIONS+=OPENSSL_KTLS
 .else
 __DEFAULT_NO_OPTIONS+=OPENSSL_KTLS
@@ -407,6 +406,14 @@ MK_BLOCKLIST:=	no
 MK_BLOCKLIST_SUPPORT:=	no
 .endif
 
+.if ${MK_BLOCKLIST} == "no"
+MK_BLACKLIST:=	no
+.endif
+
+.if ${MK_BLOCKLIST_SUPPORT} == "no"
+MK_BLACKLIST_SUPPORT:=	no
+.endif
+
 .if ${MK_CDDL} == "no"
 MK_CTF:=	no
 MK_DTRACE:=	no
@@ -422,6 +429,8 @@ MK_KERBEROS_SUPPORT:=	no
 MK_MITKRB5:=	no
 .endif
 
+# MK_DTRACE also gates ctf tools, so we cannot build userland with CTF
+# if it is off.
 .if ${MK_DTRACE} == "no"
 MK_CTF:=	no
 .endif
@@ -487,6 +496,7 @@ MK_ZONEINFO_LEAPSECONDS_SUPPORT:= no
 MK_CLANG_BOOTSTRAP:= no
 MK_ELFTOOLCHAIN_BOOTSTRAP:= no
 MK_LLD_BOOTSTRAP:= no
+MK_LLVM_BINUTILS_BOOTSTRAP:= no
 .endif
 
 .if ${MK_TOOLCHAIN} == "no"
@@ -500,7 +510,6 @@ MK_LLVM_BINUTILS:=	no
 MK_CLANG_EXTRAS:= no
 MK_CLANG_FORMAT:= no
 MK_CLANG_FULL:= no
-MK_LLVM_COV:= no
 .endif
 
 .if ${MK_ASAN} == "yes"

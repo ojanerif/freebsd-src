@@ -352,8 +352,20 @@ counter_body()
 	# Generate traffic
 	atf_check -s exit:0 -o ignore ping -c 1 192.0.2.1
 	atf_check -s exit:0 -e ignore \
-	    -o match:'[ Evaluations: 1         Packets: 2         Bytes: 168         States: 1     ]' \
+	    -o match:'\[ Evaluations: 1         Packets: 2         Bytes: 168         States: 1     \]' \
 	    jexec alcatraz pfctl -sr -vv
+
+	# Zero counters outside of the anchor
+	jexec alcatraz pfctl -sr -vv -z
+	atf_check -s exit:0 -e ignore \
+	    -o match:'\[ Evaluations: 1         Packets: 2         Bytes: 168         States: 1     \]' \
+	    jexec alcatraz pfctl -sr -vv -a "foo"
+
+	# Zero the anchor's counters
+	jexec alcatraz pfctl -sr -vv -z -a "foo"
+	atf_check -s exit:0 -e ignore \
+	    -o match:'\[ Evaluations: 0         Packets: 0         Bytes: 0           States: 1     \]' \
+	    jexec alcatraz pfctl -sr -vv -a "foo"
 }
 
 counter_cleanup()
@@ -538,6 +550,35 @@ recursive_flush_cleanup()
 	pft_cleanup
 }
 
+atf_test_case "show_recursive" "cleanup"
+show_recursive_head()
+{
+	atf_set descr 'Test showing anchors recursively. PR 297839'
+	atf_set require.user root
+}
+
+show_recursive_body()
+{
+	pft_init
+
+	vnet_mkjail alcatraz
+
+	pft_set_rules alcatraz \
+	    "pass in no state" \
+	    "pass out no state" \
+	    "anchor \"test/*\""
+
+	echo 'pass in' | jexec alcatraz pfctl -a test/testing -f -
+
+	atf_check -o match:"pass in" \
+	    jexec alcatraz pfctl -a 'test/*' -sr
+}
+
+show_recursive_cleanup()
+{
+	pft_cleanup
+}
+
 atf_init_test_cases()
 {
 	atf_add_test_case "pr183198"
@@ -553,4 +594,5 @@ atf_init_test_cases()
 	atf_add_test_case "include"
 	atf_add_test_case "quick"
 	atf_add_test_case "recursive_flush"
+	atf_add_test_case "show_recursive"
 }

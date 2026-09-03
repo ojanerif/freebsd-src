@@ -60,6 +60,17 @@
 #include <linux/pci_ids.h>
 #include <linux/pm.h>
 
+/*
+ * <linux/ioport.h> should be included here, like Linux, but we can't have that
+ * because Linux `struct resource` definition would conflict with FreeBSD
+ * native definition.
+ *
+ * At least the amdgpu DRM driver (amdgpu_isp.c at the time of this writing)
+ * relies on this indirect include to get the definition of Linux `struct
+ * resource`. As a workaround, we include <linux/ioport.h> from
+ * <linux/mfd/core.h>.
+ */
+
 #include <linux/kernel.h>	/* pr_debug */
 
 struct pci_device_id {
@@ -388,8 +399,7 @@ int _lkpi_pci_enable_msi_range(struct pci_dev *pdev, int minvec, int maxvec);
 static inline bool
 dev_is_pci(struct device *dev)
 {
-
-	return (device_get_devclass(dev->bsddev) == devclass_find("pci"));
+	return (is_pci_device(dev->bsddev));
 }
 
 static inline uint16_t
@@ -545,8 +555,7 @@ pci_upstream_bridge(struct pci_dev *pdev)
 		bridge = device_get_parent(bridge);
 		if (bridge == NULL)
 			goto done;
-		if (device_get_devclass(device_get_parent(bridge)) !=
-		    devclass_find("pci"))
+		if (!is_pci_device(bridge))
 			goto done;
 
 		/*
@@ -649,26 +658,10 @@ pci_find_ext_capability(struct pci_dev *pdev, int capid)
 	return (reg);
 }
 
-#define	PCIM_PCAP_PME_SHIFT	11
 static __inline bool
-pci_pme_capable(struct pci_dev *pdev, uint32_t flag)
+pci_pme_capable(struct pci_dev *pdev, pci_power_t state)
 {
-	struct pci_devinfo *dinfo;
-	pcicfgregs *cfg;
-
-	if (flag > (PCIM_PCAP_D3PME_COLD >> PCIM_PCAP_PME_SHIFT))
-		return (false);
-
-	dinfo = device_get_ivars(pdev->dev.bsddev);
-	cfg = &dinfo->cfg;
-
-	if (cfg->pp.pp_cap == 0)
-		return (false);
-
-	if ((cfg->pp.pp_cap & (1 << (PCIM_PCAP_PME_SHIFT + flag))) != 0)
-		return (true);
-
-	return (false);
+	return (pci_has_pme(pdev->dev.bsddev, state));
 }
 
 static inline int
@@ -1320,6 +1313,13 @@ pci_dev_present(const struct pci_device_id *cur)
 		cur++;
 	}
 	return (0);
+}
+
+static inline bool
+pci_dev_is_disconnected(const struct pci_dev *pdev)
+{
+	pr_debug("TODO: %s\n", __func__);
+	return (false);
 }
 
 static inline const struct pci_device_id *

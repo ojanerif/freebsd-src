@@ -52,6 +52,8 @@ argv_body()
 {
 	yes y >/dev/null &
 	local pid=$!
+	# Wait for yes(1) to exec before checking args
+	sleep 0.1
 	atf_check -o inline:"yes y\n" ps -o args= $pid
 	kill $pid
 	wait
@@ -64,14 +66,15 @@ stdout_head()
 }
 stdout_body()
 {
-	(
+	mkfifo fifo
+	: <fifo &
+	{
+		wait
 		trap "" PIPE
-		# Give true(1) some time to exit.
-		sleep 1
 		yes 2>stderr
-		echo $? >result
-	) | true
-	atf_check -o inline:"1\n" cat result
+		result=$?
+	} >fifo
+	atf_check_equal 1 "$result"
 	atf_check -o match:"stdout" cat stderr
 }
 

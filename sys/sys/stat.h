@@ -273,7 +273,7 @@ struct nstat {
 #define	S_IFREG	 0100000		/* regular */
 #define	S_IFLNK	 0120000		/* symbolic link */
 #define	S_IFSOCK 0140000		/* socket */
-#define	S_ISVTX	 0001000		/* save swapped text even after use */
+#define	S_ISVTX	 0001000		/* sticky(7) bit is set */
 #endif
 #if __BSD_VISIBLE
 #define	S_IFWHT  0160000		/* whiteout */
@@ -327,6 +327,7 @@ struct nstat {
 #define	UF_REPARSE	0x00000400	/* Windows reparse point file bit */
 #define	UF_ARCHIVE	0x00000800	/* file needs to be archived */
 #define	UF_READONLY	0x00001000	/* Windows readonly file bit */
+#define	UF_NOCACHE	0x00002000	/* don't cache file data (NFSv4) */
 /* This is the same as the MacOS X definition of UF_HIDDEN. */
 #define	UF_HIDDEN	0x00008000	/* file is hidden */
 

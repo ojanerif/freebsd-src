@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 
 /*
@@ -708,7 +698,7 @@ zfs_open(libzfs_handle_t *hdl, const char *path, int types)
 {
 	zfs_handle_t *zhp;
 	char errbuf[ERRBUFLEN];
-	char *bookp;
+	const char *bookp;
 
 	(void) snprintf(errbuf, sizeof (errbuf),
 	    dgettext(TEXT_DOMAIN, "cannot open '%s'"), path);
@@ -2958,7 +2948,7 @@ userquota_propname_decode(const char *propname, boolean_t zoned,
     zfs_userquota_prop_t *typep, char *domain, int domainlen, uint64_t *ridp)
 {
 	zfs_userquota_prop_t type;
-	char *cp;
+	const char *cp;
 	boolean_t isuser;
 	boolean_t isgroup;
 	boolean_t isproject;
@@ -3347,9 +3337,13 @@ check_parents(libzfs_handle_t *hdl, const char *path, uint64_t *zoned,
 
 	/* we are in a non-global zone, but parent is in the global zone */
 	if (getzoneid() != GLOBAL_ZONEID && !is_zoned) {
-		(void) zfs_standard_error(hdl, EPERM, errbuf);
-		zfs_close(zhp);
-		return (-1);
+		uint64_t zoned_uid = zfs_prop_get_int(zhp, ZFS_PROP_ZONED_UID);
+		if (zoned_uid == 0) {
+			(void) zfs_standard_error(hdl, EPERM, errbuf);
+			zfs_close(zhp);
+			return (-1);
+		}
+		/* zoned_uid set - let kernel decide */
 	}
 
 	/* make sure parent is a filesystem */
@@ -4310,12 +4304,13 @@ zfs_rename(zfs_handle_t *zhp, const char *target, renameflags_t flags)
 {
 	int ret = 0;
 	zfs_cmd_t zc = {"\0"};
-	char *delim;
 	prop_changelist_t *cl = NULL;
 	char parent[ZFS_MAX_DATASET_NAME_LEN];
 	char property[ZFS_MAXPROPLEN];
 	libzfs_handle_t *hdl = zhp->zfs_hdl;
 	char errbuf[ERRBUFLEN];
+	const char *delim;
+	char *delim2;
 
 	/* if we have the same exact name, just return success */
 	if (strcmp(zhp->zfs_name, target) == 0)
@@ -4340,11 +4335,11 @@ zfs_rename(zfs_handle_t *zhp, const char *target, renameflags_t flags)
 			 */
 			(void) strlcpy(parent, zhp->zfs_name,
 			    sizeof (parent));
-			delim = strchr(parent, '@');
+			delim2 = strchr(parent, '@');
 			if (strchr(target, '@') == NULL)
-				*(++delim) = '\0';
+				*(++delim2) = '\0';
 			else
-				*delim = '\0';
+				*delim2 = '\0';
 			(void) strlcat(parent, target, sizeof (parent));
 			target = parent;
 		} else {
@@ -4365,6 +4360,7 @@ zfs_rename(zfs_handle_t *zhp, const char *target, renameflags_t flags)
 		if (!zfs_validate_name(hdl, target, zhp->zfs_type, B_TRUE))
 			return (zfs_error(hdl, EZFS_INVALIDNAME, errbuf));
 	} else {
+
 		if (flags.recursive) {
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 			    "recursive rename must be a snapshot"));
@@ -4420,8 +4416,8 @@ zfs_rename(zfs_handle_t *zhp, const char *target, renameflags_t flags)
 	}
 	if (flags.recursive) {
 		char *parentname = zfs_strdup(zhp->zfs_hdl, zhp->zfs_name);
-		delim = strchr(parentname, '@');
-		*delim = '\0';
+		delim2 = strchr(parentname, '@');
+		*delim2 = '\0';
 		zfs_handle_t *zhrp = zfs_open(zhp->zfs_hdl, parentname,
 		    ZFS_TYPE_DATASET);
 		free(parentname);
@@ -5134,7 +5130,7 @@ zfs_set_fsacl(zfs_handle_t *zhp, boolean_t un, nvlist_t *nvl)
 			err = zfs_error(hdl, EZFS_BADVERSION, errbuf);
 			break;
 		case EINVAL:
-			err = zfs_error(hdl, EZFS_BADTYPE, errbuf);
+			err = zfs_error(hdl, EZFS_BADPERM, errbuf);
 			break;
 		case ENOENT:
 			err = zfs_error(hdl, EZFS_NOENT, errbuf);

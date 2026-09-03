@@ -1,23 +1,13 @@
 // SPDX-License-Identifier: CDDL-1.0
 /*
- * CDDL HEADER START
+ * This file and its contents are supplied under the terms of the
+ * Common Development and Distribution License ("CDDL"), version 1.0.
+ * You may only use this file in accordance with the terms of version
+ * 1.0 of the CDDL.
  *
- * The contents of this file are subject to the terms of the
- * Common Development and Distribution License (the "License").
- * You may not use this file except in compliance with the License.
- *
- * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or https://opensource.org/licenses/CDDL-1.0.
- * See the License for the specific language governing permissions
- * and limitations under the License.
- *
- * When distributing Covered Code, include this CDDL HEADER in each
- * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
- * If applicable, add the following below this CDDL HEADER, with the
- * fields enclosed by brackets "[]" replaced with your own identifying
- * information: Portions Copyright [yyyy] [name of copyright owner]
- *
- * CDDL HEADER END
+ * A full copy of the text of the CDDL should have accompanied this
+ * source.  A copy of the CDDL is also available via the Internet at
+ * https://opensource.org/license/CDDL-1.0.
  */
 /*
  *
@@ -593,6 +583,7 @@ vdev_rebuild_range(vdev_rebuild_t *vr, uint64_t start, uint64_t size)
 	dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
 	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT | DMU_TX_SUSPEND));
 	uint64_t txg = dmu_tx_get_txg(tx);
+	vr->vr_last_txg = txg;
 
 	spa_config_enter(spa, SCL_STATE_ALL, vd, RW_READER);
 	mutex_enter(&vd->vdev_rebuild_lock);
@@ -824,6 +815,7 @@ vdev_rebuild_thread(void *arg)
 		uint64_t limit = (arc_c_max / 2) / MAX(rvd->vdev_children, 1);
 		vr->vr_bytes_inflight_max = MIN(limit, MAX(1ULL << 20,
 		    zfs_rebuild_vdev_limit * vd->vdev_children));
+		vr->vr_last_txg = 0;
 
 		/*
 		 * Removal of vdevs from the vdev tree may eliminate the need
@@ -910,8 +902,16 @@ vdev_rebuild_thread(void *arg)
 		error = vdev_rebuild_ranges(vr);
 		zfs_range_tree_vacate(vr->vr_scan_tree, NULL, NULL);
 
-		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
+		/*
+		 * Allow rebuilt ranges to be sync-ed before enabling metaslab
+		 * to avoid any interfering allocations. Otherwise, we might
+		 * see checksum errors after scrub.
+		 */
+		if (vr->vr_last_txg != 0)
+			txg_wait_synced(dp, vr->vr_last_txg);
+
 		metaslab_enable(msp, B_FALSE, B_FALSE);
+		spa_config_enter(spa, SCL_CONFIG, FTAG, RW_READER);
 
 		if (error != 0)
 			break;

@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2015-2025 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2015-2026 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -53,7 +53,7 @@ my ($no_des, $no_dh, $no_dsa, $no_ec, $no_ec2m, $no_rc2, $no_zlib)
 
 $no_rc2 = 1 if disabled("legacy");
 
-plan tests => 31;
+plan tests => 38;
 
 ok(run(test(["pkcs7_test"])), "test pkcs7");
 
@@ -796,6 +796,18 @@ sub zero_compare {
     return (-e "$opts{output}.txt" && -z "$opts{output}.txt");
 }
 
+sub read_file_text {
+    my ($file) = @_;
+    open(my $fh, "<", $file) or return undef;
+    binmode $fh;
+    local $/;
+    my $data = <$fh>;
+    close($fh);
+    # Normalise line endings as -out is written in text mode on Windows.
+    $data =~ s/\r\n/\n/g if defined $data;
+    return $data;
+}
+
 subtest "CMS => PKCS#7 compatibility tests\n" => sub {
     plan tests => scalar @smime_pkcs7_tests;
 
@@ -1002,6 +1014,56 @@ subtest "CMS Decrypt message encrypted with OpenSSL 1.1.1\n" => sub {
            && compare_text($smcont, $out) == 0,
            "Decrypt message from OpenSSL 1.1.1");
     }
+};
+
+subtest "CMS parse authenticatedData authAttrs and unauthAttrs\n" => sub {
+    plan tests => 3;
+
+    # BouncyCastle authenticatedData (HMAC-SHA256, KEK) carrying both an
+    # authenticated and an unauthenticated attribute. Per RFC 5652 these are
+    # SET OF Attribute, so with the CMS_AuthenticatedData template fixed to use
+    # X509_ATTRIBUTE they are rendered as attributes (object:/set:) rather than
+    # as an X509_ALGOR (algorithm:/parameter:) they were misparsed into before.
+    my $exit = 0;
+    my $dump = join "\n",
+               run(app(["openssl", "cms", @defaultprov, "-cmsout", "-noout",
+                        "-print", "-inform", "PEM",
+                        "-in", catfile($datadir, "authenticated_attrs.pem")]),
+                   capture => 1,
+                   statusvar => $exit);
+
+    is($exit, 0, "parse authenticatedData with attributes");
+    ok($dump =~ /authAttrs:.*?object:.*?1\.3\.6\.1\.4\.1\.5949\.99\.1.*?UTF8STRING:auth-attr-value/s,
+       "authAttrs parsed as SET OF Attribute");
+    ok($dump =~ /unauthAttrs:.*?object:.*?1\.3\.6\.1\.4\.1\.5949\.99\.2.*?UTF8STRING:unauth-attr-value/s,
+       "unauthAttrs parsed as SET OF Attribute");
+};
+
+subtest "CMS decrypt authEnvelopedData with authenticated attributes\n" => sub {
+    plan tests => 4;
+
+    # BouncyCastle AES-128-GCM authEnvelopedData (KEK) carrying authAttrs;
+    # a clean decrypt confirms the authAttrs are verified as the AEAD AAD.
+    1 while unlink "authattrs.txt";
+    ok(run(app(["openssl", "cms", @defaultprov, "-decrypt", "-inform", "PEM",
+                "-secretkey", "000102030405060708090A0B0C0D0E0F",
+                "-secretkeyid", "C0FEE0",
+                "-in", catfile($datadir, "authenveloped_attrs.pem"),
+                "-out", "authattrs.txt" ])),
+       "decrypt authEnvelopedData with authAttrs");
+    is(read_file_text("authattrs.txt"), "Hello AuthEnvelopedData world\n",
+       "decrypted authEnvelopedData plaintext matches expected");
+
+    # A flipped authAttrs byte must fail the tag check and leave -out empty.
+    1 while unlink "bad_authattrs.txt";
+    ok(!run(app(["openssl", "cms", @defaultprov, "-decrypt", "-inform", "PEM",
+                 "-secretkey", "000102030405060708090A0B0C0D0E0F",
+                 "-secretkeyid", "C0FEE0",
+                 "-in", catfile($datadir, "bad_authenveloped_attrs.pem"),
+                 "-out", "bad_authattrs.txt" ])),
+       "reject authEnvelopedData with tampered authAttrs");
+    ok(!-s "bad_authattrs.txt",
+       "tampered authEnvelopedData leaks no plaintext to -out");
 };
 
 subtest "CAdES <=> CAdES consistency tests\n" => sub {
@@ -1247,6 +1309,23 @@ subtest "CMS code signing test" => sub {
        "fail verify CMS signature with code signing certificate for purpose smime_sign");
 };
 
+# Regression test for PKCS7_verify() ownership handling when
+# digestAlgorithms is an empty SET.
+# The malformed structure must fail cleanly without crashing or
+# triggering use-after-free behaviour.
+with({ exit_checker => sub { return shift == 4; } },
+    sub {
+        ok(run(app([
+                'openssl', 'smime',
+                '-verify',
+                '-noverify',
+                '-in',
+                srctop_file('test', 'smime-eml',
+                            'pkcs7-empty-digest-set.eml'),
+            ])),
+           "Check empty digestAlgorithms SET is handled safely");
+    });
+
 # Test case for missing MD algorithm (must not segfault)
 
 with({ exit_checker => sub { return shift == 4; } },
@@ -1359,6 +1438,49 @@ with({ exit_checker => sub { return shift == 3; } },
 		   ])),
 	   "Check for failure when cipher does not have an assigned OID (issue#22225)");
      });
+
+# Test cases for CVE-2026-28389
+my $smcont_malformed = srctop_file("test", "recipes", "80-test_cms_data", "dh-malformed.der");
+my $smdhcert = srctop_file("test", "recipes", "80-test_cms_data", "dh-cert.pem");
+my $smdhkey = srctop_file("test", "recipes", "80-test_cms_data", "dh-key.pem");
+
+with({ exit_checker => sub { return shift == 4; } },
+    sub {
+        SKIP: {
+          skip "DH is not supported in this build", 1 if $no_dh;
+
+          ok(run(app(["openssl", "cms", @prov, "-decrypt", "-in", $smcont_malformed,
+                      "-inform", "DER", "-recip", $smdhcert, "-inkey", $smdhkey])),
+             "Must not crash on malformed cms inputs with dh key");
+        }
+    });
+
+$smcont_malformed = srctop_file("test", "recipes", "80-test_cms_data", "ecdh-malformed.der");
+my $smecdhcert = srctop_file("test", "recipes", "80-test_cms_data", "ecdh-cert.pem");
+my $smecdhkey = srctop_file("test", "recipes", "80-test_cms_data", "ecdh-key.pem");
+
+with({ exit_checker => sub { return shift == 4; } },
+    sub {
+        SKIP: {
+          skip "EC is not supported in this build", 1 if $no_ec;
+
+          ok(run(app(["openssl", "cms", @prov, "-decrypt", "-in", $smcont_malformed,
+                       "-inform", "DER", "-recip", $smecdhcert, "-inkey", $smecdhkey])),
+             "Must not crash on malformed cms inputs with ecdh key");
+        }
+    });
+
+$smcont_malformed = srctop_file("test", "recipes", "80-test_cms_data", "rsa-malformed.der");
+my $smrsacert = catfile($smdir, "smrsa3.pem");
+my $smrsakey = catfile($smdir, "smrsa3-key.pem");
+
+# Test case for CVE-2026-28390
+with({ exit_checker => sub { my $ret = shift; return $ret == 4 || $ret == 0; } },
+    sub {
+        ok(run(app(["openssl", "cms", @prov, "-decrypt", "-in", $smcont_malformed, "-inform",
+                   "DER", "-recip", $smrsacert, "-inkey", $smrsakey, "-out", "{output}.cms"])),
+           "Must not crash on malformed cms inputs with RSA key");
+    });
 
 # Test encrypt to three recipients, and decrypt using key-only;
 # i.e. do not follow the recommended practice of providing the
@@ -1490,3 +1612,22 @@ subtest "SLH-DSA tests for CMS" => sub {
            "accept CMS verify with SLH-DSA-SHAKE-256s");
     }
 };
+
+# Regression test for NULL dereference in PWRI decrypt path
+# when optional keyDerivationAlgorithm is omitted.
+subtest "PWRI missing keyDerivationAlgorithm regression" => sub {
+    plan tests => 1;
+
+    with({ exit_checker => sub { return shift == 4; } }, sub {
+        ok(run(app([
+            "openssl", "cms", @prov,
+            "-decrypt",
+            "-inform", "DER",
+            "-in",
+            srctop_file('test', 'cms-msg', 'missing-kdf.der'),
+            "-out", "pwri-out.txt",
+            "-pwri_password", "secret"])),
+        "missing keyDerivationAlgorithm is rejected");
+    });
+};
+

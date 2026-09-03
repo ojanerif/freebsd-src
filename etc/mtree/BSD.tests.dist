@@ -292,14 +292,6 @@
     ..
     games
     ..
-    gnu
-        lib
-        ..
-        usr.bin
-            diff
-            ..
-        ..
-    ..
     include
     ..
     lib
@@ -527,6 +519,8 @@
         ..
         sysctl
         ..
+        tunefs
+        ..
     ..
     secure
         lib
@@ -560,6 +554,8 @@
         acl
         ..
         aio
+        ..
+        arch
         ..
         audit
         ..
@@ -830,6 +826,8 @@
         fs
             fusefs
             ..
+            pjdfstest
+            ..
             tarfs
             ..
             tmpfs
@@ -890,6 +888,8 @@
         mac
             bsdextended
             ..
+            do
+            ..
             ipacl
             ..
             portacl
@@ -905,6 +905,8 @@
                 ..
             ..
             routing
+            ..
+            wg
             ..
         ..
         netgraph
@@ -970,6 +972,8 @@
             ..
             utimensat
             ..
+        ..
+        pmc
         ..
         posixshm
         ..
