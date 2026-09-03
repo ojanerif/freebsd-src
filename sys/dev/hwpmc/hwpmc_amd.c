@@ -1537,7 +1537,7 @@ pmc_amd_initialize(void)
 	 * the loops without updating npmcs_total, and amd_pmcdesc is undersized.
 	 */
 	KASSERT(amd_npmcs == npmcs_total,
-	    ("%s: npmcs_total=%d amd_npmcs=%d mismatch — update npmcs_total",
+	    ("%s: npmcs_total=%d amd_npmcs=%d mismatch; update npmcs_total when adding a counter family",
 	    __func__, npmcs_total, amd_npmcs));
 
 	/*
