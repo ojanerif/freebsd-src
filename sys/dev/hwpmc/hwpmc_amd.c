@@ -65,7 +65,7 @@ struct amd_descr {
 
 static int amd_npmcs;
 static int amd_core_npmcs, amd_l3_npmcs, amd_df_npmcs;
-static struct amd_descr amd_pmcdesc[AMD_NPMCS_MAX];
+static struct amd_descr *amd_pmcdesc;	/* dynamically allocated, sized to actual npmcs */
 struct amd_event_code_map {
 	enum pmc_event	pe_ev;	 /* enum value */
 	uint16_t	pe_code; /* encoded event mask */
@@ -178,7 +178,7 @@ const int amd_event_codes_size = nitems(amd_event_codes);
  * Per-processor information
  */
 struct amd_cpu {
-	struct pmc_hw	pc_amdpmcs[AMD_NPMCS_MAX];
+	struct pmc_hw	*pc_amdpmcs;	/* dynamically allocated, amd_npmcs entries */
 };
 static struct amd_cpu **amd_pcpu;
 
@@ -952,6 +952,7 @@ pmc_amd_initialize(void)
 	enum pmc_cputype cputype;
 	int ncpus, nclasses, i;
 	int family, model, stepping;
+	int npmcs_total;
 	int error;
 
 	/*
@@ -1004,6 +1005,17 @@ pmc_amd_initialize(void)
 			amd_df_npmcs = EXTPERFMON_DF_PMCS(regs[1]);
 		}
 	}
+
+	/*
+	 * Allocate the descriptor table sized to the actual PMC count from
+	 * CPUID 0x80000022 (AMD64 APM Vol.3 §E.4.12), replacing the static
+	 * amd_pmcdesc[AMD_NPMCS_MAX].  We sum the defaults here; amd_npmcs
+	 * is still zero at this point and reaches its final value only after
+	 * the registration loops below complete.
+	 */
+	npmcs_total = amd_core_npmcs + amd_l3_npmcs + amd_df_npmcs;
+	amd_pmcdesc = malloc(sizeof(struct amd_descr) * npmcs_total, M_PMC,
+	    M_WAITOK | M_ZERO);
 
 	/* Enable the newer core counters */
 	for (i = 0; i < amd_core_npmcs; i++) {
@@ -1065,10 +1077,23 @@ pmc_amd_initialize(void)
 	}
 
 	/*
+	 * Verify that the descriptor table is exactly right-sized.
+	 * npmcs_total was computed from the same four per-class counts before
+	 * the registration loops; amd_npmcs is their running sum after.  They
+	 * must be equal.  If they diverge, a new counter family was added to
+	 * the loops without updating npmcs_total, and amd_pmcdesc is undersized.
+	 */
+	KASSERT(amd_npmcs == npmcs_total,
+	    ("%s: npmcs_total=%d amd_npmcs=%d mismatch; update npmcs_total when adding a counter family",
+	    __func__, npmcs_total, amd_npmcs));
+
+	/*
 	 * Sanity check that the hardware is safe to use.  Do not read or write
 	 * any of the PMC MSRs until after this check passes.
 	 */
 	if (amd_hwcheck() < 0) {
+		free(amd_pmcdesc, M_PMC);
+		amd_pmcdesc = NULL;
 		return (NULL);
 	}
 
@@ -1147,7 +1172,19 @@ pmc_amd_initialize(void)
 	return (pmc_mdep);
 
 error:
+	/*
+	 * amd_pcpu is allocated before pmc_mdep_alloc(); its per-CPU
+	 * pc_amdpmcs arrays are allocated in amd_pcpu_init(), which has
+	 * not been called yet at this error point, so there are no inner
+	 * arrays to walk.  free(NULL, M_PMC) is a no-op for both amd_pcpu
+	 * (if not yet allocated) and amd_pmcdesc (if already freed by the
+	 * amd_hwcheck() failure path above).
+	 */
 	free(pmc_mdep, M_PMC);
+	free(amd_pcpu, M_PMC);
+	amd_pcpu = NULL;
+	free(amd_pmcdesc, M_PMC);
+	amd_pmcdesc = NULL;
 	return (NULL);
 }
 
@@ -1170,4 +1207,7 @@ pmc_amd_finalize(struct pmc_mdep *md)
 
 	free(amd_pcpu, M_PMC);
 	amd_pcpu = NULL;
+
+	free(amd_pmcdesc, M_PMC);
+	amd_pmcdesc = NULL;
 }
