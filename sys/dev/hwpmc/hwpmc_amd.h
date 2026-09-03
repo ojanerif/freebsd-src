@@ -207,9 +207,9 @@
 #define	AMD_PMC_UMC_TO_RDWRMASK(x)	(((x) & 0x3) << 8)
 
 #define	AMD_NPMCS_K8		4
-/* XXXBLOAT: AMD_NPMCS_MAX is a static upper bound; see hwpmc_amd.c for
- * the dynamic allocation that replaces amd_pmcdesc[AMD_NPMCS_MAX]. */
-#define AMD_NPMCS_MAX		(AMD_PMC_CORE_MAX + AMD_PMC_L3_MAX + \
+/* Compile-time upper bound used for index validation; hwpmc_amd.c allocates
+ * amd_pmcdesc dynamically to the count reported by CPUID 0x80000022. */
+#define	AMD_NPMCS_MAX		(AMD_PMC_CORE_MAX + AMD_PMC_L3_MAX + \
 				 AMD_PMC_DF_MAX + AMD_PMC_UMC_MAX)
 
 #define AMD_PMC_IS_STOPPED(evsel) ((rdmsr((evsel)) & AMD_PMC_ENABLE) == 0)

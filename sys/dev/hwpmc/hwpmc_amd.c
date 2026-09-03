@@ -70,7 +70,7 @@ static int amd_npmcs;
 static int amd_core_npmcs, amd_l3_npmcs, amd_df_npmcs, amd_umc_npmcs;
 static bool amd_perfmon_v2;		/* PerfMonV2 global-control path active */
 static uint64_t amd_global_cntr_mask;	/* one bit per core counter */
-static struct amd_descr *amd_pmcdesc;	/* dynamically allocated; XXXBLOAT replacement */
+static struct amd_descr *amd_pmcdesc;	/* dynamically allocated, sized to actual npmcs */
 struct amd_event_code_map {
 	enum pmc_event	pe_ev;	 /* enum value */
 	uint16_t	pe_code; /* encoded event mask */
@@ -1372,6 +1372,7 @@ pmc_amd_initialize(void)
 	int ncpus, nclasses, i;
 	int family, model, stepping;
 	int amd_umc_nodes, amd_umc_per_node;
+	int npmcs_total;
 	int error;
 
 	/*
@@ -1430,15 +1431,16 @@ pmc_amd_initialize(void)
 	}
 
 	/*
-	 * Allocate descriptor table dynamically based on actual PMC count
-	 * reported by CPUID, replacing the static amd_pmcdesc[AMD_NPMCS_MAX].
+	 * Allocate the descriptor table sized to the actual PMC count from
+	 * CPUID 0x80000022 (AMD64 APM Vol.3 §E.4.12), replacing the static
+	 * amd_pmcdesc[AMD_NPMCS_MAX].  We sum the defaults here; amd_npmcs
+	 * is still zero at this point and reaches its final value only after
+	 * the registration loops below complete.
 	 */
-	{
-		int total = amd_core_npmcs + amd_l3_npmcs + amd_df_npmcs +
-		    amd_umc_npmcs;
-		amd_pmcdesc = malloc(sizeof(struct amd_descr) * total, M_PMC,
-		    M_WAITOK | M_ZERO);
-	}
+	npmcs_total = amd_core_npmcs + amd_l3_npmcs + amd_df_npmcs +
+	    amd_umc_npmcs;
+	amd_pmcdesc = malloc(sizeof(struct amd_descr) * npmcs_total, M_PMC,
+	    M_WAITOK | M_ZERO);
 
 	/* Enable the newer core counters */
 	for (i = 0; i < amd_core_npmcs; i++) {
@@ -1621,6 +1623,13 @@ pmc_amd_initialize(void)
 	return (pmc_mdep);
 
 error:
+	/*
+	 * amd_pcpu is allocated before pmc_mdep_alloc(); its per-CPU
+	 * pc_amdpmcs arrays are allocated in amd_pcpu_init(), which has
+	 * not been called yet at this error point, so there are no inner
+	 * arrays to walk.  free(NULL, M_PMC) is a no-op if amd_pcpu was
+	 * never allocated (e.g. an early failure before the malloc below).
+	 */
 	free(pmc_mdep, M_PMC);
 	free(amd_pcpu, M_PMC);
 	amd_pcpu = NULL;
