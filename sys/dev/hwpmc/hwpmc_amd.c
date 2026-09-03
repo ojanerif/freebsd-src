@@ -70,7 +70,7 @@ static int amd_npmcs;
 static int amd_core_npmcs, amd_l3_npmcs, amd_df_npmcs, amd_umc_npmcs;
 static bool amd_perfmon_v2;		/* PerfMonV2 global-control path active */
 static uint64_t amd_global_cntr_mask;	/* one bit per core counter */
-static struct amd_descr amd_pmcdesc[AMD_NPMCS_MAX];
+static struct amd_descr *amd_pmcdesc;	/* dynamically allocated; XXXBLOAT replacement */
 struct amd_event_code_map {
 	enum pmc_event	pe_ev;	 /* enum value */
 	uint16_t	pe_code; /* encoded event mask */
@@ -183,7 +183,7 @@ const int amd_event_codes_size = nitems(amd_event_codes);
  * Per-processor information
  */
 struct amd_cpu {
-	struct pmc_hw	pc_amdpmcs[AMD_NPMCS_MAX];
+	struct pmc_hw	*pc_amdpmcs;	/* dynamically allocated, amd_npmcs entries */
 	volatile u_int	pc_global_mask;
 	volatile u_int	pc_virtual_mask;
 	volatile u_int	pc_gate_depth;
@@ -1155,6 +1155,8 @@ amd_pcpu_init(struct pmc_mdep *md, int cpu)
 
 	amd_pcpu[cpu] = pac = malloc(sizeof(struct amd_cpu), M_PMC,
 	    M_WAITOK | M_ZERO);
+	pac->pc_amdpmcs = malloc(sizeof(struct pmc_hw) * amd_npmcs, M_PMC,
+	    M_WAITOK | M_ZERO);
 	if (amd_perfmon_v2) {
 		KASSERT(atomic_load_acq_int(&pac->pc_gate_depth) == 0,
 		    ("[amd,%d] nonzero initial gate depth on CPU %d",
@@ -1239,6 +1241,7 @@ amd_pcpu_fini(struct pmc_mdep *md, int cpu)
 	for (i = 0; i < amd_npmcs; i++)
 		pc->pc_hwpmcs[i + first_ri] = NULL;
 
+	free(pac->pc_amdpmcs, M_PMC);
 	free(pac, M_PMC);
 	return (0);
 }
@@ -1426,6 +1429,17 @@ pmc_amd_initialize(void)
 			amd_perfmon_v2 = true;
 	}
 
+	/*
+	 * Allocate descriptor table dynamically based on actual PMC count
+	 * reported by CPUID, replacing the static amd_pmcdesc[AMD_NPMCS_MAX].
+	 */
+	{
+		int total = amd_core_npmcs + amd_l3_npmcs + amd_df_npmcs +
+		    amd_umc_npmcs;
+		amd_pmcdesc = malloc(sizeof(struct amd_descr) * total, M_PMC,
+		    M_WAITOK | M_ZERO);
+	}
+
 	/* Enable the newer core counters */
 	for (i = 0; i < amd_core_npmcs; i++) {
 		d = &amd_pmcdesc[i];
@@ -1518,6 +1532,8 @@ pmc_amd_initialize(void)
 	 * any of the PMC MSRs until after this check passes.
 	 */
 	if (amd_hwcheck() < 0) {
+		free(amd_pmcdesc, M_PMC);
+		amd_pmcdesc = NULL;
 		return (NULL);
 	}
 
@@ -1606,6 +1622,10 @@ pmc_amd_initialize(void)
 
 error:
 	free(pmc_mdep, M_PMC);
+	free(amd_pcpu, M_PMC);
+	amd_pcpu = NULL;
+	free(amd_pmcdesc, M_PMC);
+	amd_pmcdesc = NULL;
 	return (NULL);
 }
 
@@ -1628,4 +1648,7 @@ pmc_amd_finalize(struct pmc_mdep *md)
 
 	free(amd_pcpu, M_PMC);
 	amd_pcpu = NULL;
+
+	free(amd_pmcdesc, M_PMC);
+	amd_pmcdesc = NULL;
 }
