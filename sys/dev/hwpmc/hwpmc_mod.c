@@ -3803,6 +3803,10 @@ pmc_do_op_pmcrw(const struct pmc_op_pmcrw *prw, pmc_value_t *valp)
 		 */
 
 		ri = PMC_TO_ROWINDEX(pm);
+		if (ri >= md->pmd_npmc) {
+			error = EINVAL;
+			break;
+		}
 		pcd = pmc_ri_to_classdep(md, ri, &adjri);
 
 		mtx_pool_lock_spin(pmc_mtxpool, pm);
@@ -4420,6 +4424,10 @@ pmc_syscall_handler(struct thread *td, void *syscall_args)
 		}
 
 		ri = PMC_TO_ROWINDEX(pm);
+		if (ri >= md->pmd_npmc) {
+			error = EINVAL;
+			break;
+		}
 		pcd = pmc_ri_to_classdep(md, ri, &adjri);
 
 		/* PMC class has no 'GETMSR' support */
@@ -4663,6 +4671,10 @@ pmc_syscall_handler(struct thread *td, void *syscall_args)
 			pm->pm_id, pmcid));
 
 		ri = PMC_TO_ROWINDEX(pm);
+		if (ri >= md->pmd_npmc) {
+			error = EINVAL;
+			break;
+		}
 		pcd = pmc_ri_to_classdep(md, ri, &adjri);
 
 		/*
