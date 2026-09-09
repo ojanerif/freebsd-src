@@ -3803,10 +3803,8 @@ pmc_do_op_pmcrw(const struct pmc_op_pmcrw *prw, pmc_value_t *valp)
 		 */
 
 		ri = PMC_TO_ROWINDEX(pm);
-		if (ri >= md->pmd_npmc) {
-			error = EINVAL;
-			break;
-		}
+		if (ri >= md->pmd_npmc)
+			return (EINVAL);
 		pcd = pmc_ri_to_classdep(md, ri, &adjri);
 
 		mtx_pool_lock_spin(pmc_mtxpool, pm);
