@@ -268,4 +268,59 @@ void pmc_soft_ev_deregister(struct pmc_soft *ps);
 struct pmc_soft *pmc_soft_ev_acquire(enum pmc_event ev);
 void pmc_soft_ev_release(struct pmc_soft *ps);
 
+/*
+ * AMD IOMMU performance counter registration.
+ *
+ * The AMD IOMMU driver is compiled into the kernel under "options IOMMU",
+ * while hwpmc(4) is a loadable module.  Neither may reference the other
+ * directly, so counter-capable IOMMU units register themselves here at
+ * attach time and the hwpmc AMD IOMMU class driver reads the registry back.
+ * Both sides depend only on this file, which is always present.
+ *
+ * pmc_amdiommu_nclasses() returns the number of PMC classes to reserve: 0
+ * when no counter-capable unit has registered, 1 otherwise.
+ */
+#define	PMC_AMDIOMMU_MAX_UNITS	16
+
+struct pmc_amdiommu_unit {
+	void		*pau_arg;	/* opaque struct amdiommu_unit * */
+	uint8_t		pau_nbanks;
+	uint8_t		pau_ncounters;
+};
+
+int	amdiommu_pmc_register(int _unit, void *_arg, uint8_t _nbanks,
+	    uint8_t _ncounters);
+void	amdiommu_pmc_unregister(int _unit);
+int	pmc_amdiommu_nclasses(void);
+int	pmc_amdiommu_nunits(void);
+const struct pmc_amdiommu_unit *pmc_amdiommu_unit(int _idx);
+int	pmc_amdiommu_initialize(struct pmc_mdep *_md, int _nclass_idx);
+void	pmc_amdiommu_finalize(struct pmc_mdep *_md);
+
+/*
+ * Opaque PMC interface to AMD IOMMU performance counter MMIO.
+ * These wrap the amdiommu_pc_* functions so that hwpmc(4) does not need to
+ * include <x86/iommu/amd_iommu.h> (which pulls in bus_space and other
+ * device-driver headers incompatible with a loadable module).
+ */
+struct amdiommu_unit;	/* forward; full definition in <x86/iommu/amd_iommu.h> */
+
+/* MMIO function offsets for AMD IOMMU performance counter registers. */
+#define	PMC_AMDIOMMU_FXN_COUNTER	0x00u	/* ICounter (48-bit, wrap-around) */
+#define	PMC_AMDIOMMU_FXN_SRC		0x08u	/* CSource / CountUnits */
+#define	PMC_AMDIOMMU_COUNTER_MASK	((UINT64_C(1) << 48) - 1)
+void	pmc_amdiommu_get_topology(const struct amdiommu_unit *_u,
+	    uint8_t *_nbanks, uint8_t *_ncounters);
+int	pmc_amdiommu_read(const struct amdiommu_unit *_u, uint8_t _bank,
+	    uint8_t _cntr, uint8_t _fxn, uint64_t *_val);
+int	pmc_amdiommu_write(const struct amdiommu_unit *_u, uint8_t _bank,
+	    uint8_t _cntr, uint8_t _fxn, uint64_t _val);
+bool	pmc_amdiommu_bank_is_locked(const struct amdiommu_unit *_u,
+	    uint8_t _bank);
+
+/* IOMMU counter Fxn offsets for filter registers (spec Table 81) */
+#define	PMC_AMDIOMMU_FXN_PASID		0x10u
+#define	PMC_AMDIOMMU_FXN_DOMAIN		0x18u
+#define	PMC_AMDIOMMU_FXN_DEVID		0x20u
+
 #endif /* _SYS_PMCKERN_H_ */

@@ -333,6 +333,90 @@ pmc_soft_ev_release(struct pmc_soft *ps)
 }
 
 /*
+ * AMD IOMMU performance counter registry.
+ *
+ * This lives here, rather than in the hwpmc(4) module, because the AMD IOMMU
+ * driver is compiled into the kernel while hwpmc(4) is loadable: the kernel
+ * must not depend on a symbol provided by a module.  Both the IOMMU driver
+ * and the hwpmc class driver reference only this file, which is always
+ * present.
+ *
+ * Units are registered from amdiommu_attach() and are never removed while in
+ * use, so the array is effectively write-once at boot.  Access is unlocked
+ * for the same reason the IOMMU unit list is.
+ */
+static struct pmc_amdiommu_unit amdiommu_pmcs[PMC_AMDIOMMU_MAX_UNITS];
+static int amdiommu_npmcs;
+
+int
+amdiommu_pmc_register(int unit, void *arg, uint8_t nbanks, uint8_t ncounters)
+{
+
+	if (unit < 0 || unit >= PMC_AMDIOMMU_MAX_UNITS)
+		return (EINVAL);
+	if (arg == NULL || nbanks == 0 || ncounters == 0)
+		return (EINVAL);
+	if (amdiommu_pmcs[unit].pau_arg != NULL)
+		return (EEXIST);
+
+	amdiommu_pmcs[unit].pau_arg = arg;
+	amdiommu_pmcs[unit].pau_nbanks = nbanks;
+	amdiommu_pmcs[unit].pau_ncounters = ncounters;
+	amdiommu_npmcs++;
+	return (0);
+}
+
+void
+amdiommu_pmc_unregister(int unit)
+{
+
+	if (unit < 0 || unit >= PMC_AMDIOMMU_MAX_UNITS)
+		return;
+	if (amdiommu_pmcs[unit].pau_arg == NULL)
+		return;
+
+	amdiommu_pmcs[unit].pau_arg = NULL;
+	amdiommu_pmcs[unit].pau_nbanks = 0;
+	amdiommu_pmcs[unit].pau_ncounters = 0;
+	amdiommu_npmcs--;
+}
+
+int
+pmc_amdiommu_nunits(void)
+{
+
+	return (amdiommu_npmcs);
+}
+
+/*
+ * Number of PMC classes the AMD IOMMU counters require: one if any
+ * counter-capable unit registered, zero otherwise.  hwpmc uses this to size
+ * pmd_classdep[] before pmc_mdep_alloc().
+ */
+int
+pmc_amdiommu_nclasses(void)
+{
+
+	return (amdiommu_npmcs > 0 ? 1 : 0);
+}
+
+const struct pmc_amdiommu_unit *
+pmc_amdiommu_unit(int idx)
+{
+	int i, n;
+
+	if (idx < 0 || idx >= amdiommu_npmcs)
+		return (NULL);
+	for (i = 0, n = 0; i < PMC_AMDIOMMU_MAX_UNITS; i++) {
+		if (amdiommu_pmcs[i].pau_arg == NULL)
+			continue;
+		if (n++ == idx)
+			return (&amdiommu_pmcs[i]);
+	}
+	return (NULL);
+}
+
+/*
  *  Initialise hwpmc.
  */
 static void
@@ -365,3 +449,80 @@ init_hwpmc(void *dummy __unused)
 }
 
 SYSINIT(hwpmc, SI_SUB_KDTRACE, SI_ORDER_FIRST, init_hwpmc, NULL);
+
+/*
+ * PMC wrappers around amdiommu_pc_* — these live here so that
+ * hwpmc(4), which is a loadable module, does not need to include
+ * <x86/iommu/amd_iommu.h>.  kern_pmc.c is compiled into the kernel
+ * and may include device-driver headers freely.
+ */
+#if defined(__amd64__) || defined(__i386__)
+#include <sys/bus.h>
+#include <sys/rman.h>
+#include <sys/vmem.h>
+#include <sys/memdesc.h>
+
+#include <machine/bus.h>
+
+#include <dev/iommu/iommu.h>
+#include <x86/iommu/amd_reg.h>
+#include <x86/iommu/x86_iommu.h>
+#include <x86/iommu/amd_iommu.h>
+
+void
+pmc_amdiommu_get_topology(const struct amdiommu_unit *u,
+    uint8_t *nbanks, uint8_t *ncounters)
+{
+	amdiommu_pc_get_topology(u, nbanks, ncounters);
+}
+
+int
+pmc_amdiommu_read(const struct amdiommu_unit *u, uint8_t bank,
+    uint8_t cntr, uint8_t fxn, uint64_t *val)
+{
+	return (amdiommu_pc_read(u, bank, cntr, fxn, val));
+}
+
+int
+pmc_amdiommu_write(const struct amdiommu_unit *u, uint8_t bank,
+    uint8_t cntr, uint8_t fxn, uint64_t val)
+{
+	return (amdiommu_pc_write(u, bank, cntr, fxn, val));
+}
+
+/*
+ * Return true if bank N is locked in ANY of the three filter lock registers
+ * (PASID, Domain or DeviceID).  A locked bank silently ignores filter writes
+ * (spec §3.4.22, MMIO 0x4008/0x4010/0x4018).  hwpmc must refuse start_pmc
+ * rather than count the wrong events with no diagnostic.
+ *
+ * Locking: the three BANKLOCK registers are set only by firmware during ACPI
+ * S-state transitions and are immutable post-boot.  Reads without
+ * AMDIOMMU_LOCK are therefore safe.  The check and the subsequent filter
+ * writes in amdiommu_start_pmc are NOT atomic vs. firmware, but that is
+ * acceptable because firmware lock changes only happen on S3/S4 resume,
+ * long before hwpmc would run.
+ *
+ * The lock registers are global MMIO, not per-counter, so we read them
+ * directly via amdiommu_read8 without going through the per-counter offset
+ * decoder used by amdiommu_pc_{read,write}.
+ */
+bool
+pmc_amdiommu_bank_is_locked(const struct amdiommu_unit *u, uint8_t bank)
+{
+	uint64_t pasid_lock, domain_lock, devid_lock;
+	uint64_t bit;
+
+	/* NCounterBanks is 6-bit (0..63); bit 64+ would shift into UB. */
+	if (bank >= 64)
+		return (false);
+
+	bit = (uint64_t)1 << bank;
+
+	pasid_lock  = amdiommu_read8(u, AMDIOMMU_PC_PASID_BANKLOCK);
+	domain_lock = amdiommu_read8(u, AMDIOMMU_PC_DOMAIN_BANKLOCK);
+	devid_lock  = amdiommu_read8(u, AMDIOMMU_PC_DEVID_BANKLOCK);
+
+	return ((pasid_lock | domain_lock | devid_lock) & bit) != 0;
+}
+#endif

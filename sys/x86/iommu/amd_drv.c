@@ -40,6 +40,7 @@
 #include <sys/memdesc.h>
 #include <sys/module.h>
 #include <sys/mutex.h>
+#include <sys/pmckern.h>
 #include <sys/rman.h>
 #include <sys/rwlock.h>
 #include <sys/smp.h>
@@ -71,6 +72,7 @@
 #include <x86/iommu/amd_iommu.h>
 
 static int amdiommu_enable = 0;
+static int amdiommu_pmc_only = 0; /* hw.amdiommu.pmc_only: attach for PMC only, no DMA */
 static bool amdiommu_running = false;
 
 /*
@@ -446,7 +448,9 @@ amdiommu_probe(device_t dev)
 	if (acpi_disabled("amdiommu"))
 		return (ENXIO);
 	TUNABLE_INT_FETCH("hw.amdiommu.enable", &amdiommu_enable);
-	if (!amdiommu_enable)
+	/* Idempotent: value is constant post-boot; safe in probe(). */
+	TUNABLE_INT_FETCH("hw.amdiommu.pmc_only", &amdiommu_pmc_only);
+	if (!amdiommu_enable && !amdiommu_pmc_only)
 		return (ENXIO);
 	if (pci_get_class(dev) != PCIC_BASEPERIPH ||
 	    pci_get_subclass(dev) != PCIS_BASEPERIPH_IOMMU)
@@ -464,7 +468,10 @@ amdiommu_probe(device_t dev)
 	    cap_rev != PCIM_AMDIOMMU_CAP_REV_VAL)
 		return (ENXIO);
 
-	device_set_desc(dev, "DMA remap");
+	if (amdiommu_pmc_only && !amdiommu_enable)
+		device_set_desc(dev, "DMA remap (PMC-only)");
+	else
+		device_set_desc(dev, "DMA remap");
 	return (BUS_PROBE_SPECIFIC);
 }
 
@@ -542,6 +549,64 @@ amdiommu_attach(device_t dev)
 		goto errout2;
 	}
 
+	/*
+	 * PMC-only mode: attach for performance counter access without enabling
+	 * DMA remapping.  No device table, command ring, event log, or busdma
+	 * is initialized, so USB/NVMe/PCIe DMA from other drivers is unaffected.
+	 * Safe to use hw.amdiommu.pmc_only=1 in loader.conf without risk of
+	 * USB/xhci DMA allocation loops at boot.
+	 */
+	if (amdiommu_pmc_only && !amdiommu_enable) {
+		/*
+		 * Re-read EFR from MMIO: IVHD type 0x10 does not populate
+		 * sc->efr (only type 0x40/0x11 set EfrRegisterImage).
+		 */
+		sc->efr = amdiommu_read8(sc, AMDIOMMU_EFR);
+		if ((sc->efr & AMDIOMMU_EFR_PC_SUP) != 0) {
+			uint64_t cfg;
+			uint8_t nbanks, ncounters;
+			/* Read topology from MMIO (mmio_res mapped above). */
+			cfg = amdiommu_read8(sc, AMDIOMMU_PC_COUNTER_CFG);
+			nbanks    = (cfg >> AMDIOMMU_PC_CFG_NBANKS_SHIFT) &
+			    AMDIOMMU_PC_CFG_NBANKS_MASK;
+			ncounters = (cfg >> AMDIOMMU_PC_CFG_NCOUNTERS_SHIFT) &
+			    AMDIOMMU_PC_CFG_NCOUNTERS_MASK;
+			if (ncounters == 1)
+				ncounters = 0; /* reserved per spec, treat as none */
+			sc->pc_nbanks = nbanks;
+			sc->pc_ncounters = ncounters;
+			if (nbanks > 0 && ncounters > 0) {
+				if (bootverbose)
+					device_printf(dev,
+					    "IOMMU PMC pmc-only: %u banks "
+					    "%u counters/bank\n",
+					    nbanks, ncounters);
+				error = amdiommu_pmc_register(
+				    AMD2IOMMU(sc)->unit, sc,
+				    nbanks, ncounters);
+				if (error != 0) {
+					device_printf(dev,
+					    "pmc_only: cannot register "
+					    "with hwpmc, error %d\n", error);
+					error = 0;
+				}
+			}
+		} else {
+			device_printf(dev,
+			    "pmc_only: EFR[PCSup]=0, no counters\n");
+		}
+		/*
+		 * XXXKIB: mtx, domids, sysctl_ctx, and mmio_res allocated above
+		 * are never freed.  amdiommu_detach() returns EBUSY (by design
+		 * for the full path) and has no pmc_only teardown path.  Since
+		 * EARLY_DRIVER_MODULE cannot be unloaded at runtime, this is a
+		 * static leak for the kernel lifetime.  Fix when implementing
+		 * amdiommu hot-plug or modular unload.
+		 */
+		TAILQ_INSERT_TAIL(&amdiommu_units, sc, unit_next);
+		return (0);
+	}
+
 	iommu_high = BUS_SPACE_MAXADDR;
 
 	error = amdiommu_create_dev_tbl(sc);
@@ -583,6 +648,52 @@ amdiommu_attach(device_t dev)
 		    AMD2IOMMU(sc)->unit);
 	}
 	AMDIOMMU_UNLOCK(sc);
+
+	if ((sc->efr & AMDIOMMU_EFR_PC_SUP) != 0) {
+		uint64_t cfg;
+		uint8_t nbanks, ncounters;
+
+		cfg = amdiommu_read8(sc, AMDIOMMU_PC_COUNTER_CFG);
+		nbanks = (cfg >> AMDIOMMU_PC_CFG_NBANKS_SHIFT) &
+		    AMDIOMMU_PC_CFG_NBANKS_MASK;
+		ncounters = (cfg >> AMDIOMMU_PC_CFG_NCOUNTERS_SHIFT) &
+		    AMDIOMMU_PC_CFG_NCOUNTERS_MASK;
+		/*
+		 * NCounter=1 is reserved per spec (AMD 48882 Section
+		 * 3.4.22); treat it as unsupported.
+		 */
+		if (ncounters == 1) {
+			device_printf(dev,
+			    "IOMMU performance counters: reserved NCounter "
+			    "value 1, disabling\n");
+			ncounters = 0;
+		}
+		sc->pc_nbanks = nbanks;
+		sc->pc_ncounters = ncounters;
+		if (nbanks > 0 && ncounters > 0) {
+			if (bootverbose) {
+				device_printf(dev,
+				    "IOMMU performance counters: %u banks, "
+				    "%u counters/bank\n",
+				    sc->pc_nbanks, sc->pc_ncounters);
+			}
+			/*
+			 * Publish to hwpmc(4).  The registry lives in
+			 * kern_pmc.c so that neither this driver nor the
+			 * hwpmc module depends on the other.
+			 */
+			error = amdiommu_pmc_register(AMD2IOMMU(sc)->unit, sc,
+			    nbanks, ncounters);
+			if (error != 0) {
+				device_printf(dev,
+				    "IOMMU performance counters: cannot "
+				    "register with hwpmc, error %d\n", error);
+				sc->pc_nbanks = 0;
+				sc->pc_ncounters = 0;
+				error = 0;
+			}
+		}
+	}
 
 	TAILQ_INSERT_TAIL(&amdiommu_units, sc, unit_next);
 	amdiommu_running = true;
@@ -1174,6 +1285,109 @@ x86_iommu_set_amd(void *arg __unused)
 }
 
 SYSINIT(x86_iommu, SI_SUB_TUNABLES, SI_ORDER_ANY, x86_iommu_set_amd, NULL);
+
+/*
+ * AMD IOMMU performance counter API.  Requires EFR[PCSup]=1 and a 512 KB
+ * MMIO region.  These are raw register primitives; the counter allocation,
+ * event programming, and power-gating-safe start/stop ordering live in the
+ * hwpmc(4) AMD IOMMU class driver.
+ */
+
+static bool
+amdiommu_pc_unit_capable(const struct amdiommu_unit *unit)
+{
+	return (unit->pc_nbanks > 0 && unit->pc_ncounters > 0);
+}
+
+/*
+ * Number of counter-capable units.  Callers use this to size their per-unit
+ * state and then walk [0, nunits) with amdiommu_pc_get_unit().
+ */
+int
+amdiommu_pc_get_nunits(void)
+{
+	struct amdiommu_unit *unit;
+	int n;
+
+	n = 0;
+	TAILQ_FOREACH(unit, &amdiommu_units, unit_next) {
+		if (amdiommu_pc_unit_capable(unit))
+			n++;
+	}
+	return (n);
+}
+
+/*
+ * Map an index in [0, amdiommu_pc_get_nunits()) to a counter-capable unit,
+ * or NULL if idx is out of range.
+ */
+struct amdiommu_unit *
+amdiommu_pc_get_unit(int idx)
+{
+	struct amdiommu_unit *unit;
+
+	if (idx < 0)
+		return (NULL);
+	TAILQ_FOREACH(unit, &amdiommu_units, unit_next) {
+		if (!amdiommu_pc_unit_capable(unit))
+			continue;
+		if (idx-- == 0)
+			return (unit);
+	}
+	return (NULL);
+}
+
+void
+amdiommu_pc_get_topology(const struct amdiommu_unit *unit, uint8_t *nbanks,
+    uint8_t *ncounters)
+{
+	*nbanks = unit->pc_nbanks;
+	*ncounters = unit->pc_ncounters;
+}
+
+/* Valid Fxn offsets per spec Table 81: 0x00,0x08,0x10,0x18,0x20,0x28 */
+static inline bool
+amdiommu_pc_fxn_valid(uint8_t fxn)
+{
+	return (fxn == AMDIOMMU_PC_FXN_COUNTER ||
+	    fxn == AMDIOMMU_PC_FXN_SRC ||
+	    fxn == AMDIOMMU_PC_FXN_PASID ||
+	    fxn == AMDIOMMU_PC_FXN_DOMAIN ||
+	    fxn == AMDIOMMU_PC_FXN_DEVID ||
+	    fxn == AMDIOMMU_PC_FXN_REPORT);
+}
+
+/* MMIO offset of a (bank, counter, fxn) triple; spec Figure 83. */
+static inline uint32_t
+amdiommu_pc_offset(uint8_t bank, uint8_t cntr, uint8_t fxn)
+{
+	return (((AMDIOMMU_PC_ADDR_FIXED | bank) << AMDIOMMU_PC_BANK_SHIFT) |
+	    ((uint32_t)cntr << AMDIOMMU_PC_CNTR_SHIFT) | (uint32_t)fxn);
+}
+
+int
+amdiommu_pc_read(const struct amdiommu_unit *unit, uint8_t bank, uint8_t cntr,
+    uint8_t fxn, uint64_t *val)
+{
+	if (bank >= unit->pc_nbanks || cntr >= unit->pc_ncounters ||
+	    !amdiommu_pc_fxn_valid(fxn))
+		return (EINVAL);
+
+	*val = amdiommu_read8(unit, amdiommu_pc_offset(bank, cntr, fxn));
+	return (0);
+}
+
+int
+amdiommu_pc_write(const struct amdiommu_unit *unit, uint8_t bank, uint8_t cntr,
+    uint8_t fxn, uint64_t val)
+{
+	if (bank >= unit->pc_nbanks || cntr >= unit->pc_ncounters ||
+	    !amdiommu_pc_fxn_valid(fxn))
+		return (EINVAL);
+
+	amdiommu_write8(unit, amdiommu_pc_offset(bank, cntr, fxn), val);
+	return (0);
+}
 
 #ifdef DDB
 #include <ddb/ddb.h>

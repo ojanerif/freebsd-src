@@ -1,0 +1,187 @@
+.\"
+.\" Copyright (c) 2026 Advanced Micro Devices, Inc.
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.Dd August 28, 2026
+.Dt PMC.AMDIOMMU 3
+.Os
+.Sh NAME
+.Nm pmc.amdiommu
+.Nd measurements using AMD IOMMU performance counters
+.Sh LIBRARY
+.Lb libpmc
+.Sh SYNOPSIS
+.In pmc.h
+.Sh DESCRIPTION
+.Pp
+The
+.Nm AMDIOMMU
+class supports optional filter qualifiers to narrow counting:
+.Bl -tag -width .Li domain=N
+.It Li domain=N
+Count only transactions from DMA domain
+.Ar N .
+.It Li pasid=N
+Count only transactions with PASID
+.Ar N
+(20-bit maximum).
+.It Li devid=N
+Count only transactions from device ID
+.Ar N .
+.El
+.Pp
+Filters are specified as a comma-separated suffix:
+.Li AMDIOMMU_MEM_TRANS_TOTAL,domain=5 .
+.Tn AMD
+IOMMU units that implement the optional Performance Counter Support
+extension
+.Pq EFR[PCSup]=1
+expose a set of hardware event counters accessible via MMIO at offset
+0x4000h in the IOMMU register space.
+The
+.Li PMC_CLASS_AMDIOMMU
+class provides access to these counters.
+.Pp
+Each counter-capable IOMMU unit presents
+.Em N
+counter banks, each containing
+.Em M
+independent 48-bit up-counting registers.
+The geometry is reported at initialisation time by reading the
+Performance Counter Configuration register
+.Pq MMIO 0x4000h .
+All counters within a unit are system-wide
+.Pq Li PMC_MODE_SC
+and are not associated with any particular CPU.
+.Pp
+Counters do not overflow-interrupt; the
+.Li PMC_CAP_INTERRUPT
+capability is not advertised.
+Counter values must be sampled periodically to avoid silent wrap.
+.Pp
+Events do not take qualifiers; the event specifier must consist of
+exactly the event name with no trailing comma or keyword.
+.Ss Event Specifiers
+The following events are supported.
+Event names use the prefix
+.Li AMDIOMMU- .
+.Bl -tag -width indent
+.It Li AMDIOMMU-MEM_PASS_UNTRANS
+Memory transactions passed without translation
+.Pq DeviceID bypass or exclusion range .
+.It Li AMDIOMMU-MEM_PASS_PRETRANS
+Memory transactions passed via pre-translation
+.Pq IOMMU disabled for device, or HostAddress .
+.It Li AMDIOMMU-MEM_PASS_EXCL
+Memory transactions passed because the address fell in the exclusion
+range.
+.It Li AMDIOMMU-MEM_TARGET_ABORT
+Memory transactions that resulted in a target abort.
+.It Li AMDIOMMU-MEM_TRANS_TOTAL
+Total memory transactions processed by the IOMMU.
+.It Li AMDIOMMU-MEM_IOMMU_TLB_PTE_HIT
+IOMMU TLB hits on PTE-level entries.
+.It Li AMDIOMMU-MEM_IOMMU_TLB_PTE_MIS
+IOMMU TLB misses requiring a PTE-level page walk.
+.It Li AMDIOMMU-MEM_IOMMU_TLB_PDE_HIT
+IOMMU TLB hits on PDE-level (large page) entries.
+.It Li AMDIOMMU-MEM_IOMMU_TLB_PDE_MIS
+IOMMU TLB misses requiring a PDE-level page walk.
+.It Li AMDIOMMU-MEM_DTE_HIT
+Device table entry
+.Pq DTE
+hits in the DTE cache.
+.It Li AMDIOMMU-MEM_DTE_MIS
+DTE cache misses requiring a memory fetch.
+.It Li AMDIOMMU-PAGE_TBL_READ_TOT
+Total page table reads
+.Pq nested and non-nested combined .
+.It Li AMDIOMMU-PAGE_TBL_READ_NST
+Non-nested
+.Pq host-only
+page table reads.
+.It Li AMDIOMMU-PAGE_TBL_READ_GST
+Guest page table reads
+.Pq nested translation, GVA to GPA .
+.It Li AMDIOMMU-INT_DTE_HIT
+Interrupt DTE cache hits.
+.It Li AMDIOMMU-INT_DTE_MIS
+Interrupt DTE cache misses.
+.It Li AMDIOMMU-CMD_PROCESSED
+Total commands processed from the command buffer.
+.It Li AMDIOMMU-CMD_PROCESSED_INV
+Invalidation commands processed
+.Pq INVALIDATE_IOMMU_PAGES, INVALIDATE_IOTLB_PAGES, etc. .
+.It Li AMDIOMMU-TLB_INV
+TLB invalidation operations initiated by the IOMMU.
+.It Li AMDIOMMU-IGN_RD_WR_MMIO_1FF8H
+Ignored reads or writes to MMIO offset 0x1FF8h
+.Pq reserved register accesses .
+.It Li AMDIOMMU-VAPIC_INT_NON_GUEST
+Virtual APIC interrupts delivered to a non-guest target.
+.It Li AMDIOMMU-VAPIC_INT_GUEST
+Virtual APIC interrupts delivered to a guest target.
+.It Li AMDIOMMU-SMI_RECV
+SMI interrupts received by the IOMMU.
+.It Li AMDIOMMU-SMI_BLK
+SMI interrupts blocked by the IOMMU.
+.El
+.Ss Counter Scope
+IOMMU counters measure activity at the IOMMU unit level, not at
+individual CPU level.
+Each unit is independent; on multi-socket systems with one IOMMU per
+socket, results must not be summed across units without accounting for
+the device topology.
+.Pp
+The class advertises
+.Li PMC_CAP_SYSWIDE
+and
+.Li PMC_CAP_DOMWIDE .
+.Xr pmcstat 8
+allocates one counter per NUMA domain.
+To measure a specific unit, bind the PMC to a CPU that belongs to the
+NUMA domain associated with that IOMMU.
+.Ss Privilege
+Allocating an AMD IOMMU PMC requires the
+.Li PRIV_PMC_SYSTEM
+privilege.
+Unprivileged allocation requests fail with
+.Er EPERM .
+.Sh EXAMPLES
+Count the total IOMMU memory transactions on the first NUMA domain
+for one second:
+.Dl pmcstat -s AMDIOMMU-MEM_TRANS_TOTAL sleep 1
+.Pp
+Simultaneously monitor TLB hit and miss rates across two NUMA domains
+.Pq CPUs 0 and 64
+on a two-socket system:
+.Dl pmcstat -c 0 -s AMDIOMMU-MEM_IOMMU_TLB_PTE_HIT -c 64 -s AMDIOMMU-MEM_IOMMU_TLB_PTE_HIT sleep 1
+.Sh SEE ALSO
+.Xr pmc 3 ,
+.Xr pmc.rapl 3 ,
+.Xr pmc_allocate 3 ,
+.Xr pmc_read 3 ,
+.Xr pmclog 3 ,
+.Xr hwpmc 4 ,
+.Xr pmcstat 8
+.Sh HISTORY
+The
+.Li PMC_CLASS_AMDIOMMU
+class first appeared in
+.Fx 16.0 .
+.Sh CAVEATS
+Counter values are 48 bits wide and wrap silently.
+The maximum measurable count before wrap at a sustained rate of
+10\~billion transactions per second is approximately 32\~days.
+Consumers must read counters at a period shorter than the wrap
+interval for the expected event rate.
+.Pp
+The counter control register
+.Pq Fxn=0x10
+bank-lock registers
+.Pq 0x4008, 0x4010, 0x4018
+must not be held locked when programming event sources, as writes to
+filter fields are silently ignored while a bank is locked.
+The driver does not program filter fields in this release; this caveat
+applies to future qualifier extensions.

@@ -60,6 +60,8 @@ static int tsc_allocate_pmc(enum pmc_event _pe, char *_ctrspec,
     struct pmc_op_pmcallocate *_pmc_config);
 static int rapl_allocate_pmc(enum pmc_event _pe, char *_ctrspec,
     struct pmc_op_pmcallocate *_pmc_config);
+static int amdiommu_allocate_pmc(enum pmc_event _pe, char *_ctrspec,
+    struct pmc_op_pmcallocate *_pmc_config);
 #endif
 #if defined(__arm__)
 static int armv7_allocate_pmc(enum pmc_event _pe, char *_ctrspec,
@@ -211,11 +213,14 @@ static const struct pmc_class_descr NAME##_class_table_descr =	\
 		.pm_evc_allocate_pmc = ALLOCATOR##_allocate_pmc	\
 	}
 
+PMC_CLASSDEP_TABLE(amdiommu, AMDIOMMU);
+
 #if	defined(__i386__) || defined(__amd64__)
 PMC_CLASS_TABLE_DESC(k8, K8, k8, k8);
 PMC_CLASS_TABLE_DESC(ibs, IBS, ibs, ibs);
 PMC_CLASS_TABLE_DESC(tsc, TSC, tsc, tsc);
 PMC_CLASS_TABLE_DESC(rapl, RAPL, rapl, rapl);
+PMC_CLASS_TABLE_DESC(amdiommu, AMDIOMMU, amdiommu, amdiommu);
 #endif
 #if	defined(__arm__)
 PMC_CLASS_TABLE_DESC(cortex_a8, ARMV7, cortex_a8, armv7);
@@ -903,6 +908,67 @@ rapl_allocate_pmc(enum pmc_event pe, char *ctrspec,
 
 	return (0);
 }
+
+static int
+amdiommu_allocate_pmc(enum pmc_event pe, char *ctrspec,
+    struct pmc_op_pmcallocate *pmc_config)
+{
+	uint32_t pasid = 0, domain = 0, devid = 0;
+	uint8_t filter = 0;
+	char *tok, *endp;
+
+	if (pe < PMC_EV_AMDIOMMU_FIRST || pe > PMC_EV_AMDIOMMU_LAST)
+		return (-1);
+
+	/*
+	 * AMD IOMMU counters are uncore (not per-CPU).  Accept both
+	 * PMC_MODE_TC (thread, works with PMC_CPU_ANY) and PMC_MODE_SC
+	 * (system, requires explicit CPU — we use cpu 0 as the read agent).
+	 */
+	if (!PMC_IS_SYSTEM_MODE(pmc_config->pm_mode) &&
+	    pmc_config->pm_mode != PMC_MODE_TC)
+		return (-1);
+	/* Uncore: SC mode needs explicit CPU; use cpu 0 as read agent. */
+	if (PMC_IS_SYSTEM_MODE(pmc_config->pm_mode))
+		pmc_config->pm_cpu = 0;
+
+	/*
+	 * Optional filter qualifiers: domain=N, pasid=N, devid=N
+	 * Example: "AMDIOMMU_MEM_TRANS_TOTAL,domain=5"
+	 */
+	while (ctrspec != NULL && *ctrspec != '\0') {
+		tok = strsep(&ctrspec, ",");
+		if (tok == NULL || *tok == '\0')
+			continue;
+		if (strncmp(tok, "domain=", 7) == 0) {
+			domain = (uint32_t)strtoul(tok + 7, &endp, 0);
+			if (*endp != '\0') return (-1);
+			filter |= 0x02; /* AMDIOMMU_FILTER_DOMAIN */
+		} else if (strncmp(tok, "pasid=", 6) == 0) {
+			pasid = (uint32_t)strtoul(tok + 6, &endp, 0);
+			if (*endp != '\0') return (-1);
+			if (pasid > 0xFFFFF) return (-1); /* PASID is 20-bit */
+			filter |= 0x01; /* AMDIOMMU_FILTER_PASID */
+		} else if (strncmp(tok, "devid=", 6) == 0) {
+			devid = (uint32_t)strtoul(tok + 6, &endp, 0);
+			if (*endp != '\0') return (-1);
+			filter |= 0x04; /* AMDIOMMU_FILTER_DEVID */
+		} else {
+			return (-1);	/* unknown qualifier */
+		}
+	}
+
+	pmc_config->pm_caps |= PMC_CAP_READ | PMC_CAP_WRITE;
+	if (PMC_IS_SYSTEM_MODE(pmc_config->pm_mode))
+		pmc_config->pm_caps |= PMC_CAP_SYSWIDE;
+	if (filter & 0x02) /* AMDIOMMU_FILTER_DOMAIN */
+		pmc_config->pm_caps |= PMC_CAP_DOMWIDE;
+	pmc_config->pm_md.pm_amdiommu.pm_amdiommu_filter = filter;
+	pmc_config->pm_md.pm_amdiommu.pm_amdiommu_pasid  = (uint16_t)pasid;
+	pmc_config->pm_md.pm_amdiommu.pm_amdiommu_domain = (uint16_t)domain;
+	pmc_config->pm_md.pm_amdiommu.pm_amdiommu_devid  = (uint16_t)devid;
+	return (0);
+}
 #endif
 
 static struct pmc_event_alias generic_aliases[] = {
@@ -1471,6 +1537,12 @@ pmc_event_names_of_class(enum pmc_class cl, const char ***eventnames,
 		ev = ibs_event_table;
 		count = PMC_EVENT_TABLE_SIZE(ibs);
 		break;
+#if defined(__i386__) || defined(__amd64__)
+	case PMC_CLASS_AMDIOMMU:
+		ev = amdiommu_event_table;
+		count = PMC_EVENT_TABLE_SIZE(amdiommu);
+		break;
+#endif
 	case PMC_CLASS_ARMV7:
 		switch (cpu_info.pm_cputype) {
 		default:
@@ -1681,6 +1753,10 @@ pmc_init(void)
 
 		case PMC_CLASS_IBS:
 			pmc_class_table[n++] = &ibs_class_table_descr;
+			break;
+
+		case PMC_CLASS_AMDIOMMU:
+			pmc_class_table[n++] = &amdiommu_class_table_descr;
 			break;
 #endif
 
@@ -1950,6 +2026,9 @@ _pmc_name_of_event(enum pmc_event pe, enum pmc_cputype cpu)
 	} else if (pe >= PMC_EV_RAPL_FIRST && pe <= PMC_EV_RAPL_LAST) {
 		ev = rapl_event_table;
 		evfence = rapl_event_table + PMC_EVENT_TABLE_SIZE(rapl);
+	} else if (pe >= PMC_EV_AMDIOMMU_FIRST && pe <= PMC_EV_AMDIOMMU_LAST) {
+		ev = amdiommu_event_table;
+		evfence = amdiommu_event_table + PMC_EVENT_TABLE_SIZE(amdiommu);
 	} else if ((int)pe >= PMC_EV_SOFT_FIRST && (int)pe <= PMC_EV_SOFT_LAST) {
 		ev = soft_event_table;
 		evfence = soft_event_table + soft_event_info.pm_nevent;
