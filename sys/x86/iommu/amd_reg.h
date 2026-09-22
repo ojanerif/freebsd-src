@@ -129,6 +129,56 @@
 #define	AMDIOMMU_PPRLOG_EAI	0x2088
 #define	AMDIOMMU_PPRLOGB_AUR	0x2090
 
+/* Performance counter configuration (PCSup=1 required, 512 KB MMIO) */
+#define	AMDIOMMU_PC_COUNTER_CFG	0x4000	/* Counter Configuration Register */
+#define	AMDIOMMU_PC_CFG_NBANKS_SHIFT	12	/* NCounterBanks[5:0] */
+#define	AMDIOMMU_PC_CFG_NBANKS_MASK	0x3full
+#define	AMDIOMMU_PC_CFG_NCOUNTERS_SHIFT	7	/* NCounter[3:0] */
+#define	AMDIOMMU_PC_CFG_NCOUNTERS_MASK	0xfull
+
+/*
+ * Bank-lock registers.  Bit N locks the corresponding match register in
+ * bank N: when set, writes are silently ignored and only reads work.
+ * Software must check these before programming the filter registers.
+ */
+#define	AMDIOMMU_PC_PASID_BANKLOCK	0x4008
+#define	AMDIOMMU_PC_DOMAIN_BANKLOCK	0x4010
+#define	AMDIOMMU_PC_DEVID_BANKLOCK	0x4018
+
+/*
+ * Counter MMIO address decode (spec Figure 83 / Table 81):
+ *   bit 18     must be 1        (AMDIOMMU_PC_ADDR_FIXED)
+ *   bits 17:12 BankNum          (AMDIOMMU_PC_BANK_SHIFT)
+ *   bits 11:8  CounterNum       (AMDIOMMU_PC_CNTR_SHIFT)
+ *   bit 7      reserved, must be zero
+ *   bits 6:0   Fxn (bits 2:0 must be zero)
+ */
+#define	AMDIOMMU_PC_ADDR_FIXED	0x40u	/* becomes bit 18 after shift */
+#define	AMDIOMMU_PC_BANK_SHIFT	12
+#define	AMDIOMMU_PC_CNTR_SHIFT	8
+
+/* Per-counter MMIO function offsets within each bank/counter cell */
+#define	AMDIOMMU_PC_FXN_COUNTER	0x00	/* ICounter (48-bit, wrap-around) */
+#define	AMDIOMMU_PC_FXN_SRC	0x08	/* CSource, CAC, CountUnits */
+#define	AMDIOMMU_PC_FXN_PASID	0x10	/* PASID Match Register */
+#define	AMDIOMMU_PC_FXN_DOMAIN	0x18	/* Domain Match Register */
+#define	AMDIOMMU_PC_FXN_DEVID	0x20	/* DeviceID Match Register */
+#define	AMDIOMMU_PC_FXN_REPORT	0x28	/* Counter Report Register */
+
+/* Counter Source Register fields (Fxn=AMDIOMMU_PC_FXN_SRC) */
+#define	AMDIOMMU_PC_SRC_CSOURCE_MASK	0xffull	/* CSource[7:0] */
+#define	AMDIOMMU_PC_SRC_COUNTUNITS	(1ULL << 30)	/* 0=events, 1=clocks */
+#define	AMDIOMMU_PC_SRC_CAC		(1ULL << 31)	/* 0=arch, 1=impl-def */
+
+/*
+ * Counter value mask.  The spec register diagram (§3.4.22.2 Figure) shows
+ * ICounter[47:0] (48-bit); the spec prose line 20359 incorrectly reads
+ * "47:28 ICounter".  The diagram, the Reserved row, and the Linux driver
+ * all treat the field as 47:0.  Mask accordingly; verify on real silicon
+ * if errata updates the width.
+ */
+#define	AMDIOMMU_PC_COUNTER_MASK	((1ULL << 48) - 1)
+
 /*
  * IOMMU Control Register AMDIOMMU_CTRL fields
  */

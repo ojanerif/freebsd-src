@@ -72,12 +72,20 @@ struct pmc_mdep;
  * UCF		Intel Uncore fixed-function PMCs.
  */
 
+struct pmc_md_amdiommu_op_pmcallocate {
+	uint8_t			pm_amdiommu_filter;	/* AMDIOMMU_FILTER_* */
+	uint16_t		pm_amdiommu_pasid;
+	uint16_t		pm_amdiommu_domain;
+	uint16_t		pm_amdiommu_devid;
+};
+
 union pmc_md_op_pmcallocate  {
 	struct pmc_md_amd_op_pmcallocate	pm_amd;
 	struct pmc_md_ibs_op_pmcallocate	pm_ibs;
 	struct pmc_md_iap_op_pmcallocate	pm_iap;
 	struct pmc_md_ucf_op_pmcallocate	pm_ucf;
 	struct pmc_md_ucp_op_pmcallocate	pm_ucp;
+	struct pmc_md_amdiommu_op_pmcallocate	pm_amdiommu;
 	uint64_t				__pad[4];
 };
 
@@ -87,6 +95,14 @@ union pmc_md_op_pmcallocate  {
 
 #ifdef	_KERNEL
 
+struct pmc_md_amdiommu_pmc {
+	uint8_t			pm_amdiommu_csource;	/* CSource (1-based event ordinal) */
+	uint8_t			pm_amdiommu_filter;	/* AMDIOMMU_FILTER_* enable bits */
+	uint16_t		pm_amdiommu_pasid;	/* PASID match (0 = all) */
+	uint16_t		pm_amdiommu_domain;	/* Domain ID match (0 = all) */
+	uint16_t		pm_amdiommu_devid;	/* DeviceID match (0 = all) */
+};
+
 union pmc_md_pmc {
 	struct pmc_md_amd_pmc	pm_amd;
 	struct pmc_md_ibs_pmc	pm_ibs;
@@ -94,6 +110,7 @@ union pmc_md_pmc {
 	struct pmc_md_iap_pmc	pm_iap;
 	struct pmc_md_ucf_pmc	pm_ucf;
 	struct pmc_md_ucp_pmc	pm_ucp;
+	struct pmc_md_amdiommu_pmc pm_amdiommu;
 };
 
 #define	PMC_TRAPFRAME_TO_PC(TF)	((TF)->tf_rip)
