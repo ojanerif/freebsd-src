@@ -1,0 +1,273 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2026 Advanced Micro Devices, Inc.
+ */
+
+/*
+ * Regression test for the IBS NMI raced by a direct control MSR write.
+ *
+ * With hwpmc loaded every IBS sample raises an NMI, and pmc_ibs_intr()
+ * claims it only when the Valid bit of the IBS control MSR is set.  Writing
+ * the control MSR through cpuctl(4) can clear that bit after the NMI was
+ * raised but before the handler reads the MSR.  Without the fix the NMI is
+ * unclaimed: kern.hwpmc.stats.intr_ignored grows and, with the default
+ * machdep.panic_on_nmi, the system panics.  The body therefore runs with
+ * machdep.panic_on_nmi set to 0 and checks that no NMI went unclaimed; on an
+ * EPYC 9654 an unfixed kernel leaves about one unclaimed NMI per 2000
+ * toggles, so the 20000 toggles below fail reliably.
+ *
+ * The case changes a global sysctl and the IBS op control MSR of CPU 0, and
+ * intr_ignored is system-wide, so the program is exclusive and needs a
+ * reserved environment: it is skipped if IBS sampling is already enabled on
+ * CPU 0.  The cleanup routine restores and verifies the state and fails the
+ * case if it cannot.
+ */
+
+#include <sys/param.h>
+#include <sys/cpuctl.h>
+#include <sys/cpuset.h>
+#include <sys/ioctl.h>
+#include <sys/sysctl.h>
+
+#include <err.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <atf-c.h>
+
+#define	MSR_IBS_FETCH_CTL	0xc0011030
+#define	MSR_IBS_OP_CTL		0xc0011033
+#define	FETCH_EN		(1ULL << 48)
+#define	OP_EN			(1ULL << 17)
+
+#define	TOGGLES		20000
+#define	MAXCNT		0x1000ULL	/* completes within the spin window */
+#define	MAX_SPIN	200000		/* TSC ticks */
+
+#define	STATE_FILE	"ibs_stray_state"
+
+struct stray_state {
+	int		panic_on_nmi;
+	uint64_t	op;
+};
+
+static int
+msr_rw(int fd, u_long cmd, uint32_t msr, uint64_t *val)
+{
+	cpuctl_msr_args_t args;
+
+	args.msr = msr;
+	args.data = *val;
+	if (ioctl(fd, cmd, &args) != 0)
+		return (errno);
+	if (cmd == CPUCTL_RDMSR)
+		*val = args.data;
+	return (0);
+}
+
+static uint64_t
+intr_ignored(void)
+{
+	uint64_t v;
+	size_t len;
+
+	len = sizeof(v);
+	ATF_REQUIRE_MSG(sysctlbyname("kern.hwpmc.stats.intr_ignored", &v, &len,
+	    NULL, 0) == 0, "kern.hwpmc.stats.intr_ignored: %s",
+	    strerror(errno));
+	return (v);
+}
+
+static void
+set_panic_on_nmi(int v)
+{
+	ATF_REQUIRE_MSG(sysctlbyname("machdep.panic_on_nmi", NULL, NULL, &v,
+	    sizeof(v)) == 0, "machdep.panic_on_nmi: %s", strerror(errno));
+}
+
+/*
+ * Check the CPU, that hwpmc is loaded and that no one else is sampling with
+ * IBS on CPU 0, then save the state the cleanup routine has to restore.
+ * Nothing is changed before this returns.
+ */
+static int
+setup(void)
+{
+	cpuctl_cpuid_args_t ext, vendor;
+	struct stray_state st;
+	uint64_t fetch, v;
+	size_t len;
+	FILE *f;
+	int error, fd;
+
+	fd = open("/dev/cpuctl0", O_RDWR);
+	if (fd < 0)
+		atf_tc_skip("/dev/cpuctl0: %s", strerror(errno));
+	vendor.level = 0;
+	ext.level = 0x80000001;
+	error = 0;
+	if (ioctl(fd, CPUCTL_CPUID, &vendor) != 0 ||
+	    ioctl(fd, CPUCTL_CPUID, &ext) != 0)
+		error = errno;
+	if (error != 0) {
+		close(fd);
+		atf_tc_fail("CPUCTL_CPUID: %s", strerror(error));
+	}
+	if (!(vendor.data[1] == 0x68747541 && vendor.data[3] == 0x69746e65 &&
+	    vendor.data[2] == 0x444d4163) &&		/* AuthenticAMD */
+	    !(vendor.data[1] == 0x6f677948 && vendor.data[3] == 0x6e65476e &&
+	    vendor.data[2] == 0x656e6975)) {		/* HygonGenuine */
+		close(fd);
+		atf_tc_skip("not an AMD or Hygon CPU");
+	}
+	if ((ext.data[2] & (1u << 10)) == 0) {
+		close(fd);
+		atf_tc_skip("CPU does not implement IBS");
+	}
+	len = sizeof(v);
+	if (sysctlbyname("kern.hwpmc.stats.intr_ignored", &v, &len,
+	    NULL, 0) != 0) {
+		close(fd);
+		atf_tc_skip("hwpmc is not loaded (IBS NMIs stay masked)");
+	}
+
+	len = sizeof(st.panic_on_nmi);
+	if (sysctlbyname("machdep.panic_on_nmi", &st.panic_on_nmi, &len,
+	    NULL, 0) != 0)
+		error = errno;
+	fetch = st.op = 0;
+	if (error == 0)
+		error = msr_rw(fd, CPUCTL_RDMSR, MSR_IBS_FETCH_CTL, &fetch);
+	if (error == 0)
+		error = msr_rw(fd, CPUCTL_RDMSR, MSR_IBS_OP_CTL, &st.op);
+	if (error != 0) {
+		close(fd);
+		atf_tc_fail("reading the initial state: %s", strerror(error));
+	}
+	if ((fetch & FETCH_EN) != 0 || (st.op & OP_EN) != 0) {
+		close(fd);
+		atf_tc_skip("IBS sampling is already enabled on CPU 0 "
+		    "(fetch 0x%jx, op 0x%jx); run in a reserved environment "
+		    "with no other IBS users", (uintmax_t)fetch,
+		    (uintmax_t)st.op);
+	}
+
+	f = fopen(STATE_FILE, "w");
+	if (f == NULL || fwrite(&st, sizeof(st), 1, f) != 1 ||
+	    fclose(f) != 0) {
+		close(fd);
+		atf_tc_fail("cannot save the state to %s", STATE_FILE);
+	}
+	return (fd);
+}
+
+ATF_TC_WITH_CLEANUP(raw_op_toggle_claimed);
+ATF_TC_HEAD(raw_op_toggle_claimed, tc)
+{
+	atf_tc_set_md_var(tc, "descr",
+	    "Toggling IBS op through cpuctl leaves no unclaimed NMI");
+}
+
+ATF_TC_BODY(raw_op_toggle_claimed, tc)
+{
+	cpuset_t set;
+	uint64_t before, deadline, val;
+	int fd, i;
+
+	CPU_ZERO(&set);
+	CPU_SET(0, &set);
+	ATF_REQUIRE(cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1,
+	    sizeof(set), &set) == 0);
+	fd = setup();
+	set_panic_on_nmi(0);
+
+	srandom((unsigned)__builtin_ia32_rdtsc());
+	before = intr_ignored();
+	for (i = 0; i < TOGGLES; i++) {
+		val = OP_EN | MAXCNT;
+		ATF_REQUIRE_EQ(msr_rw(fd, CPUCTL_WRMSR, MSR_IBS_OP_CTL, &val),
+		    0);
+		/* Let the disabling write land anywhere in the period. */
+		deadline = __builtin_ia32_rdtsc() +
+		    (uint64_t)(random() % (MAX_SPIN + 1));
+		while (__builtin_ia32_rdtsc() < deadline)
+			;
+		val = 0;
+		ATF_REQUIRE_EQ(msr_rw(fd, CPUCTL_WRMSR, MSR_IBS_OP_CTL, &val),
+		    0);
+	}
+	close(fd);
+
+	ATF_CHECK_MSG(intr_ignored() == before,
+	    "%ju IBS NMIs went unclaimed after %d toggles through cpuctl",
+	    (uintmax_t)(intr_ignored() - before), TOGGLES);
+}
+
+ATF_TC_CLEANUP(raw_op_toggle_claimed, tc)
+{
+	struct stray_state st;
+	uint64_t val;
+	int bad, fd, i, v;
+	size_t len;
+	FILE *f;
+
+	f = fopen(STATE_FILE, "r");
+	if (f == NULL)
+		return;		/* skipped before anything was changed */
+	if (fread(&st, sizeof(st), 1, f) != 1) {
+		fclose(f);
+		errx(EXIT_FAILURE, "cannot read the saved state");
+	}
+	fclose(f);
+
+	bad = 0;
+	fd = open("/dev/cpuctl0", O_RDWR);
+	if (fd < 0) {
+		warn("/dev/cpuctl0");
+		bad++;
+	} else {
+		/* The saved control had sampling disabled. */
+		for (i = 0; i < 3; i++) {
+			val = st.op;
+			if (msr_rw(fd, CPUCTL_WRMSR, MSR_IBS_OP_CTL,
+			    &val) == 0 &&
+			    msr_rw(fd, CPUCTL_RDMSR, MSR_IBS_OP_CTL,
+			    &val) == 0 && val == st.op)
+				break;
+		}
+		if (i == 3) {
+			warnx("cannot restore the IBS op control of CPU 0");
+			bad++;
+		}
+		close(fd);
+	}
+	for (i = 0; i < 3; i++) {
+		len = sizeof(v);
+		if (sysctlbyname("machdep.panic_on_nmi", NULL, NULL,
+		    &st.panic_on_nmi, sizeof(st.panic_on_nmi)) == 0 &&
+		    sysctlbyname("machdep.panic_on_nmi", &v, &len, NULL,
+		    0) == 0 && v == st.panic_on_nmi)
+			break;
+	}
+	if (i == 3) {
+		warnx("cannot restore machdep.panic_on_nmi to %d",
+		    st.panic_on_nmi);
+		bad++;
+	}
+	if (bad != 0)
+		errx(EXIT_FAILURE, "state not restored");
+}
+
+ATF_TP_ADD_TCS(tp)
+{
+	ATF_TP_ADD_TC(tp, raw_op_toggle_claimed);
+
+	return (atf_no_error());
+}
