@@ -156,6 +156,8 @@ void	nmi_call_kdb_smp(u_int type, struct trapframe *frame);
 void	nmi_register_handler(int (*handler)(struct trapframe *));
 void	nmi_remove_handler(int (*handler)(struct trapframe *));
 void	nmi_handle_intr(struct trapframe *frame);
+void	ibs_ctl_raw_write(void);
+bool	ibs_ctl_raw_write_nmi(void);
 void	pagecopy(void *from, void *to);
 void	printcpuinfo(void);
 int	pti_get_default(void);

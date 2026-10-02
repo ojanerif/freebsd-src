@@ -1073,6 +1073,39 @@ nmi_remove_handler(int (*handler)(struct trapframe *))
 	    __func__, handler);
 }
 
+/*
+ * IBS control MSRs written directly, through cpuctl(4), bypass the IBS stop
+ * protocol of hwpmc(4).  Such a write can clear the Valid bit of a sample
+ * whose NMI is already raised; the NMI then finds no valid sample, nobody
+ * claims it, and with machdep.panic_on_nmi set that is a panic.  cpuctl
+ * records the time of every such write on the CPU it writes, and the IBS NMI
+ * handler claims one otherwise unclaimed NMI that follows it closely.
+ */
+#define	IBS_RAW_WRITE_WINDOW_US	100
+
+DPCPU_DEFINE_STATIC(uint64_t, ibs_ctl_raw_write_tsc);
+
+void
+ibs_ctl_raw_write(void)
+{
+	DPCPU_SET(ibs_ctl_raw_write_tsc, rdtsc());
+}
+
+bool
+ibs_ctl_raw_write_nmi(void)
+{
+	uint64_t t, window;
+
+	t = DPCPU_GET(ibs_ctl_raw_write_tsc);
+	if (t == 0)
+		return (false);
+	window = tsc_freq / (1000000 / IBS_RAW_WRITE_WINDOW_US);
+	if (window == 0 || rdtsc() - t > window)
+		return (false);
+	DPCPU_SET(ibs_ctl_raw_write_tsc, 0);
+	return (true);
+}
+
 void
 nmi_handle_intr(struct trapframe *frame)
 {

@@ -725,6 +725,9 @@ pmc_ibs_intr(struct trapframe *tf)
 		if (atomic_load_int(&pac->pc_status) == IBS_CPU_STOPPING) {
 			return (1);
 		}
+		/* IBS stopped through cpuctl(4) while its NMI was in flight. */
+		if (ibs_ctl_raw_write_nmi())
+			return (1);
 	}
 
 
