@@ -1294,6 +1294,10 @@
 #define	MSR_LS_CFG	0xc0011020
 #define	MSR_IC_CFG	0xc0011021	/* Instruction Cache Configuration */
 #define	MSR_DE_CFG	0xc0011029	/* Decode Configuration */
+#define	MSR_AMD_IBS_FETCH_CTL 0xc0011030 /* IBS fetch control */
+#define	MSR_AMD_IBS_OP_CTL 0xc0011033	/* IBS op control */
+#define	MSR_AMD_IBS_OP_CTL2 0xc001103e	/* IBS op control 2 (disable) */
+#define	MSR_AMD_IBS_FETCH_CTL2 0xc001103f /* IBS fetch control 2 (disable) */
 
 /* MSR_AMDK8_IPM */
 #define	AMDK8_SMIONCMPHALT	(1ULL << 27)
